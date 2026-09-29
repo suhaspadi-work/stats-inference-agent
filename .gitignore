@@ -1,0 +1,27 @@
+# Environment variables / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Conda
+.conda/
+
+# Data files
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.xlsx
+data/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
