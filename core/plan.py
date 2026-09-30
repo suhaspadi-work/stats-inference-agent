@@ -69,6 +69,24 @@ class MethodDecision:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: int = 1
 
+@dataclass(frozen=True)
+class ClassificationDecision:
+    """
+    The record of classifying a request BEFORE any AnalysisPlan is drafted.
+    Same audit-trail shape as MethodDecision: what was chosen, what else was
+    considered, and the evidence/confidence behind it. A low-confidence
+    classification is what triggers a human-clarification interrupt rather
+    than a silent guess (see Phase 6 in the blueprint).
+    """
+    question_type: QuestionType
+    causal_status: CausalStatus
+    rationale: str
+    alternatives: tuple[AlternativeConsidered, ...]
+    confidence: float  # 0.0-1.0; below a configured threshold triggers a clarification interrupt
+    evidence: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    schema_version: int = 1
 
 @dataclass(frozen=True)
 class AnalysisPlan:
@@ -94,6 +112,7 @@ class AnalysisPlan:
 
     # Filled in progressively — None/empty is legitimate at DRAFT/REFINED
     candidate_predictors: Optional[tuple[str, ...]] = None
+    classification_decision: Optional["ClassificationDecision"] = None
     method_decisions: tuple[MethodDecision, ...] = field(default_factory=tuple)
     alpha: float = 0.05
     multiple_testing_policy: Optional[str] = None
@@ -114,6 +133,34 @@ class AnalysisPlan:
     @property
     def latest_decision(self) -> Optional[MethodDecision]:
         return self.method_decisions[-1] if self.method_decisions else None
+
+    @classmethod
+    def from_classification(
+        cls,
+        request_text: str,
+        session_id: str,
+        classification: "ClassificationDecision",
+        outcome_name: str,
+        outcome_type: OutcomeType,
+        unit_of_analysis: str,
+        data_sources: tuple[str, ...],
+    ) -> "AnalysisPlan":
+        """
+        Build a fresh, DRAFT AnalysisPlan whose question_type/causal_status
+        are traceable back to a real ClassificationDecision, not just passed
+        in as bare values with no record of why they were chosen.
+        """
+        return cls(
+            request_text=request_text,
+            session_id=session_id,
+            question_type=classification.question_type,
+            causal_status=classification.causal_status,
+            outcome_name=outcome_name,
+            outcome_type=outcome_type,
+            unit_of_analysis=unit_of_analysis,
+            data_sources=data_sources,
+            classification_decision=classification,
+        )
 
     def _replace(self, **changes) -> "AnalysisPlan":
         return replace(self, **changes)
