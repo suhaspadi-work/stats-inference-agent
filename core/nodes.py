@@ -10,6 +10,8 @@ from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan
 from core.testing import run_two_group_test
+from core.report import generate_report
+from core.report import generate_report, check_for_causal_language
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -157,3 +159,18 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             },
         }
     return execute_node
+
+def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
+    """
+    Injectable report_fn, same testing pattern as classify_node and
+    draft_plan_node. The causal-language guard is enforced HERE, at the
+    node level -- not only inside generate_report -- so it applies to
+    whatever report_fn produces, whether that's the real model call or a
+    test stub standing in for it.
+    """
+    def report_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        report_text = report_fn(plan, state["test_result"])
+        check_for_causal_language(report_text, plan)
+        return {"report": report_text}
+    return report_node

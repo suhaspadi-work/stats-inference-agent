@@ -1,0 +1,106 @@
+import pytest
+from langgraph.graph import StateGraph, START, END
+
+from core.agent_state import AgentState
+from core.nodes import make_report_node
+from core.report import check_for_causal_language, CausalLanguageViolation
+from core.plan import AnalysisPlan, QuestionType, CausalStatus, OutcomeType
+
+
+def make_observational_plan():
+    return AnalysisPlan(
+        request_text="Did West spend more than East?", session_id="session-abc",
+        question_type=QuestionType.TWO_GROUP_COMPARISON, causal_status=CausalStatus.OBSERVATIONAL,
+        outcome_name="total_spend", outcome_type=OutcomeType.CONTINUOUS,
+        unit_of_analysis="customer", data_sources=("customers@v1",),
+        candidate_predictors=("region",),
+    )
+
+
+def fake_test_result():
+    return {
+        "method": "welch_t_test", "statistic": 2.5, "p_value": 0.012,
+        "effect_size": 0.35, "confidence_interval": (1.2, 8.4),
+        "group_a_n": 200, "group_b_n": 200, "group_a_mean": 50.1, "group_b_mean": 55.3,
+    }
+
+
+def test_guard_catches_causal_language_directly():
+    plan = make_observational_plan()
+    with pytest.raises(CausalLanguageViolation):
+        check_for_causal_language("Being in the West region causes higher spending.", plan)
+
+
+def test_guard_allows_association_language():
+    plan = make_observational_plan()
+    check_for_causal_language("Being in the West region is associated with higher spending.", plan)
+    # No exception -- this is the success case
+
+
+def test_report_node_blocks_a_report_that_violates_the_guard():
+    plan = make_observational_plan()
+
+    def violating_report_fn(plan, test_result):
+        return "Living in the West region drives higher customer spending."
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node(report_fn=violating_report_fn))
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    with pytest.raises(CausalLanguageViolation):
+        app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+
+
+def test_report_node_passes_through_a_compliant_report():
+    plan = make_observational_plan()
+
+    def compliant_report_fn(plan, test_result):
+        return "Customers in the West region show higher average spending, associated with region."
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node(report_fn=compliant_report_fn))
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    assert "associated" in result["report"]
+
+
+@pytest.mark.live
+def test_live_report_node_on_observational_data_avoids_causal_language():
+    plan = make_observational_plan()
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node())  # real generate_report
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    # If this ever fails, generate_report's own guard would have already
+    # raised -- this additionally confirms the happy path produces real text
+    assert len(result["report"]) > 0
+    assert "55.3" in result["report"] or "50.1" in result["report"] or "0.012" in result["report"]
+
+def test_guard_allows_correct_negated_causal_disclaimer():
+    """
+    The exact case the live test surfaced: a model correctly writing
+    'not that it causes the difference' should NOT be flagged -- it's
+    disclaiming causation, not asserting it.
+    """
+    plan = make_observational_plan()
+    check_for_causal_language(
+        "Region is associated with total spend; we cannot say that it causes the difference.",
+        plan,
+    )
+    # No exception -- this is the success case
+
+
+def test_guard_still_catches_unhedged_causal_claims():
+    """Confirms the negation-window fix didn't accidentally weaken the guard."""
+    plan = make_observational_plan()
+    with pytest.raises(CausalLanguageViolation):
+        check_for_causal_language("Living in the West region causes higher spending.", plan)
