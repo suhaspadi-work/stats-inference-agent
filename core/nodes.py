@@ -5,6 +5,8 @@ from langgraph.types import interrupt
 from core.agent_state import AgentState
 from core.classifier import classify_request
 from core.plan import ClassificationDecision
+from core.dataset import DatasetStore
+from core.ingestion import profile_dataset
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -42,3 +44,14 @@ def classify_node(
         decision = classify_fn(combined_request)
 
     return {"classification": decision}
+def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Returns a node function closed over the store. The store is genuine
+    infrastructure (a filesystem/cloud connection), not data that belongs
+    in AgentState -- this keeps that distinction clean rather than smuggling
+    the store through the state dict.
+    """
+    def profile_node(state: AgentState) -> dict:
+        view = profile_dataset(state["dataset"], store=store)
+        return {"profile": view}
+    return profile_node
