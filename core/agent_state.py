@@ -4,6 +4,7 @@ from typing import Optional, TypedDict
 from core.dataset import Dataset
 from core.model_safe_view import ModelSafeView
 from core.plan import AnalysisPlan
+from core.plan import AnalysisPlan, ClassificationDecision
 
 
 class AgentState(TypedDict, total=False):
@@ -20,6 +21,7 @@ class AgentState(TypedDict, total=False):
     """
     request_text: str
     session_id: str
+    classification: ClassificationDecision  # set by the classify node
 
     dataset: Dataset               # set once, by intake -- before this node, it doesn't exist
     profile: ModelSafeView         # set by the profile node
