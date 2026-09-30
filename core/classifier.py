@@ -3,6 +3,9 @@ from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
 
 from core.plan import ClassificationDecision, AlternativeConsidered, QuestionType, CausalStatus
+from core.model_safe_view import ModelSafeView
+from core.plan import OutcomeType
+
 
 
 class _AlternativeOut(BaseModel):
@@ -80,3 +83,55 @@ def classify_request(request_text: str, model_name: str = "openai/gpt-oss-120b")
         confidence=result.confidence,
         evidence={},  # the classifier's "evidence" is the rationale itself; no numeric evidence at this stage
     )
+class _DraftPlanOut(BaseModel):
+    outcome_name: str = Field(description="The column name to use as the outcome/dependent variable")
+    outcome_type: OutcomeType
+    unit_of_analysis: str = Field(description="What one row represents, e.g. 'customer', 'transaction'")
+    candidate_predictors: list[str] = Field(
+        description="Column names that are plausible predictors/grouping variables for this question"
+    )
+    rationale: str = Field(description="Why these specific columns fit this request")
+
+
+def draft_plan_fields(request_text: str, profile: ModelSafeView, model_name: str = "openai/gpt-oss-120b") -> _DraftPlanOut:
+    """
+    Ask the model to pick an outcome column, its type, the unit of analysis,
+    and candidate predictors -- using ONLY the column names/types/patterns
+    from `profile` (never raw data, per the privacy boundary). The caller is
+    responsible for validating the chosen names actually exist in the
+    dataset before trusting this output (see validate_draft_plan_fields).
+    """
+    model = init_chat_model(model_name, model_provider="groq")
+    structured_model = model.with_structured_output(_DraftPlanOut)
+
+    column_summary = "\n".join(
+        f"- {c.name} (type: {c.dtype}, missing: {c.missing_pct:.1%}"
+        + (f", {c.detected_format}" if c.detected_format else "")
+        + ")"
+        for c in profile.columns
+    )
+    system_prompt = (
+        "You are planning a statistical analysis. Given a request and the dataset's "
+        "columns (names, types, and detected patterns only -- you do not see actual values), "
+        "choose the outcome column, its type, the unit of analysis, and candidate predictor "
+        "columns. You MUST choose outcome_name and every candidate_predictor from the exact "
+        "column names listed below -- never invent a column name.\n\n"
+        f"Available columns:\n{column_summary}"
+    )
+
+    return structured_model.invoke([
+        ("system", system_prompt),
+        ("human", request_text),
+    ])
+
+
+def validate_draft_plan_fields(fields: _DraftPlanOut, profile: ModelSafeView) -> None:
+    """
+    Structural guard against hallucinated column names -- raises if the
+    model picked a column that doesn't actually exist in the profile.
+    """
+    valid_names = {c.name for c in profile.columns}
+    chosen = [fields.outcome_name, *fields.candidate_predictors]
+    invalid = [name for name in chosen if name not in valid_names]
+    if invalid:
+        raise ValueError(f"Model chose column(s) not present in the dataset: {invalid}")

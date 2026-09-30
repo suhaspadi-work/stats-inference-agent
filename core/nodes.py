@@ -7,6 +7,8 @@ from core.classifier import classify_request
 from core.plan import ClassificationDecision
 from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
+from core.classifier import draft_plan_fields, validate_draft_plan_fields
+from core.plan import AnalysisPlan
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -44,6 +46,7 @@ def classify_node(
         decision = classify_fn(combined_request)
 
     return {"classification": decision}
+
 def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     Returns a node function closed over the store. The store is genuine
@@ -55,3 +58,22 @@ def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         view = profile_dataset(state["dataset"], store=store)
         return {"profile": view}
     return profile_node
+
+def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
+    """Injectable draft_fn, same pattern as classify_node, for deterministic testing."""
+    def draft_plan_node(state: AgentState) -> dict:
+        fields = draft_fn(state["request_text"], state["profile"])
+        validate_draft_plan_fields(fields, state["profile"])
+
+        plan = AnalysisPlan.from_classification(
+            request_text=state["request_text"],
+            session_id=state["session_id"],
+            classification=state["classification"],
+            outcome_name=fields.outcome_name,
+            outcome_type=fields.outcome_type,
+            unit_of_analysis=fields.unit_of_analysis,
+            data_sources=(state["dataset"].handle,),
+        )
+        plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
+        return {"plan": plan}
+    return draft_plan_node
