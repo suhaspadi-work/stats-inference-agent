@@ -77,3 +77,40 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
         plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
         return {"plan": plan}
     return draft_plan_node
+
+def freeze_node(state: AgentState) -> dict:
+    """
+    The single most consequential interrupt in the system: nothing runs a
+    hypothesis test until a human has seen the actual plan and approved it.
+    This is freeze() from Phase 1 finally being gated by a real human
+    decision, not just a method call anyone could skip.
+    """
+    plan = state["plan"]
+
+    decision = interrupt({
+        "type": "plan_approval",
+        "question": "Review this analysis plan before it is frozen and executed.",
+        "request_text": plan.request_text,
+        "question_type": plan.question_type.value,
+        "causal_status": plan.causal_status.value,
+        "outcome_name": plan.outcome_name,
+        "outcome_type": plan.outcome_type.value,
+        "candidate_predictors": list(plan.candidate_predictors or ()),
+        "classification_rationale": plan.classification_decision.rationale if plan.classification_decision else None,
+        "allowed_decisions": ["approve", "edit", "reject"],
+    })
+
+    action = decision.get("action")
+
+    if action == "reject":
+        # A rejected plan is never frozen -- the graph should route to a
+        # clean stop, not silently proceed. We signal this the same way
+        # classify_node signals "needs clarification": a distinct state key.
+        return {"plan": plan, "clarification_needed": f"Plan rejected: {decision.get('reason', 'no reason given')}"}
+
+    if action == "edit":
+        new_predictors = tuple(decision.get("candidate_predictors", plan.candidate_predictors or ()))
+        plan = plan.refine(candidate_predictors=new_predictors)
+
+    frozen_plan = plan.freeze()
+    return {"plan": frozen_plan}
