@@ -68,7 +68,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Core data structures (Dataset, Operation, AnalysisPlan schemas, ModelSafeView privacy boundary, EventLog persistence) — 20 automated pytest tests, all passing
 - [x] Ingestion and profiling tools (load_dataset, profile_dataset — 30 automated tests, all passing)
 - [x] Synthetic data generator with planted ground truth (A/A and planted-effect scenarios — 37 automated tests total, all passing)
-- [ ] Simple-tier wrangling operations
+- [x] Simple-tier wrangling operations (cast, rename, filter, dedupe — approval-gated, rationale-tracked, 48 automated tests total, all passing)
 - [ ] Hypothesis testing tools
 - [ ] Plan classifier and simple-tier agent loop
 - [ ] Human-in-the-loop and autonomy dial
