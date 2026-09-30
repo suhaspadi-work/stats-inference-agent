@@ -9,7 +9,7 @@ from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan
-from core.testing import run_two_group_test
+from core.testing import run_two_group_test, select_two_group_method
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
 
@@ -80,6 +80,29 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
         plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
         return {"plan": plan}
     return draft_plan_node
+
+def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Selects the test method and records the MethodDecision on the plan
+    BEFORE freeze -- this is what makes the human-approval screen able to
+    show which test will run and why, rather than the method being decided
+    silently during execution after approval has already happened.
+    """
+    def select_method_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        predictors = plan.candidate_predictors or ()
+        if len(predictors) != 1:
+            raise ValueError(
+                f"select_two_group_method requires exactly one grouping predictor; "
+                f"got {len(predictors)}: {predictors}."
+            )
+        choice = select_two_group_method(
+            dataset=state["dataset"], store=store,
+            outcome_col=plan.outcome_name, group_col=predictors[0],
+        )
+        updated_plan = plan.record_method_decision(choice.decision)
+        return {"plan": updated_plan}
+    return select_method_node
 
 def freeze_node(state: AgentState) -> dict:
     """

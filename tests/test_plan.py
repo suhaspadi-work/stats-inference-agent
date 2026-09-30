@@ -82,3 +82,23 @@ def test_cannot_freeze_causal_claims_on_observational_data(draft_plan):
     bad_plan = draft_plan.refine(allowed_claims="causal").record_method_decision(decision)
     with pytest.raises(ValueError):
         bad_plan.freeze()
+
+def test_record_method_decision_tolerates_list_from_checkpoint_deserialization(draft_plan):
+    """
+    Regression test for a real bug found via the full end-to-end graph test:
+    LangGraph's checkpointer returns lists where tuples were originally set,
+    after a pause/resume across an interrupt. record_method_decision must
+    not assume method_decisions is still a tuple by the time it's called.
+    """
+    from dataclasses import replace
+    decision1 = MethodDecision(stage="test_selection", chosen_method="welch_t_test", rationale="x", alternatives=())
+    plan_with_one = draft_plan.record_method_decision(decision1)
+
+    # Simulate what a checkpoint round-trip does: tuple becomes list
+    plan_as_if_checkpointed = replace(plan_with_one, method_decisions=list(plan_with_one.method_decisions))
+
+    decision2 = MethodDecision(stage="test_selection", chosen_method="mann_whitney_u", rationale="y", alternatives=())
+    result = plan_as_if_checkpointed.record_method_decision(decision2)  # must not raise
+
+    assert len(result.method_decisions) == 2
+    assert result.primary_method == "mann_whitney_u"

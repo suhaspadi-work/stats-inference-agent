@@ -174,8 +174,14 @@ class AnalysisPlan:
         """
         Append a method decision — either the first choice for a stage, or a
         later one that supersedes an earlier decision after new evidence.
+
+        method_decisions is normalized to a tuple before appending: if this
+        plan round-tripped through a LangGraph checkpoint (pause/resume
+        across an interrupt), JSON-based serialization returns lists where
+        tuples originally were -- this keeps the method robust regardless
+        of which form the plan arrives in.
         """
-        return self._replace(method_decisions=self.method_decisions + (decision,))
+        return self._replace(method_decisions=tuple(self.method_decisions) + (decision,))
 
     def freeze(self) -> "AnalysisPlan":
         if self.primary_method is None:
@@ -188,7 +194,7 @@ class AnalysisPlan:
         if self.status != PlanStatus.FROZEN and self.status != PlanStatus.EXECUTED:
             raise ValueError("Deviations are only meaningful after a plan has been frozen.")
         new_deviation = Deviation(description=description, reason=reason)
-        return self._replace(deviations=self.deviations + (new_deviation,))
+        return self._replace(deviations=tuple(self.deviations) + (new_deviation,))
 
     def mark_executed(self) -> "AnalysisPlan":
         if self.status != PlanStatus.FROZEN:
