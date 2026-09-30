@@ -9,6 +9,7 @@ from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan
+from core.testing import run_two_group_test
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -114,3 +115,45 @@ def freeze_node(state: AgentState) -> dict:
 
     frozen_plan = plan.freeze()
     return {"plan": frozen_plan}
+def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Runs the actual hypothesis test -- the only node so far that produces a
+    real statistical result. Refuses to run unless the plan is FROZEN,
+    structurally enforcing the pre-registration discipline rather than
+    trusting the graph's edges alone to guarantee correct ordering.
+    """
+    def execute_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        if plan.status.value != "frozen":
+            raise ValueError(f"Cannot execute a plan that is not FROZEN (status: {plan.status.value}).")
+
+        predictors = plan.candidate_predictors or ()
+        if len(predictors) != 1:
+            raise ValueError(
+                f"run_two_group_test requires exactly one grouping predictor; "
+                f"got {len(predictors)}: {predictors}."
+            )
+        group_col = predictors[0]
+
+        result, method_decision = run_two_group_test(
+            dataset=state["dataset"], store=store,
+            outcome_col=plan.outcome_name, group_col=group_col, alpha=plan.alpha,
+        )
+
+        updated_plan = plan.record_method_decision(method_decision).mark_executed()
+
+        return {
+            "plan": updated_plan,
+            "test_result": {
+                "method": result.method,
+                "statistic": result.statistic,
+                "p_value": result.p_value,
+                "effect_size": result.effect_size,
+                "confidence_interval": result.confidence_interval,
+                "group_a_n": result.group_a_n,
+                "group_b_n": result.group_b_n,
+                "group_a_mean": result.group_a_mean,
+                "group_b_mean": result.group_b_mean,
+            },
+        }
+    return execute_node
