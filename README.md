@@ -69,7 +69,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Ingestion and profiling tools (load_dataset, profile_dataset — 30 automated tests, all passing)
 - [x] Synthetic data generator with planted ground truth (A/A and planted-effect scenarios — 37 automated tests total, all passing)
 - [x] Simple-tier wrangling operations (cast, rename, filter, dedupe — approval-gated, rationale-tracked, 48 automated tests total, all passing)
-- [ ] Hypothesis testing tools
+- [x] Hypothesis testing tools (two-group test with assumption-driven selection between t-test/Welch/Mann-Whitney, verified against direct scipy calls — 53 automated tests total, all passing)
 - [ ] Plan classifier and simple-tier agent loop
 - [ ] Human-in-the-loop and autonomy dial
 - [ ] Simple-tier evaluation
