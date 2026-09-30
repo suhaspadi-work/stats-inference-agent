@@ -3,7 +3,7 @@
 An agentic engineering project that performs statistical inference on user-provided datasets — descriptive analysis, hypothesis testing, A/B testing, and linear/logistic regression — with a hybrid tool/declarative-operation architecture designed for auditability and safety.
 
 ## Status
-🚧 In progress — currently at Phase 1 (core data structures) of the build.
+🚧 In progress — Phases 1-6 complete (foundation through full agent loop). Next: Phase 7 (approval/autonomy refinements), Phase 8 (simple-tier evaluation).
 
 ## Core design principle
 The model chooses and interprets; deterministic code computes. The LLM never performs arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
@@ -60,6 +60,11 @@ python test_connection.py
 \`\`\`
 Should print a response from the model, confirming your API key and dependencies are working.
 
+## Known limitations
+- **LangGraph checkpoint serialization coerces tuples to lists** across a pause/resume (interrupt) boundary, since the underlying format (JSON/msgpack) has no native tuple type. `AnalysisPlan`'s append methods are defensively written to tolerate either form.
+- **Values computed via numpy/scipy must be explicitly cast to plain Python types** before being placed into graph state — numpy scalar types (e.g. `numpy.float64`) are not serializable by LangGraph's checkpointer and will fail only when a checkpoint boundary is actually crossed, not on every run.
+- **Custom dataclass/Enum types used in graph state are not yet registered with LangGraph's serializer**, producing deprecation warnings on every checkpoint read. Works today; will need explicit registration in a future LangGraph version.
+
 ## Roadmap
 ## Roadmap
 - [x] Environment + git setup
@@ -70,7 +75,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Synthetic data generator with planted ground truth (A/A and planted-effect scenarios — 37 automated tests total, all passing)
 - [x] Simple-tier wrangling operations (cast, rename, filter, dedupe — approval-gated, rationale-tracked, 48 automated tests total, all passing)
 - [x] Hypothesis testing tools (two-group test with assumption-driven selection between t-test/Welch/Mann-Whitney, verified against direct scipy calls — 53 automated tests total, all passing)
-- [ ] Plan classifier and simple-tier agent loop
+- [x] Plan classifier and simple-tier agent loop (full LangGraph agent: classify → profile → draft_plan → select_method → freeze → execute → report, with both interrupt gates working — 88 automated tests, all passing, including one full live end-to-end run)
 - [ ] Human-in-the-loop and autonomy dial
 - [ ] Simple-tier evaluation
 - [ ] Medium-tier: EDA and multi-group tools
