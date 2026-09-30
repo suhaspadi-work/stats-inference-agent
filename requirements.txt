@@ -12,6 +12,7 @@ httpcore2==2.13.1
 httpx==0.28.1
 httpx2==2.13.1
 idna==3.20
+iniconfig==2.3.0
 interface_meta==2.0.1
 jsonpatch==1.33
 jsonpointer==3.1.1
@@ -32,8 +33,11 @@ ormsgpack==1.12.2
 packaging==26.3
 pandas==3.0.6
 patsy==1.0.3
+pluggy==1.6.0
 pydantic==2.13.5
 pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==9.1.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 PyYAML==6.0.3
