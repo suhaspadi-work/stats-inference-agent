@@ -66,7 +66,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Core dependencies installed
 - [x] Model connectivity verified (Groq / gpt-oss-120b via langchain-groq)
 - [x] Core data structures (Dataset, Operation, AnalysisPlan schemas, ModelSafeView privacy boundary, EventLog persistence) — 20 automated pytest tests, all passing
-- [ ] Ingestion and profiling tools
+- [x] Ingestion and profiling tools (load_dataset, profile_dataset — 30 automated tests, all passing)
 - [ ] Synthetic data generator with planted ground truth
 - [ ] Simple-tier wrangling operations
 - [ ] Hypothesis testing tools
