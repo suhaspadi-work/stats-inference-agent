@@ -25,3 +25,4 @@ data/
 # IDE
 .vscode/
 .idea/
+local_data/
