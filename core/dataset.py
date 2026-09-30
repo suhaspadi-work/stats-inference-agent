@@ -33,6 +33,7 @@ class Dataset:
     original_filename: Optional[str] = None  # what the user actually uploaded, v1 only
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    schema_version: int = 1
 
     @property
     def handle(self) -> str:
