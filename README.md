@@ -21,6 +21,7 @@ The model chooses and interprets; deterministic code computes. The LLM never per
 | Model visibility | Middle privacy tier by default — schema, types, value frequencies, format patterns; no raw rows |
 | Evaluation | Synthetic data with planted ground truth + public/real data for process and robustness |
 | Orchestration | LangGraph — explicit stages, plan-freeze checkpoints, approval interrupts |
+| Decision auditability | Every method selection and wrangling choice records a rationale, alternatives considered, and evidence — later changes link back (`supersedes`) to what they replaced and why |
 
 ## Tech stack
 - **Orchestration:** LangChain + LangGraph
@@ -60,10 +61,11 @@ python test_connection.py
 Should print a response from the model, confirming your API key and dependencies are working.
 
 ## Roadmap
+## Roadmap
 - [x] Environment + git setup
 - [x] Core dependencies installed
 - [x] Model connectivity verified (Groq / gpt-oss-120b via langchain-groq)
-- [ ] Core data structures (Dataset, Operation, AnalysisPlan schemas)
+- [x] Core data structures (Dataset, Operation, AnalysisPlan schemas, ModelSafeView privacy boundary, EventLog persistence) — 20 automated pytest tests, all passing
 - [ ] Ingestion and profiling tools
 - [ ] Synthetic data generator with planted ground truth
 - [ ] Simple-tier wrangling operations
