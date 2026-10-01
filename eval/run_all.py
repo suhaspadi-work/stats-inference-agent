@@ -10,10 +10,14 @@ Groq's rate limits. Once it finishes (or you want a progress check), run:
 
     python eval/summarize.py
 """
+from pathlib import Path
+from dotenv import load_dotenv
 from core.dataset import LocalDiskStore
 from eval.runner import run_eval_suite
 from eval.scenarios import ALL_SCENARIOS
 
+load_dotenv()
+
 if __name__ == "__main__":
-    store = LocalDiskStore(base_dir="eval_data")
+    store = LocalDiskStore(base_dir=Path("eval_data"))
     run_eval_suite(ALL_SCENARIOS, store)

@@ -66,7 +66,22 @@ Should print a response from the model, confirming your API key and dependencies
 - **Custom dataclass/Enum types used in graph state are not yet registered with LangGraph's serializer**, producing deprecation warnings on every checkpoint read. Works today; will need explicit registration in a future LangGraph version.
 - **Auto-approved wrangling operations (stakeholder mode) are not distinguished from human-approved ones in the Operation audit record itself** — both produce an identical APPROVED Operation. Full attribution of "who/what approved this" would require an additional field on Operation; left as a known gap rather than a silent one.
 
-## Roadmap
+## Evaluation results (Phase 8)
+
+A 26-scenario battery run against the full agent end-to-end (not individual components): 20 A/A trials (no real effect), 4 planted-effect trials of varying magnitude, and 2 messy-data trials (duplicates/missingness, auto-cleaned).
+
+| Category | Result |
+|---|---|
+| A/A false-positive rate | 1/20 = 5.0% (theoretical expectation: 5%) |
+| Effect-detection scenarios | 4/4 passed — planted effects correctly recovered across small/medium/large magnitudes |
+| Messy-data scenarios | 2/2 passed — correct statistical conclusions after real duplicates/missingness were detected and cleaned |
+| **Overall** | **26/26 passed** |
+
+Raw results: `eval/phase8_results.jsonl`. Run `python -m eval.run_all` to reproduce (resumable; takes 15-25 minutes given rate-limit pacing), then `python eval/summarize.py` for the aggregate report.
+
+One real bug was found and fixed via this evaluation run: `execute_filter` crashed when a `not_null`/`is_null` condition's params correctly omitted the irrelevant `value` key — a gap in the original Phase 4 implementation, only exposed once the model began generating its own filter proposals with realistically-shaped (and correctly minimal) parameters.
+
+
 ## Roadmap
 - [x] Environment + git setup
 - [x] Core dependencies installed
@@ -78,7 +93,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Hypothesis testing tools (two-group test with assumption-driven selection between t-test/Welch/Mann-Whitney, verified against direct scipy calls — 53 automated tests total, all passing)
 - [x] Plan classifier and simple-tier agent loop (full LangGraph agent: classify → profile → draft_plan → select_method → freeze → execute → report, with both interrupt gates working — 88 automated tests, all passing, including one full live end-to-end run)
 - [x] Human-in-the-loop and autonomy dial (plan-freeze approval, wrangling checklist interrupt, clarification gate, and a configurable analyst/stakeholder autonomy mode — 121 automated tests, all passing, including one full end-to-end proof with genuinely messy data and a deliberate rejection)
-- [ ] Simple-tier evaluation
+- [x] Simple-tier evaluation (26-scenario battery: 20 A/A trials, 4 effect-size scenarios, 2 messy-data scenarios — 5.0% A/A false-positive rate, 26/26 overall pass rate)
 - [ ] Medium-tier: EDA and multi-group tools
 - [ ] Linear regression tools
 - [ ] Multi-file data assembly (hard tier)
