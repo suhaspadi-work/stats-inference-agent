@@ -70,4 +70,4 @@ def test_full_agent_graph_end_to_end(dataset, store):
     # The report exists, uses the real numbers, and respects the causal guard
     assert len(final_result["report"]) > 0
     report_lower = final_result["report"].lower()
-    assert "associated" in report_lower or "correlat" in report_lower
+    assert "associat" in report_lower or "correlat" in report_lower  # matches "association"/"associated" either way

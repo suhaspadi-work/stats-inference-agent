@@ -5,7 +5,7 @@ from langchain.chat_models import init_chat_model
 from core.plan import ClassificationDecision, AlternativeConsidered, QuestionType, CausalStatus
 from core.model_safe_view import ModelSafeView
 from core.plan import OutcomeType
-
+from core.detection import CandidateIssue
 
 
 class _AlternativeOut(BaseModel):
@@ -135,3 +135,62 @@ def validate_draft_plan_fields(fields: _DraftPlanOut, profile: ModelSafeView) ->
     invalid = [name for name in chosen if name not in valid_names]
     if invalid:
         raise ValueError(f"Model chose column(s) not present in the dataset: {invalid}")
+
+_ALLOWED_OP_TYPES = {"cast", "rename", "filter", "dedupe"}
+
+
+class _ProposedOperationOut(BaseModel):
+    issue_index: int = Field(description="Index into the candidate issues list this operation addresses")
+    op_type: str = Field(description=f"One of: {sorted(_ALLOWED_OP_TYPES)}")
+    params: dict = Field(description="Parameters for this op_type, matching core.wrangling's propose_* function signatures")
+    rationale: str = Field(description="Why this operation is the right fix for this specific issue")
+    alternative_approach: str = Field(description="One concrete alternative that was considered and rejected")
+    alternative_rejected_because: str
+
+
+class _WranglingProposalsOut(BaseModel):
+    proposals: list[_ProposedOperationOut]
+
+
+def propose_wrangling_operations(
+    issues: list[CandidateIssue], model_name: str = "openai/gpt-oss-120b"
+) -> list[_ProposedOperationOut]:
+    """
+    Given ALL detected issues at once, propose one operation per issue in a
+    single call -- not one call per issue. The model must only choose from
+    the existing operation whitelist (cast/rename/filter/dedupe); there is
+    no 'impute' operation, so a missingness issue should be proposed as a
+    filter (dropping rows with 'not_null') rather than something unsupported.
+    """
+    if not issues:
+        return []
+
+    model = init_chat_model(model_name, model_provider="groq")
+    structured_model = model.with_structured_output(_WranglingProposalsOut)
+
+    issues_summary = "\n".join(
+        f"[{i}] {issue.issue_type}: {issue.description} (columns: {', '.join(issue.affected_columns)}, "
+        f"evidence: {issue.evidence})"
+        for i, issue in enumerate(issues)
+    )
+
+    system_prompt = (
+        "You are proposing data-cleaning operations for detected data-quality issues. "
+        f"You MUST choose op_type from exactly these options: {sorted(_ALLOWED_OP_TYPES)}. "
+        "There is no imputation operation available -- if missingness needs addressing, "
+        "propose a 'filter' with condition 'not_null' on the affected column to drop those rows. "
+        "For duplicate rows, propose a 'dedupe'. "
+        "Propose exactly one operation per issue listed below, referencing its index.\n\n"
+        f"Detected issues:\n{issues_summary}"
+    )
+
+    result = structured_model.invoke([
+        ("system", system_prompt),
+        ("human", "Propose a fix for each detected issue."),
+    ])
+
+    invalid = [p.op_type for p in result.proposals if p.op_type not in _ALLOWED_OP_TYPES]
+    if invalid:
+        raise ValueError(f"Model proposed unsupported operation type(s): {invalid}")
+
+    return result.proposals
