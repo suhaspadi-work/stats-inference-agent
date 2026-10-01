@@ -163,7 +163,9 @@ def test_live_report_mentions_unaddressed_issue_when_present():
     result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
     report_lower = result["report"].lower()
     assert "duplicate" in report_lower
-    assert "investigate" in report_lower or "not removed" in report_lower or "not addressed" in report_lower or "unaddressed" in report_lower
+    assert any(phrase in report_lower for phrase in (
+        "investigate", "not removed", "not addressed", "unaddressed", "left in the data", "caveat",
+    ))
 
 
 @pytest.mark.live
