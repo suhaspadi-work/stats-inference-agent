@@ -104,3 +104,16 @@ def test_guard_still_catches_unhedged_causal_claims():
     plan = make_observational_plan()
     with pytest.raises(CausalLanguageViolation):
         check_for_causal_language("Living in the West region causes higher spending.", plan)
+
+def test_guard_allows_rather_than_caused_by_phrasing():
+    """
+    Regression test for a real false positive found via the live test: the
+    model correctly wrote 'associated with, rather than caused by, the
+    regional difference' -- a safe disclaimer using 'rather than' instead
+    of a 'not'-style negation. Must not be flagged.
+    """
+    plan = make_observational_plan()
+    check_for_causal_language(
+        "The higher spend in the West is associated with, rather than caused by, the regional difference.",
+        plan,
+    )

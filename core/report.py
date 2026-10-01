@@ -20,7 +20,10 @@ class CausalLanguageViolation(ValueError):
     """Raised when a report uses causal language on data that only supports associations."""
 
 
-_NEGATION_MARKERS = ("not", "n't", "cannot", "can't", "no evidence", "does not", "doesn't", "isn't", "wasn't")
+_NEGATION_MARKERS = (
+    "not", "n't", "cannot", "can't", "no evidence", "does not", "doesn't", "isn't", "wasn't",
+    "rather than", "as opposed to", "instead of",
+)
 
 
 def check_for_causal_language(report_text: str, plan: AnalysisPlan) -> None:

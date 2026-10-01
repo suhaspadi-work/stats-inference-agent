@@ -37,3 +37,5 @@ class AgentState(TypedDict, total=False):
 
     # Final plain-language output, populated by the report node
     report: Optional[str]
+
+    pending_unaddressed_issues: tuple  # set by wrangle_node if issues exist before the plan is created

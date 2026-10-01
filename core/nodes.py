@@ -12,6 +12,14 @@ from core.plan import AnalysisPlan
 from core.testing import run_two_group_test, select_two_group_method
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
+from core.detection import detect_all_issues
+from core.classifier import propose_wrangling_operations
+from core.operation import Operation, ApprovalStatus, WranglingRationale, AlternativeApproachConsidered
+from core.plan import UnaddressedIssue
+from core.wrangling import (
+    propose_cast, execute_cast, propose_rename, execute_rename,
+    propose_filter, execute_filter, propose_dedupe, execute_dedupe,
+)
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -61,6 +69,120 @@ def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         view = profile_dataset(state["dataset"], store=store)
         return {"profile": view}
     return profile_node
+
+_EXECUTE_FNS = {"cast": execute_cast, "rename": execute_rename, "filter": execute_filter, "dedupe": execute_dedupe}
+
+def _normalize_params(op_type: str, params: dict) -> dict:
+    """
+    Translate model-proposed params into the shape Phase 4's execute_*
+    functions actually expect. The model naturally produces an empty list
+    for "dedupe across all columns," but core.wrangling's dedupe treats
+    that differently from the correct None -- this guard closes that gap
+    rather than trusting the model's literal output shape.
+    """
+    if op_type == "dedupe":
+        subset = params.get("subset")
+        if subset == [] or subset is None:
+            return {**params, "subset": None}
+    return params
+
+
+
+def _build_operation_from_proposal(dataset, proposal, issue) -> Operation:
+    """Build a pending Operation from one model proposal, using Phase 1's WranglingRationale."""
+    rationale = WranglingRationale(
+        rationale=proposal.rationale,
+        alternatives=(AlternativeApproachConsidered(
+            approach=proposal.alternative_approach, rejected_because=proposal.alternative_rejected_because,
+        ),),
+        evidence=issue.evidence,
+    )
+    return Operation(
+        op_type=proposal.op_type, session_id=dataset.session_id,
+        input_handles=(dataset.handle,), params=_normalize_params(proposal.op_type, proposal.params),
+        approval_status=ApprovalStatus.PENDING, rationale=rationale,
+    )
+
+
+def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Detect real data-quality issues (7a), propose fixes for all of them in
+    one batched model call (7b), present the whole list as a checklist
+    interrupt, then execute each approved/edited operation in sequence
+    (producing a chained Dataset version per operation) and record any
+    rejection as an UnaddressedIssue on the plan -- so the caveat survives
+    into method selection and the final report, per the design discussion.
+
+    If no issues are detected, this node is a no-op: no model call, no
+    interrupt, the dataset passes through unchanged.
+    """
+    def wrangle_node(state: AgentState) -> dict:
+        dataset = state["dataset"]
+        profile = state["profile"]
+
+        issues = detect_all_issues(dataset, profile, store)
+        if not issues:
+            return {"dataset": dataset}
+
+        proposals = propose_wrangling_operations(issues)
+        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
+
+        decisions = interrupt({
+            "type": "wrangling_approval",
+            "question": "Review the proposed data-cleaning operations before they run.",
+            "proposed_operations": [
+                {
+                    "index": i, "op_type": op.op_type, "params": op.params,
+                    "rationale": op.rationale.rationale,
+                    "alternative": op.rationale.alternatives[0].approach,
+                }
+                for i, op in enumerate(operations)
+            ],
+            "allowed_decisions": ["approve", "edit", "reject"],
+        })
+
+        current_dataset = dataset
+        unaddressed = ()
+
+        for decision in decisions.get("decisions", []):
+            idx = decision["index"]
+            op = operations[idx]
+            issue = issues[proposals[idx].issue_index]
+            action = decision.get("action")
+
+            if action == "reject":
+                unaddressed += (UnaddressedIssue(
+                    issue_type=issue.issue_type, description=issue.description,
+                    proposed_operation=f"{op.op_type}({op.params})",
+                    rejection_reason=decision.get("reason", "no reason given"),
+                    affected_columns=issue.affected_columns,
+                ),)
+                continue
+
+            raw_params = decision.get("params", op.params) if action == "edit" else op.params
+            params = _normalize_params(op.op_type, raw_params)
+            op = Operation(
+                op_type=op.op_type, session_id=op.session_id,
+                input_handles=(current_dataset.handle,), params=params,
+                approval_status=ApprovalStatus.PENDING, rationale=op.rationale,
+            )
+            approved_op = op.approve()
+            execute_fn = _EXECUTE_FNS[op.op_type]
+            current_dataset, _finished_op = execute_fn(current_dataset, store, approved_op)
+
+        updated_plan = state["plan"] if "plan" in state else None
+        result = {"dataset": current_dataset}
+        if unaddressed:
+            for issue_record in unaddressed:
+                if updated_plan is not None:
+                    updated_plan = updated_plan.record_unaddressed_issue(issue_record)
+            if updated_plan is not None:
+                result["plan"] = updated_plan
+            else:
+                result["pending_unaddressed_issues"] = unaddressed
+        return result
+
+    return wrangle_node
 
 def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
     """Injectable draft_fn, same pattern as classify_node, for deterministic testing."""
