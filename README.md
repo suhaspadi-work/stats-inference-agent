@@ -3,7 +3,7 @@
 An agentic engineering project that performs statistical inference on user-provided datasets — descriptive analysis, hypothesis testing, A/B testing, and linear/logistic regression — with a hybrid tool/declarative-operation architecture designed for auditability and safety.
 
 ## Status
-🚧 In progress — Phases 1-7 complete (foundation through full agent loop with wrangling, unaddressed-issue tracking, and autonomy modes). Next: Phase 8 (simple-tier evaluation suite).
+🚧 In progress — Phases 1-8 complete (foundation through full agent loop and simple-tier evaluation). Next: medium-tier capabilities (EDA, multi-group tests, linear regression).
 
 ## Core design principle
 The model chooses and interprets; deterministic code computes. The LLM never performs arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
