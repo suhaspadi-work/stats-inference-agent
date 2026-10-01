@@ -20,6 +20,7 @@ from core.wrangling import (
     propose_cast, execute_cast, propose_rename, execute_rename,
     propose_filter, execute_filter, propose_dedupe, execute_dedupe,
 )
+from dataclasses import replace
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -185,7 +186,13 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     return wrangle_node
 
 def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
-    """Injectable draft_fn, same pattern as classify_node, for deterministic testing."""
+    """
+    Injectable draft_fn, same pattern as classify_node, for deterministic
+    testing. Also folds in any pending_unaddressed_issues left by
+    wrangle_node -- since that node runs before a plan exists, this is the
+    first point where a rejected data-quality fix can actually be attached
+    to the AnalysisPlan it needs to travel with (R2).
+    """
     def draft_plan_node(state: AgentState) -> dict:
         fields = draft_fn(state["request_text"], state["profile"])
         validate_draft_plan_fields(fields, state["profile"])
@@ -200,6 +207,12 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
             data_sources=(state["dataset"].handle,),
         )
         plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
+
+        pending = state.get("pending_unaddressed_issues")
+        if pending:
+            for issue in pending:
+                plan = plan.record_unaddressed_issue(issue)
+
         return {"plan": plan}
     return draft_plan_node
 
@@ -209,6 +222,11 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
     BEFORE freeze -- this is what makes the human-approval screen able to
     show which test will run and why, rather than the method being decided
     silently during execution after approval has already happened.
+
+    If the plan carries any unaddressed_issues (a data-quality fix was
+    proposed and rejected), that caveat is folded into this MethodDecision's
+    evidence -- so the rationale an approver sees at freeze already reflects
+    known, acknowledged problems in the data, not just the test statistics.
     """
     def select_method_node(state: AgentState) -> dict:
         plan = state["plan"]
@@ -222,7 +240,16 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
             dataset=state["dataset"], store=store,
             outcome_col=plan.outcome_name, group_col=predictors[0],
         )
-        updated_plan = plan.record_method_decision(choice.decision)
+        decision = choice.decision
+        if plan.unaddressed_issues:
+            decision = replace(decision, evidence={
+                **decision.evidence,
+                "unaddressed_issues": [
+                    {"issue_type": i.issue_type, "description": i.description, "rejection_reason": i.rejection_reason}
+                    for i in plan.unaddressed_issues
+                ],
+            })
+        updated_plan = plan.record_method_decision(decision)
         return {"plan": updated_plan}
     return select_method_node
 
