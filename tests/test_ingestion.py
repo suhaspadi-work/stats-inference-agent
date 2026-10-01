@@ -79,10 +79,36 @@ def test_profile_dataset_top_values_capped_and_low_cardinality_fully_shown(sampl
 
 
 def test_profile_dataset_high_cardinality_column_never_returns_actual_raw_value(sample_csv, store):
+    """
+    This test's name made a promise its old assertions never checked --
+    it only verified distinct_count, never top_values itself. Found via
+    stress testing with a genuinely high-cardinality email column (200
+    distinct values), which leaked real addresses through top_values
+    entirely unchecked by this test. Now actually verifies the claim.
+    """
     d = load_dataset(sample_csv, session_id="session-abc", name="customers", store=store)
     view = profile_dataset(d, store=store)
     email_col = next(c for c in view.columns if c.name == "email")
     assert email_col.distinct_count == 4
+    # This sample file's email column has only 4 distinct values, which is
+    # LOW cardinality -- so top_values legitimately CAN be populated here.
+    # The real high-cardinality case is covered by the new test below.
+
+
+def test_profile_dataset_withholds_top_values_for_genuinely_high_cardinality_column(tmp_path, store):
+    """The actual regression test for the real bug: 200 distinct emails must NEVER appear in top_values."""
+    import pandas as pd
+    emails = [f"person{i}@example.com" for i in range(200)]
+    df = pd.DataFrame({"id": range(200), "email": emails, "region": ["A"] * 100 + ["B"] * 100})
+    path = tmp_path / "high_card.csv"
+    df.to_csv(path, index=False)
+    d = load_dataset(path, session_id="session-abc", name="high_card", store=store)
+    view = profile_dataset(d, store=store)
+
+    email_col = next(c for c in view.columns if c.name == "email")
+    assert email_col.distinct_count == 200
+    assert email_col.top_values == ()  # withheld entirely -- not just capped at 5
+    assert not any(e in str(view) for e in emails[:5])  # no raw value leaks anywhere in the object
 
 
 def test_profile_dataset_returns_model_safe_view_that_passes_the_privacy_guard(sample_csv, store):

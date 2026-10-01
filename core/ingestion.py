@@ -9,7 +9,7 @@ from core.model_safe_view import ModelSafeView, ColumnSummary
 
 MAX_TOP_VALUES = 5  # caps top_values so a low-cardinality column's frequency
                      # table stays a schema summary, not a copy of the column
-
+HIGH_CARDINALITY_THRESHOLD = 20  # above this many distinct values, top_values is withheld entirely
 
 def load_dataset(path: Path, session_id: str, name: str, store: DatasetStore) -> Dataset:
     """
@@ -81,8 +81,21 @@ def profile_dataset(dataset: Dataset, store: DatasetStore) -> ModelSafeView:
         missing_count = int(series.isna().sum())
         distinct_count = int(series.nunique(dropna=True))
 
-        value_counts = series.dropna().astype(str).value_counts().head(MAX_TOP_VALUES)
-        top_values = tuple((str(v), int(c)) for v, c in value_counts.items())
+           # top_values is only safe to populate for genuinely low-cardinality
+        # columns (categories, flags) -- a high-cardinality column (emails,
+        # names, free text, IDs) would leak real, near-unique raw values
+        # through "top values" even at a small MAX_TOP_VALUES, since with
+        # enough distinct values, "most frequent" starts to mean "arbitrary
+        # individual record." This threshold is deliberately well above
+        # MAX_TOP_VALUES itself, so showing a FEW frequent categories out of
+        # a MODERATE number of distinct values is still fine (that's the
+        # whole point of top_values), but a column that's mostly-unique
+        # never gets its actual values surfaced at all.
+        if distinct_count <= HIGH_CARDINALITY_THRESHOLD:
+            value_counts = series.dropna().astype(str).value_counts().head(MAX_TOP_VALUES)
+            top_values = tuple((str(v), int(c)) for v, c in value_counts.items())
+        else:
+            top_values = ()
 
         columns.append(ColumnSummary(
             name=str(col),
