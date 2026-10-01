@@ -30,3 +30,4 @@ local_data/
 eval_results.jsonl
 eval_data/
 eval_results_stress.jsonl
+eval_results_reasoning.jsonl
