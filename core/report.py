@@ -75,11 +75,27 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
         else "This data comes from a randomized experiment, so causal language is appropriate here."
     )
 
+    unaddressed_constraint = ""
+    if plan.unaddressed_issues:
+        issues_text = "; ".join(
+            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
+            for i in plan.unaddressed_issues
+        )
+        unaddressed_constraint = (
+            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
+            f"by explicit user decision: {issues_text}. You MUST mention this plainly in your "
+            "summary and note that the results should be interpreted with this caveat in mind. "
+            "Do not omit this or bury it -- a reader should not come away with more confidence "
+            "in the result than is warranted given this known, unaddressed issue."
+        )
+
     system_prompt = (
         "You write brief, plain-language summaries of statistical analyses for a "
         "non-technical audience. Report the actual numbers given -- never invent or "
-        "round away meaningful precision. Keep it to 3-5 sentences.\n\n"
+        "round away meaningful precision. Keep it to 4-6 sentences if there is an "
+        "unaddressed data-quality caveat to mention, otherwise 3-5 sentences.\n\n"
         f"{language_constraint}"
+        f"{unaddressed_constraint}"
     )
 
     human_prompt = (

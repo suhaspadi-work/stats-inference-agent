@@ -5,6 +5,7 @@ from core.agent_state import AgentState
 from core.nodes import make_report_node
 from core.report import check_for_causal_language, CausalLanguageViolation
 from core.plan import AnalysisPlan, QuestionType, CausalStatus, OutcomeType
+from core.plan import UnaddressedIssue
 
 
 def make_observational_plan():
@@ -117,3 +118,64 @@ def test_guard_allows_rather_than_caused_by_phrasing():
         "The higher spend in the West is associated with, rather than caused by, the regional difference.",
         plan,
     )
+
+def make_plan_with_unaddressed_issue():
+    plan = make_observational_plan()
+    issue = UnaddressedIssue(
+        issue_type="duplicate_rows", description="3 exact duplicate rows detected",
+        proposed_operation="dedupe(subset=None)", rejection_reason="User wanted to investigate manually",
+        affected_columns=("customer_id",),
+    )
+    return plan.record_unaddressed_issue(issue)
+
+
+def test_report_node_with_unaddressed_issue_includes_the_caveat():
+    plan = make_plan_with_unaddressed_issue()
+
+    def report_fn_mentioning_caveat(plan, test_result):
+        return (
+            "Customers in the West region show higher average spending, associated with region. "
+            "Note: 3 exact duplicate rows were identified but not removed, per the user's decision "
+            "to investigate manually -- results should be interpreted with this caveat in mind."
+        )
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node(report_fn=report_fn_mentioning_caveat))
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    assert "duplicate" in result["report"].lower()
+    assert "caveat" in result["report"].lower() or "not removed" in result["report"].lower()
+
+
+@pytest.mark.live
+def test_live_report_mentions_unaddressed_issue_when_present():
+    plan = make_plan_with_unaddressed_issue()
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node())
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    report_lower = result["report"].lower()
+    assert "duplicate" in report_lower
+    assert "investigate" in report_lower or "not removed" in report_lower or "not addressed" in report_lower or "unaddressed" in report_lower
+
+
+@pytest.mark.live
+def test_live_report_without_unaddressed_issues_does_not_mention_any():
+    """Confirms the conditional prompt addition is genuinely conditional -- clean plans get no caveat text."""
+    plan = make_observational_plan()  # no unaddressed_issues
+
+    graph = StateGraph(AgentState)
+    graph.add_node("report", make_report_node())
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    app = graph.compile()
+
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    assert "duplicate" not in result["report"].lower()
