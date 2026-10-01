@@ -105,21 +105,39 @@ def _build_operation_from_proposal(dataset, proposal, issue) -> Operation:
     )
 
 
+# Issue types that stakeholder mode auto-approves without an interrupt --
+# deliberately narrow: only exact-duplicate removal, since that rarely
+# changes analytical conclusions. Anything affecting missingness (which
+# drops rows and can change group sizes/balance) always interrupts,
+# regardless of mode.
+_STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
+
+
 def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     Detect real data-quality issues (7a), propose fixes for all of them in
     one batched model call (7b), present the whole list as a checklist
     interrupt, then execute each approved/edited operation in sequence
     (producing a chained Dataset version per operation) and record any
-    rejection as an UnaddressedIssue on the plan -- so the caveat survives
-    into method selection and the final report, per the design discussion.
+    rejection as an UnaddressedIssue -- via pending_unaddressed_issues,
+    since no AnalysisPlan exists yet at this point in the graph -- so the
+    caveat survives into method selection and the final report.
 
     If no issues are detected, this node is a no-op: no model call, no
     interrupt, the dataset passes through unchanged.
+
+    autonomy_mode (from state, defaults to "analyst" if absent) controls
+    which issue types require human approval. In "stakeholder" mode, issue
+    types in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES are approved
+    automatically and recorded in the SAME audit trail (Operation,
+    WranglingRationale) as a human approval would produce -- the only
+    difference is who/what made the approval decision, which is itself
+    worth recording for honesty.
     """
     def wrangle_node(state: AgentState) -> dict:
         dataset = state["dataset"]
         profile = state["profile"]
+        autonomy_mode = state.get("autonomy_mode", "analyst")
 
         issues = detect_all_issues(dataset, profile, store)
         if not issues:
@@ -128,25 +146,46 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         proposals = propose_wrangling_operations(issues)
         operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
 
-        decisions = interrupt({
-            "type": "wrangling_approval",
-            "question": "Review the proposed data-cleaning operations before they run.",
-            "proposed_operations": [
-                {
-                    "index": i, "op_type": op.op_type, "params": op.params,
-                    "rationale": op.rationale.rationale,
-                    "alternative": op.rationale.alternatives[0].approach,
-                }
-                for i, op in enumerate(operations)
-            ],
-            "allowed_decisions": ["approve", "edit", "reject"],
-        })
+        auto_indices = set()
+        if autonomy_mode == "stakeholder":
+            for i, p in enumerate(proposals):
+                if issues[p.issue_index].issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES:
+                    auto_indices.add(i)
+
+        needs_review_indices = [i for i in range(len(operations)) if i not in auto_indices]
+
+        decisions_by_index = {}
+        for i in auto_indices:
+            decisions_by_index[i] = {"index": i, "action": "approve"}
+
+        if needs_review_indices:
+            review_payload = {
+                "type": "wrangling_approval",
+                "question": "Review the proposed data-cleaning operations before they run.",
+                "proposed_operations": [
+                    {
+                        "index": i, "op_type": operations[i].op_type, "params": operations[i].params,
+                        "rationale": operations[i].rationale.rationale,
+                        "alternative": operations[i].rationale.alternatives[0].approach,
+                    }
+                    for i in needs_review_indices
+                ],
+                "allowed_decisions": ["approve", "edit", "reject"],
+            }
+            if auto_indices:
+                review_payload["auto_approved_note"] = (
+                    f"{len(auto_indices)} additional operation(s) were auto-approved under "
+                    f"'{autonomy_mode}' autonomy mode and are not shown here for review."
+                )
+            human_decisions = interrupt(review_payload)
+            for decision in human_decisions.get("decisions", []):
+                decisions_by_index[decision["index"]] = decision
 
         current_dataset = dataset
         unaddressed = ()
 
-        for decision in decisions.get("decisions", []):
-            idx = decision["index"]
+        for idx in sorted(decisions_by_index):
+            decision = decisions_by_index[idx]
             op = operations[idx]
             issue = issues[proposals[idx].issue_index]
             action = decision.get("action")
@@ -171,16 +210,9 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             execute_fn = _EXECUTE_FNS[op.op_type]
             current_dataset, _finished_op = execute_fn(current_dataset, store, approved_op)
 
-        updated_plan = state["plan"] if "plan" in state else None
         result = {"dataset": current_dataset}
         if unaddressed:
-            for issue_record in unaddressed:
-                if updated_plan is not None:
-                    updated_plan = updated_plan.record_unaddressed_issue(issue_record)
-            if updated_plan is not None:
-                result["plan"] = updated_plan
-            else:
-                result["pending_unaddressed_issues"] = unaddressed
+            result["pending_unaddressed_issues"] = unaddressed
         return result
 
     return wrangle_node

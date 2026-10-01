@@ -39,3 +39,5 @@ class AgentState(TypedDict, total=False):
     report: Optional[str]
 
     pending_unaddressed_issues: tuple  # set by wrangle_node if issues exist before the plan is created
+
+    autonomy_mode: str  # "analyst" (default behavior: interrupt on everything) or "stakeholder"
