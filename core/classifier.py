@@ -125,10 +125,19 @@ def draft_plan_fields(request_text: str, profile: ModelSafeView, model_name: str
     ])
 
 
+_CONTINUOUS_COMPATIBLE_DTYPES = {"int64", "float64", "int32", "float32"}
+
+
 def validate_draft_plan_fields(fields: _DraftPlanOut, profile: ModelSafeView) -> None:
     """
-    Structural guard against hallucinated column names -- raises if the
-    model picked a column that doesn't actually exist in the profile.
+    Structural guard against two distinct failure modes: a hallucinated
+    column name (not present in the dataset at all), and a type mismatch
+    (a column that exists, but whose actual dtype can't support the chosen
+    OutcomeType). The second check exists because a model can correctly
+    identify that a column named "total_spend" is the right one to analyze
+    while still being wrong about whether it's numeric -- the column's own
+    declared dtype in the profile is the ground truth here, not the
+    model's assumption from the column's name or the user's phrasing.
     """
     valid_names = {c.name for c in profile.columns}
     chosen = [fields.outcome_name, *fields.candidate_predictors]
@@ -136,6 +145,17 @@ def validate_draft_plan_fields(fields: _DraftPlanOut, profile: ModelSafeView) ->
     if invalid:
         raise ValueError(f"Model chose column(s) not present in the dataset: {invalid}")
 
+    if fields.outcome_type == OutcomeType.CONTINUOUS:
+        outcome_col = next(c for c in profile.columns if c.name == fields.outcome_name)
+        if outcome_col.dtype not in _CONTINUOUS_COMPATIBLE_DTYPES:
+            raise ValueError(
+                f"Outcome column '{fields.outcome_name}' was classified as continuous, but its "
+                f"actual data type is '{outcome_col.dtype}', which cannot support a continuous "
+                f"statistical test. This may mean the column is text/categorical, or the wrong "
+                f"column was selected for this analysis."
+            )
+
+        
 _ALLOWED_OP_TYPES = {"cast", "rename", "filter", "dedupe"}
 
 
