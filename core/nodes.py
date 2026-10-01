@@ -317,6 +317,13 @@ def freeze_node(state: AgentState) -> dict:
 
     if action == "edit":
         new_predictors = tuple(decision.get("candidate_predictors", plan.candidate_predictors or ()))
+        valid_names = {c.name for c in state["profile"].columns}
+        invalid = [name for name in new_predictors if name not in valid_names]
+        if invalid:
+            raise ValueError(
+                f"Edited predictor(s) not present in the dataset: {invalid}. "
+                f"Available columns: {sorted(valid_names)}"
+            )
         plan = plan.refine(candidate_predictors=new_predictors)
 
     frozen_plan = plan.freeze()

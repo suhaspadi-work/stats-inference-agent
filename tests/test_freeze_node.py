@@ -61,9 +61,21 @@ def test_approve_freezes_the_plan():
 
 
 def test_edit_changes_predictors_before_freezing():
+    from core.model_safe_view import ModelSafeView, ColumnSummary
+
     app = build_freeze_graph()
     config = {"configurable": {"thread_id": "t3"}}
-    app.invoke({"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc"}, config)
+    profile = ModelSafeView(
+        dataset_handle="test@v1", row_count=100, column_count=3,
+        columns=(
+            ColumnSummary(name="region", dtype="object", missing_pct=0.0, missing_count=0, distinct_count=2),
+            ColumnSummary(name="plan_type", dtype="object", missing_pct=0.0, missing_count=0, distinct_count=2),
+            ColumnSummary(name="total_spend", dtype="float64", missing_pct=0.0, missing_count=0, distinct_count=100),
+        ),
+    )
+    app.invoke(
+        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile}, config,
+    )
 
     result = app.invoke(
         Command(resume={"action": "edit", "candidate_predictors": ["region", "plan_type"]}), config,
@@ -83,3 +95,29 @@ def test_reject_never_freezes_and_signals_clarification_needed():
     assert "clarification_needed" in result
     assert "rejected" in result["clarification_needed"].lower()
     assert "Wrong predictors" in result["clarification_needed"]
+
+def test_edit_rejects_a_nonexistent_predictor_column():
+    """
+    Regression test: editing the plan's predictors at freeze to a column
+    that doesn't exist in the dataset must fail cleanly, not silently
+    proceed and crash later deep inside select_method_node/execute_node.
+    """
+    from core.model_safe_view import ModelSafeView, ColumnSummary
+
+    app = build_freeze_graph()
+    config = {"configurable": {"thread_id": "t5"}}
+    profile = ModelSafeView(
+        dataset_handle="test@v1", row_count=100, column_count=2,
+        columns=(
+            ColumnSummary(name="region", dtype="object", missing_pct=0.0, missing_count=0, distinct_count=2),
+            ColumnSummary(name="total_spend", dtype="float64", missing_pct=0.0, missing_count=0, distinct_count=100),
+        ),
+    )
+    app.invoke(
+        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile}, config,
+    )
+
+    with pytest.raises(ValueError, match="not present in the dataset"):
+        app.invoke(
+            Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config,
+        )
