@@ -3,7 +3,7 @@
 An agentic engineering project that performs statistical inference on user-provided datasets — descriptive analysis, hypothesis testing, A/B testing, and linear/logistic regression — with a hybrid tool/declarative-operation architecture designed for auditability and safety.
 
 ## Status
-🚧 In progress — Phases 1-6 complete (foundation through full agent loop). Next: Phase 7 (approval/autonomy refinements), Phase 8 (simple-tier evaluation).
+🚧 In progress — Phases 1-7 complete (foundation through full agent loop with wrangling, unaddressed-issue tracking, and autonomy modes). Next: Phase 8 (simple-tier evaluation suite).
 
 ## Core design principle
 The model chooses and interprets; deterministic code computes. The LLM never performs arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
@@ -64,6 +64,7 @@ Should print a response from the model, confirming your API key and dependencies
 - **LangGraph checkpoint serialization coerces tuples to lists** across a pause/resume (interrupt) boundary, since the underlying format (JSON/msgpack) has no native tuple type. `AnalysisPlan`'s append methods are defensively written to tolerate either form.
 - **Values computed via numpy/scipy must be explicitly cast to plain Python types** before being placed into graph state — numpy scalar types (e.g. `numpy.float64`) are not serializable by LangGraph's checkpointer and will fail only when a checkpoint boundary is actually crossed, not on every run.
 - **Custom dataclass/Enum types used in graph state are not yet registered with LangGraph's serializer**, producing deprecation warnings on every checkpoint read. Works today; will need explicit registration in a future LangGraph version.
+- **Auto-approved wrangling operations (stakeholder mode) are not distinguished from human-approved ones in the Operation audit record itself** — both produce an identical APPROVED Operation. Full attribution of "who/what approved this" would require an additional field on Operation; left as a known gap rather than a silent one.
 
 ## Roadmap
 ## Roadmap
@@ -76,7 +77,7 @@ Should print a response from the model, confirming your API key and dependencies
 - [x] Simple-tier wrangling operations (cast, rename, filter, dedupe — approval-gated, rationale-tracked, 48 automated tests total, all passing)
 - [x] Hypothesis testing tools (two-group test with assumption-driven selection between t-test/Welch/Mann-Whitney, verified against direct scipy calls — 53 automated tests total, all passing)
 - [x] Plan classifier and simple-tier agent loop (full LangGraph agent: classify → profile → draft_plan → select_method → freeze → execute → report, with both interrupt gates working — 88 automated tests, all passing, including one full live end-to-end run)
-- [ ] Human-in-the-loop and autonomy dial
+- [x] Human-in-the-loop and autonomy dial (plan-freeze approval, wrangling checklist interrupt, clarification gate, and a configurable analyst/stakeholder autonomy mode — 121 automated tests, all passing, including one full end-to-end proof with genuinely messy data and a deliberate rejection)
 - [ ] Simple-tier evaluation
 - [ ] Medium-tier: EDA and multi-group tools
 - [ ] Linear regression tools
