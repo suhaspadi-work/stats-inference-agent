@@ -8,6 +8,7 @@ from core.ingestion import load_dataset
 from core.nodes import make_execute_node
 from core.plan import AnalysisPlan, MethodDecision, QuestionType, CausalStatus, OutcomeType
 from core.synthetic import generate_two_group_continuous
+from core.testing import select_two_group_method
 
 
 @pytest.fixture
@@ -25,7 +26,7 @@ def dataset(tmp_path, store):
     return ds, spec
 
 
-def make_frozen_plan(dataset, predictors=("region",)):
+def make_frozen_plan(dataset, store, predictors=("region",)):
     plan = AnalysisPlan(
         request_text="x", session_id="session-abc",
         question_type=QuestionType.TWO_GROUP_COMPARISON, causal_status=CausalStatus.OBSERVATIONAL,
@@ -33,15 +34,16 @@ def make_frozen_plan(dataset, predictors=("region",)):
         unit_of_analysis="customer", data_sources=(dataset.handle,),
         candidate_predictors=predictors,
     )
-    # A placeholder decision so freeze() doesn't reject for "no method" --
-    # execute_node will record the REAL decision itself
-    placeholder = MethodDecision(stage="test_selection", chosen_method="placeholder", rationale="x", alternatives=())
-    return plan.record_method_decision(placeholder).freeze()
+    if not predictors:
+        placeholder = MethodDecision(stage="test_selection", chosen_method="placeholder", rationale="x", alternatives=())
+        return plan.record_method_decision(placeholder).freeze()
+    choice = select_two_group_method(dataset, store, outcome_col="total_spend", group_col=predictors[0])
+    return plan.record_method_decision(choice.decision).freeze()
 
 
 def test_execute_node_runs_real_test_and_marks_plan_executed(dataset, store):
     ds, spec = dataset
-    plan = make_frozen_plan(ds)
+    plan = make_frozen_plan(ds, store)
 
     graph = StateGraph(AgentState)
     graph.add_node("execute", make_execute_node(store))
@@ -52,9 +54,10 @@ def test_execute_node_runs_real_test_and_marks_plan_executed(dataset, store):
     result = app.invoke({"plan": plan, "dataset": ds, "request_text": "x", "session_id": "session-abc"})
 
     assert result["plan"].status.value == "executed"
-    assert result["test_result"]["p_value"] < 0.05  # a real planted effect of 5.0 should be detected
-    # The REAL MethodDecision from run_two_group_test should now be the latest one
-    assert result["plan"].latest_decision.stage == "test_selection"
+    assert result["test_result"]["p_value"] < 0.05
+    # Exactly ONE method decision should exist -- the one made before freeze,
+    # never a second, silent one made during execution
+    assert len(result["plan"].method_decisions) == 1
     assert result["plan"].latest_decision.chosen_method in ("student_t_test", "welch_t_test")
 
 
@@ -80,7 +83,7 @@ def test_execute_node_refuses_to_run_on_an_unfrozen_plan(dataset, store):
 
 def test_execute_node_refuses_wrong_predictor_count(dataset, store):
     ds, spec = dataset
-    plan = make_frozen_plan(ds, predictors=())  # zero predictors
+    plan = make_frozen_plan(ds, store, predictors=())  # zero predictors
 
     graph = StateGraph(AgentState)
     graph.add_node("execute", make_execute_node(store))
@@ -95,7 +98,7 @@ def test_execute_node_refuses_wrong_predictor_count(dataset, store):
 def test_execute_node_result_matches_spec_effect_direction(dataset, store):
     """Cross-check against the synthetic generator's own known ground truth."""
     ds, spec = dataset
-    plan = make_frozen_plan(ds)
+    plan = make_frozen_plan(ds, store)
 
     graph = StateGraph(AgentState)
     graph.add_node("execute", make_execute_node(store))

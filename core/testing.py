@@ -87,6 +87,42 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
     return TwoGroupMethodChoice(method=method, decision=decision)
 
 
+def execute_two_group_test(
+    dataset: Dataset, store: DatasetStore, outcome_col: str, group_col: str, method: str,
+) -> TwoGroupTestResult:
+    """
+    Execute a given, ALREADY-SELECTED two-group test method, without
+    re-deciding which method to use. This is what execute_node calls --
+    method selection happens once, before freeze (select_two_group_method),
+    and execution simply carries out that pre-registered choice. Calling
+    run_two_group_test here instead would silently re-select and record a
+    SECOND, undocumented MethodDecision at execution time -- overwriting
+    the one a human actually approved at freeze. This is a real bug found
+    via Phase 7e's full end-to-end proof: it caused the unaddressed_issues
+    caveat (correctly attached to the approved decision) to disappear from
+    plan.latest_decision after execution.
+    """
+    df = store.read(dataset.storage_key)
+    groups = sorted(df[group_col].dropna().unique())
+    a = df.loc[df[group_col] == groups[0], outcome_col].dropna().to_numpy()
+    b = df.loc[df[group_col] == groups[1], outcome_col].dropna().to_numpy()
+
+    if method == "mann_whitney_u":
+        stat, p_value = stats.mannwhitneyu(a, b, alternative="two-sided")
+        effect_size = 1 - (2 * stat) / (len(a) * len(b))
+    else:
+        equal_var = method == "student_t_test"
+        stat, p_value = stats.ttest_ind(a, b, equal_var=equal_var)
+        effect_size = _cohens_d(a, b)
+
+    ci = _mean_diff_ci(a, b)
+    return TwoGroupTestResult(
+        method=method, statistic=float(stat), p_value=float(p_value),
+        effect_size=float(effect_size), confidence_interval=ci,
+        group_a_n=len(a), group_b_n=len(b),
+        group_a_mean=float(a.mean()), group_b_mean=float(b.mean()),
+    )
+
 def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
     n_a, n_b = len(a), len(b)
     pooled_std = np.sqrt(((n_a - 1) * a.var(ddof=1) + (n_b - 1) * b.var(ddof=1)) / (n_a + n_b - 2))

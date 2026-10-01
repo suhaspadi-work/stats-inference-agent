@@ -9,7 +9,7 @@ from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan
-from core.testing import run_two_group_test, select_two_group_method
+from core.testing import execute_two_group_test, select_two_group_method
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
 from core.detection import detect_all_issues
@@ -291,10 +291,11 @@ def freeze_node(state: AgentState) -> dict:
     return {"plan": frozen_plan}
 def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
-    Runs the actual hypothesis test -- the only node so far that produces a
-    real statistical result. Refuses to run unless the plan is FROZEN,
-    structurally enforcing the pre-registration discipline rather than
-    trusting the graph's edges alone to guarantee correct ordering.
+    Runs the actual hypothesis test -- using the method ALREADY selected and
+    approved via select_method_node/freeze_node, never re-deciding it here.
+    Refuses to run unless the plan is FROZEN, structurally enforcing the
+    pre-registration discipline rather than trusting the graph's edges
+    alone to guarantee correct ordering.
     """
     def execute_node(state: AgentState) -> dict:
         plan = state["plan"]
@@ -304,17 +305,19 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         predictors = plan.candidate_predictors or ()
         if len(predictors) != 1:
             raise ValueError(
-                f"run_two_group_test requires exactly one grouping predictor; "
+                f"execute_two_group_test requires exactly one grouping predictor; "
                 f"got {len(predictors)}: {predictors}."
             )
-        group_col = predictors[0]
+        method = plan.primary_method
+        if method is None:
+            raise ValueError("Cannot execute: no method was selected on the plan before freeze.")
 
-        result, method_decision = run_two_group_test(
+        result = execute_two_group_test(
             dataset=state["dataset"], store=store,
-            outcome_col=plan.outcome_name, group_col=group_col, alpha=plan.alpha,
+            outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
         )
 
-        updated_plan = plan.record_method_decision(method_decision).mark_executed()
+        updated_plan = plan.mark_executed()  # no new MethodDecision -- already recorded pre-freeze
 
         return {
             "plan": updated_plan,
