@@ -76,6 +76,12 @@ def run_scenario(scenario: EvalScenario, store, session_id: str) -> dict:
     proposals; this mirrors a cooperative, attentive human reviewer, not
     an adversarial one -- adversarial/rejection behavior is already
     covered by Phase 7's dedicated tests, not re-tested here).
+
+    Any exception during the run (expected for deliberately malformed
+    stress-test inputs) is captured as an "error" field in the returned
+    row, rather than propagating and killing the whole evaluation run --
+    a crash IS a valid, informative outcome for a stress scenario, and the
+    scenario's own check() function decides whether that's a pass or fail.
     """
     df, spec = scenario.build_dataset()
     tmp_path = Path(f"/tmp/eval_{scenario.name}.csv")
@@ -85,28 +91,33 @@ def run_scenario(scenario: EvalScenario, store, session_id: str) -> dict:
     app = build_agent_graph(store)
     config = {"configurable": {"thread_id": f"eval-{scenario.name}"}}
 
-    result = with_retry(lambda: app.invoke(
-        {"request_text": scenario.request_text, "session_id": session_id, "dataset": dataset}, config,
-    ))
+    result = {}
+    try:
+        result = with_retry(lambda: app.invoke(
+            {"request_text": scenario.request_text, "session_id": session_id, "dataset": dataset}, config,
+        ))
 
-    # Auto-resolve interrupts: clarification gets a generic cooperative
-    # answer, wrangling proposals get approved, plan freeze gets approved.
-    while "__interrupt__" in result:
-        payload = result["__interrupt__"][0].value
-        itype = payload.get("type")
+        while "__interrupt__" in result:
+            payload = result["__interrupt__"][0].value
+            itype = payload.get("type")
 
-        if itype == "clarification_needed":
-            resume_value = "Please proceed with the most natural reading of my original question."
-        elif itype == "wrangling_approval":
-            resume_value = {"decisions": [
-                {"index": op["index"], "action": "approve"} for op in payload["proposed_operations"]
-            ]}
-        elif itype == "plan_approval":
-            resume_value = {"action": "approve"}
-        else:
-            raise ValueError(f"Unknown interrupt type in evaluation run: {itype}")
+            if itype == "clarification_needed":
+                resume_value = "Please proceed with the most natural reading of my original question."
+            elif itype == "wrangling_approval":
+                resume_value = {"decisions": [
+                    {"index": op["index"], "action": "approve"} for op in payload["proposed_operations"]
+                ]}
+            elif itype == "plan_approval":
+                resume_value = {"action": "approve"}
+            else:
+                raise ValueError(f"Unknown interrupt type in evaluation run: {itype}")
 
-        result = with_retry(lambda: app.invoke(Command(resume=resume_value), config))
+            result = with_retry(lambda: app.invoke(Command(resume=resume_value), config))
+
+    except ServiceUnavailable:
+        raise  # a transient service issue should still stop the whole run, not be treated as a scenario result
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
 
     passed, reason = scenario.check(result, spec)
     return {
@@ -117,13 +128,14 @@ def run_scenario(scenario: EvalScenario, store, session_id: str) -> dict:
         "plan_status": result.get("plan").status.value if result.get("plan") else None,
         "test_result": result.get("test_result"),
         "report": result.get("report"),
+        "error": result.get("error"),
     }
 
 
-def load_results() -> dict:
+def load_results(results_file: str = RESULTS_FILE) -> dict:
     done = {}
-    if os.path.exists(RESULTS_FILE):
-        with open(RESULTS_FILE) as f:
+    if os.path.exists(results_file):
+        with open(results_file) as f:
             for line in f:
                 if line.strip():
                     row = json.loads(line)
@@ -131,14 +143,18 @@ def load_results() -> dict:
     return done
 
 
-def run_eval_suite(scenarios: list[EvalScenario], store):
+def run_eval_suite(scenarios: list[EvalScenario], store, results_file: str = RESULTS_FILE):
     """
     Resumable: already-completed scenarios (by name) are skipped on re-run,
     and each result is saved to disk the moment it finishes -- so a
     transient outage partway through never loses prior progress, and the
     same command re-run later simply picks up where it left off.
+
+    results_file lets different batteries (Phase 8's statistical battery
+    vs. the structural stress battery) write to separate files rather than
+    mixing unrelated results together.
     """
-    done = load_results()
+    done = load_results(results_file)
     print(f"{len(done)} of {len(scenarios)} scenarios already completed; resuming.")
 
     for scenario in scenarios:
@@ -153,7 +169,7 @@ def run_eval_suite(scenarios: list[EvalScenario], store):
             break
 
         print(f"   {'PASS' if row['passed'] else 'FAIL'}: {row['reason']}")
-        with open(RESULTS_FILE, "a") as f:
+        with open(results_file, "a") as f:
             f.write(json.dumps(row) + "\n")
         done[scenario.name] = row
         time.sleep(PAUSE_BETWEEN_SCENARIOS)

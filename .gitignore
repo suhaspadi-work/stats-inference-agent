@@ -29,3 +29,4 @@ local_data/
 .pytest_cache/
 eval_results.jsonl
 eval_data/
+eval_results_stress.jsonl
