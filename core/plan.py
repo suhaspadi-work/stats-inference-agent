@@ -40,6 +40,21 @@ class Deviation:
     at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: int = 1
 
+@dataclass(frozen=True)
+class UnaddressedIssue:
+    """
+    A real data-quality issue that was detected and proposed as a fix, but
+    the human rejected the operation. Carried forward on the plan so every
+    downstream stage -- method selection, execution, reporting -- can
+    account for it rather than silently treating the data as clean.
+    """
+    issue_type: str              # e.g. "duplicate_rows", "high_missingness"
+    description: str             # what was detected, in concrete terms
+    proposed_operation: str      # what fix was proposed and rejected
+    rejection_reason: str        # the human's stated reason, if given
+    affected_columns: tuple[str, ...] = field(default_factory=tuple)
+    schema_version: int = 1
+
 
 @dataclass(frozen=True)
 class AlternativeConsidered:
@@ -119,6 +134,7 @@ class AnalysisPlan:
     allowed_claims: str = "associations only"  # overridden explicitly if causal_status is EXPERIMENTAL
 
     deviations: tuple[Deviation, ...] = field(default_factory=tuple)
+    unaddressed_issues: tuple[UnaddressedIssue, ...] = field(default_factory=tuple)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: int = 1
@@ -195,6 +211,15 @@ class AnalysisPlan:
             raise ValueError("Deviations are only meaningful after a plan has been frozen.")
         new_deviation = Deviation(description=description, reason=reason)
         return self._replace(deviations=tuple(self.deviations) + (new_deviation,))
+
+    def record_unaddressed_issue(self, issue: UnaddressedIssue) -> "AnalysisPlan":
+        """
+        Record a detected data-quality issue that was proposed as a fix and
+        rejected. method_decisions-style defensive tuple() normalization
+        applies here too, in case this plan round-tripped through a
+        checkpoint before this call (see record_method_decision).
+        """
+        return self._replace(unaddressed_issues=tuple(self.unaddressed_issues) + (issue,))
 
     def mark_executed(self) -> "AnalysisPlan":
         if self.status != PlanStatus.FROZEN:
