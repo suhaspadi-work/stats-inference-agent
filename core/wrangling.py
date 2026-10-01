@@ -90,7 +90,7 @@ def execute_filter(dataset: Dataset, store: DatasetStore, operation: Operation) 
     df = store.read(dataset.storage_key)
     column = operation.params["column"]
     condition = operation.params["condition"]
-    value = operation.params["value"]
+    value = operation.params.get("value")
 
     if column not in df.columns:
         return dataset, operation.mark_failed(f"Column not found: {column}")

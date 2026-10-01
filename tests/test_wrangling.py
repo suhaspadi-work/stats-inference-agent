@@ -9,6 +9,7 @@ from core.wrangling import (
     propose_dedupe, execute_dedupe,
 )
 from core.ingestion import load_dataset
+from core.operation import Operation
 
 
 @pytest.fixture
@@ -162,3 +163,19 @@ def test_rejected_operation_is_never_executed(dataset, store):
     rejected = op.reject(reason="Not sure this filter is appropriate")
     with pytest.raises(ValueError):
         execute_filter(dataset, store, rejected)  # REJECTED, not APPROVED -- must be blocked
+
+def test_filter_not_null_works_without_a_value_param(dataset, store):
+    """
+    Regression test: not_null/is_null conditions don't need a 'value' key
+    at all -- execute_filter must not crash on its absence. Found via the
+    Phase 8 evaluation battery, where the model correctly proposed params
+    without 'value' for a not_null filter.
+    """
+    op = Operation(
+        op_type="filter", session_id=dataset.session_id,
+        input_handles=(dataset.handle,), params={"column": "region", "condition": "not_null"},
+        approval_status=ApprovalStatus.PENDING, rationale=simple_rationale(),
+    )
+    approved = op.approve()
+    new_dataset, finished = execute_filter(dataset, store, approved)
+    assert finished.approval_status == ApprovalStatus.APPROVED
