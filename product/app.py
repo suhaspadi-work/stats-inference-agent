@@ -174,6 +174,17 @@ elif st.session_state.get("authentication_status"):
                     st.session_state.graph_result = result
                     st.rerun()
 
+            elif itype == "clarification_needed":
+                st.subheader("A quick clarification")
+                st.write(payload["question"])
+                clarification = st.text_input("Your answer", key="clarification_input")
+                if st.button("Submit answer") and clarification:
+                    result = st.session_state.agent_app.invoke(
+                        Command(resume=clarification), graph_config,
+                    )
+                    st.session_state.graph_result = result
+                    st.rerun()
+
             else:
                 st.warning(f"Interrupt type '{itype}' isn't wired up in the UI yet.")
                 st.json(payload)
