@@ -3,7 +3,7 @@
 An agentic engineering project that performs statistical inference on user-provided datasets — descriptive analysis, hypothesis testing, A/B testing, and linear/logistic regression — with a hybrid tool/declarative-operation architecture designed for auditability and safety.
 
 ## Status
-🚧 In progress — Phases 1-8 complete, plus a dedicated stress-testing round (3 real bugs found and fixed). Next: product layer (simple tier) or medium-tier capabilities.
+🚧 In progress — Phases 1-8 complete, plus thorough stress testing (4 real bugs found and fixed: non-numeric outcome crash, invalid-edit crash, a high-cardinality privacy leak, and a zero-variance NaN result). Backend is product-ready. Next: product layer (simple tier).
 
 ## Core design principle
 The model chooses and interprets; deterministic code computes. The LLM never performs arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
@@ -88,7 +88,7 @@ Beyond Phase 8's statistical battery, a separate round of targeted stress testin
 1. **Non-numeric outcome column** — previously reached `scipy` uncaught, crashing with a confusing `TypeError`. Now validated at plan-drafting time with a clear, early `ValueError`.
 2. **Invalid predictor edit at freeze** — editing the plan's predictors at the human-approval step to a nonexistent column previously crashed deep in execution with a bare `KeyError`. Now validated against the real dataset at the edit point itself.
 3. **Privacy leak in high-cardinality columns** — `top_values` in `ModelSafeView` was populated unconditionally regardless of cardinality, meaning a column like raw email addresses (200 distinct values) leaked real values through to the model. Fixed with a cardinality gate; the existing test whose name claimed to cover this case was strengthened, since it had never actually checked `top_values` at all.
-
+4. **Zero-variance outcome column** — a dataset where the outcome has identical values in both groups silently produced a `NaN` p-value in a plan marked "executed," with no guard catching it. Now fails cleanly with an informative error before any test runs. 
 Also verified, with no issues found:
 - Chained rejections (two data-quality issues rejected in one wrangling checklist — both tracked and surfaced correctly)
 - Stakeholder-mode autonomy correctly always interrupts on missingness, never auto-approving it
@@ -97,8 +97,12 @@ Also verified, with no issues found:
 - Unicode/non-ASCII values throughout the pipeline
 - Multi-turn sessions: a second question against the same dataset correctly starts a fresh plan and builds on the first question's cleaned data lineage, not the raw original
 - Multi-interrupt sequencing (wrangling checklist followed by plan approval)
+- Tiny datasets (n=3 per group) complete correctly without degradation
+- A single-group column (only one value present) fails cleanly, consistent with the existing 0-group and 3-group guards
+- The wrangle-checklist's EDIT action (not just approve/reject) correctly applies human-modified parameters
+- Plan rejection terminates the graph cleanly — no lingering interrupt, no pending tasks, plan correctly never frozen
 
-**Known gaps, not yet tested:** the specific combination of an ambiguous *and* simultaneously messy dataset triggering classify's clarification gate together with wrangling's checklist in the same run; adversarial (as opposed to merely awkward) inputs designed to defeat guards; partial failure mid-sequence (e.g., a service outage after some wrangling operations already executed).
+**Known gaps, not yet tested:** adversarial (as opposed to merely awkward) inputs designed to defeat guards; malformed/corrupt file uploads (better tested once a real upload interface exists).
 
 ## Roadmap
 - [x] Environment + git setup
