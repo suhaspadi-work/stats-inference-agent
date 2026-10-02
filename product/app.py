@@ -1,8 +1,9 @@
 """
 Stats Inference Agent -- product layer, v1.
-Step 3 (piece 1): auth + file upload + dataset loading, wired to the
-backend's LocalDiskStore and the product's own SQLite session tracking.
-The actual agent graph (question -> interrupts -> report) comes next.
+Step 3: auth + file upload + dataset loading + the agent graph itself
+(question -> interrupts -> report), currently handling the plan_approval
+interrupt; other interrupt types fall back to a raw JSON display until
+wired up individually.
 """
 import sys
 import tempfile
@@ -13,13 +14,18 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
+from dotenv import load_dotenv
 
 # Make the backend's `core` package importable from this sibling folder.
+# This MUST happen before any `from core...` import below.
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
+load_dotenv(Path(__file__).parent.parent / "agent" / ".env")
 
+from langgraph.types import Command
 from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
-from db import init_db, create_session
+from core.graph import build_agent_graph
+from db import init_db, create_session, record_message
 
 st.set_page_config(page_title="Stats Inference Agent", page_icon="📊", layout="wide")
 
@@ -82,9 +88,87 @@ elif st.session_state.get("authentication_status"):
             st.rerun()
     else:
         st.success(f"Dataset loaded: **{st.session_state.dataset.name}** (version {st.session_state.dataset.version})")
-        st.write(f"Thread ID: `{st.session_state.thread_id}`")
+
+        if "agent_app" not in st.session_state:
+            st.session_state.agent_app = build_agent_graph(st.session_state.store)
+
+        graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+        # --- No run in progress: show the question input ---
+        if "graph_result" not in st.session_state:
+            question = st.text_input("What would you like to know about this data?")
+            if st.button("Ask") and question:
+                st.session_state.current_question = question
+                result = st.session_state.agent_app.invoke(
+                    {"request_text": question, "session_id": username, "dataset": st.session_state.dataset},
+                    graph_config,
+                )
+                st.session_state.graph_result = result
+                st.rerun()
+
+        # --- An interrupt is pending: render the right widget ---
+        elif "__interrupt__" in st.session_state.graph_result:
+            payload = st.session_state.graph_result["__interrupt__"][0].value
+            itype = payload.get("type")
+
+            if itype == "plan_approval":
+                st.subheader("Review the analysis plan")
+                st.write(f"**Question:** {payload['request_text']}")
+                st.write(f"**Outcome variable:** {payload['outcome_name']} ({payload['outcome_type']})")
+                st.write(f"**Comparing on:** {', '.join(payload['candidate_predictors'])}")
+                st.write(f"**Data type:** {payload['causal_status']}")
+                if payload.get("classification_rationale"):
+                    st.caption(payload["classification_rationale"])
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Approve"):
+                        result = st.session_state.agent_app.invoke(
+                            Command(resume={"action": "approve"}), graph_config,
+                        )
+                        st.session_state.graph_result = result
+                        st.rerun()
+                with col2:
+                    reason = st.text_input("Reason for rejecting (optional)", key="reject_reason")
+                    if st.button("❌ Reject"):
+                        result = st.session_state.agent_app.invoke(
+                            Command(resume={"action": "reject", "reason": reason or "No reason given"}), graph_config,
+                        )
+                        st.session_state.graph_result = result
+                        st.rerun()
+            else:
+                st.warning(f"Interrupt type '{itype}' isn't wired up in the UI yet.")
+                st.json(payload)
+
+        # --- Run finished: show the report ---
+        else:
+            plan = st.session_state.graph_result.get("plan")
+            report = st.session_state.graph_result.get("report")
+            test_result = st.session_state.graph_result.get("test_result")
+
+            if plan and plan.status.value == "executed" and report:
+                st.subheader("Report")
+                st.write(report)
+                if test_result:
+                    with st.expander("See the underlying statistics"):
+                        st.json(test_result)
+
+                record_message(st.session_state.db_session_id, st.session_state.current_question, report, test_result)
+
+                if st.button("Ask another question"):
+                    st.session_state.dataset = st.session_state.graph_result.get("dataset", st.session_state.dataset)
+                    for key in ("graph_result", "current_question"):
+                        st.session_state.pop(key, None)
+                    st.rerun()
+            else:
+                st.warning("The run finished without producing a report.")
+                st.json(st.session_state.graph_result)
+                if st.button("Start over"):
+                    for key in ("graph_result", "current_question"):
+                        st.session_state.pop(key, None)
+                    st.rerun()
 
         if st.button("Start a new session"):
-            for key in ("dataset", "thread_id", "db_session_id"):
+            for key in ("dataset", "thread_id", "db_session_id", "agent_app", "graph_result", "current_question"):
                 st.session_state.pop(key, None)
             st.rerun()
