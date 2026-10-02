@@ -27,7 +27,7 @@ from langgraph.types import Command
 from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
-from db import init_db, create_session, record_message
+from db import init_db, create_session, record_message, list_sessions, list_messages
 
 MAX_RETRIES = 4
 
@@ -83,6 +83,29 @@ def run_agent_step(fn):
             "Something unexpected went wrong processing this request. "
             "Please try a different question, or start a new session."
         )
+
+def render_session_history(session_row, messages):
+    """
+    Renders one past session's Q&A history, read-only. Deliberately
+    separated into its own function: once persistent checkpoints exist
+    (a future SqliteSaver swap), a sibling function like
+    resume_session(session_row) can be added alongside this one, and the
+    sidebar selector extended with a 'Resume' button -- this function
+    itself won't need to change when that happens.
+    """
+    st.subheader(f"History: {session_row['dataset_name']}")
+    st.caption(f"Session started {session_row['created_at'][:19].replace('T', ' ')}")
+    if not messages:
+        st.write("No questions were asked in this session.")
+    for msg in messages:
+        with st.container(border=True):
+            st.write(f"**Q:** {msg['question_text']}")
+            if msg["report_text"]:
+                st.write(f"**A:** {msg['report_text']}")
+            else:
+                st.caption("(This question did not produce a completed report.)")
+            st.caption(msg["created_at"][:19].replace("T", " "))
+
 st.set_page_config(page_title="Stats Inference Agent", page_icon="📊", layout="wide")
 
 init_db()
@@ -113,7 +136,29 @@ elif st.session_state.get("authentication_status"):
         st.write(f"Welcome, **{name}**")
         authenticator.logout()
 
+        st.divider()
+        st.subheader("Past sessions")
+        past_sessions = list_sessions(username)
+        if past_sessions:
+            session_labels = [f"{s['dataset_name']} ({s['created_at'][:10]})" for s in past_sessions]
+            selected_label = st.selectbox(
+                "View a past session's history", ["(none)"] + session_labels, key="history_selector",
+            )
+            if selected_label != "(none)":
+                selected_idx = session_labels.index(selected_label)
+                st.session_state.viewing_session_id = past_sessions[selected_idx]["id"]
+            else:
+                st.session_state.pop("viewing_session_id", None)
+        else:
+            st.caption("No past sessions yet.")
+
     st.title("📊 Stats Inference Agent")
+
+    if st.session_state.get("viewing_session_id"):
+        session_row = next(s for s in list_sessions(username) if s["id"] == st.session_state.viewing_session_id)
+        messages = list_messages(st.session_state.viewing_session_id)
+        render_session_history(session_row, messages)
+        st.stop()
 
     # One LocalDiskStore per logged-in session, created once and reused.
     if "store" not in st.session_state:
