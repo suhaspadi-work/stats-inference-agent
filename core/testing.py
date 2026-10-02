@@ -47,6 +47,12 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
     a = df.loc[df[group_col] == group_a_label, outcome_col].dropna().to_numpy()
     b = df.loc[df[group_col] == group_b_label, outcome_col].dropna().to_numpy()
 
+    if np.std(a) == 0 and np.std(b) == 0:
+        raise ValueError(
+            f"Cannot run a statistical test: the outcome column '{outcome_col}' has zero variance "
+            f"in both groups (every value is identical). There is no variation to test."
+        )
+
     _, shapiro_p_a = stats.shapiro(a) if len(a) >= 3 else (None, 1.0)
     _, shapiro_p_b = stats.shapiro(b) if len(b) >= 3 else (None, 1.0)
     _, levene_p = stats.levene(a, b)

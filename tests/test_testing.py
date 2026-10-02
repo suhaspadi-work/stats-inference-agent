@@ -5,6 +5,7 @@ from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.testing import run_two_group_test
 from core.synthetic import generate_two_group_continuous
+from core.testing import select_two_group_method
 
 
 @pytest.fixture
@@ -92,3 +93,24 @@ def test_rejects_wrong_number_of_groups(tmp_path, store):
     dataset = make_dataset(df, tmp_path, store)
     with pytest.raises(ValueError):
         run_two_group_test(dataset, store, outcome_col="value", group_col="group")
+
+def test_rejects_zero_variance_in_both_groups(store, tmp_path):
+    """
+    Regression test: a dataset where the outcome has zero variance in
+    BOTH groups must fail cleanly with an informative error, not silently
+    produce a NaN p-value. Found via final pre-product stress testing.
+    """
+    import pandas as pd
+    from core.ingestion import load_dataset
+
+    df = pd.DataFrame({
+        "id": range(1, 21),
+        "region": ["East"] * 10 + ["West"] * 10,
+        "total_spend": [50.0] * 20,
+    })
+    path = tmp_path / "zero_var.csv"
+    df.to_csv(path, index=False)
+    dataset = load_dataset(path, session_id="session-abc", name="zero_var", store=store)
+
+    with pytest.raises(ValueError, match="zero variance"):
+        select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region")
