@@ -210,9 +210,12 @@ elif st.session_state.get("authentication_status"):
                         st.session_state.pop(key, None)
                     st.rerun()
             else:
-                st.warning("The run finished without producing a report.")
-                st.json(st.session_state.graph_result)
-                if st.button("Start over"):
+                if st.session_state.graph_result.get("clarification_needed"):
+                    st.warning(st.session_state.graph_result["clarification_needed"])
+                    st.write("You can ask a new question below.")
+                else:
+                    st.warning("The run finished without producing a report.")
+                if st.button("Try a new question"):
                     for key in ("graph_result", "current_question"):
                         st.session_state.pop(key, None)
                     st.rerun()
