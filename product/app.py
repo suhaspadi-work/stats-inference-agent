@@ -61,6 +61,28 @@ def invoke_with_retry(fn):
             st.info(f"The model service is briefly busy — retrying in {wait:.0f} seconds...")
             time.sleep(wait)
 
+class AgentRunFailed(Exception):
+    """Raised when the agent run fails for a known, expected reason (a deliberately engineered ValueError from the backend) -- the message is already clean and safe to show directly to the user."""
+
+
+def run_agent_step(fn):
+    """
+    The single entry point every call site should use. Wraps invoke_with_retry
+    (which handles transient service issues) with a second layer that
+    distinguishes the backend's OWN deliberate ValueErrors (non-numeric
+    outcome, invalid predictor edit, zero variance, wrong group count --
+    all designed to fail with a clear, user-safe message) from genuinely
+    unexpected exceptions, which should never be shown raw to a user.
+    """
+    try:
+        return invoke_with_retry(fn)
+    except ValueError as e:
+        raise AgentRunFailed(str(e))
+    except Exception:
+        raise AgentRunFailed(
+            "Something unexpected went wrong processing this request. "
+            "Please try a different question, or start a new session."
+        )
 st.set_page_config(page_title="Stats Inference Agent", page_icon="📊", layout="wide")
 
 init_db()
@@ -133,12 +155,15 @@ elif st.session_state.get("authentication_status"):
             question = st.text_input("What would you like to know about this data?")
             if st.button("Ask") and question:
                 st.session_state.current_question = question
-                result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
-                    {"request_text": question, "session_id": username, "dataset": st.session_state.dataset},
-                    graph_config,
-                ))
-                st.session_state.graph_result = result
-                st.rerun()
+                try:
+                    result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                        {"request_text": question, "session_id": username, "dataset": st.session_state.dataset},
+                        graph_config,
+                    ))
+                    st.session_state.graph_result = result
+                    st.rerun()
+                except AgentRunFailed as e:
+                    st.error(str(e))
 
         # --- An interrupt is pending: render the right widget ---
         elif "__interrupt__" in st.session_state.graph_result:
@@ -157,19 +182,25 @@ elif st.session_state.get("authentication_status"):
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("✅ Approve"):
-                        result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
-                            Command(resume={"action": "approve"}), graph_config,
-                        ))
-                        st.session_state.graph_result = result
-                        st.rerun()
+                        try:
+                            result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                                Command(resume={"action": "approve"}), graph_config,
+                            ))
+                            st.session_state.graph_result = result
+                            st.rerun()
+                        except AgentRunFailed as e:
+                            st.error(str(e))
                 with col2:
                     reason = st.text_input("Reason for rejecting (optional)", key="reject_reason")
                     if st.button("❌ Reject"):
-                        result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
-                            Command(resume={"action": "reject", "reason": reason or "No reason given"}), graph_config,
-                        ))
-                        st.session_state.graph_result = result
-                        st.rerun()
+                        try:
+                            result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                                Command(resume={"action": "reject", "reason": reason or "No reason given"}), graph_config,
+                            ))
+                            st.session_state.graph_result = result
+                            st.rerun()
+                        except AgentRunFailed as e:
+                            st.error(str(e))
             elif itype == "wrangling_approval":
                 st.subheader("Review proposed data-cleaning steps")
                 st.write("The agent found some data-quality issues and proposes fixing them before analysis:")
@@ -202,22 +233,28 @@ elif st.session_state.get("authentication_status"):
                         decisions.append(decision)
 
                 if st.button("Submit decisions"):
-                    result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
-                        Command(resume={"decisions": decisions}), graph_config,
-                    ))
-                    st.session_state.graph_result = result
-                    st.rerun()
+                    try:
+                        result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                            Command(resume={"decisions": decisions}), graph_config,
+                        ))
+                        st.session_state.graph_result = result
+                        st.rerun()
+                    except AgentRunFailed as e:
+                        st.error(str(e))
 
             elif itype == "clarification_needed":
                 st.subheader("A quick clarification")
                 st.write(payload["question"])
                 clarification = st.text_input("Your answer", key="clarification_input")
                 if st.button("Submit answer") and clarification:
-                    result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
-                        Command(resume=clarification), graph_config,
-                    ))
-                    st.session_state.graph_result = result
-                    st.rerun()
+                    try:
+                        result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                            Command(resume=clarification), graph_config,
+                        ))
+                        st.session_state.graph_result = result
+                        st.rerun()
+                    except AgentRunFailed as e:
+                        st.error(str(e))
 
             else:
                 st.warning(f"Interrupt type '{itype}' isn't wired up in the UI yet.")

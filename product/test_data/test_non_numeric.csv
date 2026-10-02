@@ -1,0 +1,11 @@
+customer_id,region,total_spend
+1,East,low
+2,East,medium
+3,East,high
+4,East,low
+5,East,medium
+6,West,high
+7,West,low
+8,West,medium
+9,West,high
+10,West,low
