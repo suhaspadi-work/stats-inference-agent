@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
+import re
+import time
 
 import streamlit as st
 import streamlit_authenticator as stauth
@@ -26,6 +28,38 @@ from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
 from db import init_db, create_session, record_message
+
+MAX_RETRIES = 4
+
+
+def is_transient(msg: str) -> bool:
+    markers = (
+        "429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE",
+        "RateLimitError", "rate_limit_exceeded", "timed out", "Timeout", "timeout",
+    )
+    return any(m in msg for m in markers)
+
+
+def invoke_with_retry(fn):
+    """
+    Wraps a single agent_app.invoke(...) call with retry logic for transient
+    service issues (rate limits, timeouts) -- the same approach eval/runner.py
+    uses, now applied to the live product path. Shows the user a waiting
+    message rather than letting the app crash on a 429.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e)
+            if not is_transient(msg):
+                raise
+            if attempt == MAX_RETRIES - 1:
+                raise
+            match = re.search(r"try again in ([\d.]+)s", msg)
+            wait = float(match.group(1)) + 3 if match else 20 * (2 ** attempt)
+            st.info(f"The model service is briefly busy — retrying in {wait:.0f} seconds...")
+            time.sleep(wait)
 
 st.set_page_config(page_title="Stats Inference Agent", page_icon="📊", layout="wide")
 
@@ -99,10 +133,10 @@ elif st.session_state.get("authentication_status"):
             question = st.text_input("What would you like to know about this data?")
             if st.button("Ask") and question:
                 st.session_state.current_question = question
-                result = st.session_state.agent_app.invoke(
+                result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
                     {"request_text": question, "session_id": username, "dataset": st.session_state.dataset},
                     graph_config,
-                )
+                ))
                 st.session_state.graph_result = result
                 st.rerun()
 
@@ -123,17 +157,17 @@ elif st.session_state.get("authentication_status"):
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("✅ Approve"):
-                        result = st.session_state.agent_app.invoke(
+                        result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
                             Command(resume={"action": "approve"}), graph_config,
-                        )
+                        ))
                         st.session_state.graph_result = result
                         st.rerun()
                 with col2:
                     reason = st.text_input("Reason for rejecting (optional)", key="reject_reason")
                     if st.button("❌ Reject"):
-                        result = st.session_state.agent_app.invoke(
+                        result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
                             Command(resume={"action": "reject", "reason": reason or "No reason given"}), graph_config,
-                        )
+                        ))
                         st.session_state.graph_result = result
                         st.rerun()
             elif itype == "wrangling_approval":
@@ -168,9 +202,9 @@ elif st.session_state.get("authentication_status"):
                         decisions.append(decision)
 
                 if st.button("Submit decisions"):
-                    result = st.session_state.agent_app.invoke(
+                    result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
                         Command(resume={"decisions": decisions}), graph_config,
-                    )
+                    ))
                     st.session_state.graph_result = result
                     st.rerun()
 
@@ -179,9 +213,9 @@ elif st.session_state.get("authentication_status"):
                 st.write(payload["question"])
                 clarification = st.text_input("Your answer", key="clarification_input")
                 if st.button("Submit answer") and clarification:
-                    result = st.session_state.agent_app.invoke(
+                    result = invoke_with_retry(lambda: st.session_state.agent_app.invoke(
                         Command(resume=clarification), graph_config,
-                    )
+                    ))
                     st.session_state.graph_result = result
                     st.rerun()
 
