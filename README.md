@@ -3,7 +3,7 @@
 An agentic engineering project that performs statistical inference on user-provided datasets — descriptive analysis, hypothesis testing, A/B testing, and linear/logistic regression — with a hybrid tool/declarative-operation architecture designed for auditability and safety.
 
 ## Status
-🚧 In progress — Phases 1-8 complete (foundation through full agent loop and simple-tier evaluation). Next: medium-tier capabilities (EDA, multi-group tests, linear regression).
+🚧 In progress — Phases 1-8 complete, plus a dedicated stress-testing round (3 real bugs found and fixed). Next: product layer (simple tier) or medium-tier capabilities.
 
 ## Core design principle
 The model chooses and interprets; deterministic code computes. The LLM never performs arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
@@ -81,6 +81,24 @@ Raw results: `eval/phase8_results.jsonl`. Run `python -m eval.run_all` to reprod
 
 One real bug was found and fixed via this evaluation run: `execute_filter` crashed when a `not_null`/`is_null` condition's params correctly omitted the irrelevant `value` key — a gap in the original Phase 4 implementation, only exposed once the model began generating its own filter proposals with realistically-shaped (and correctly minimal) parameters.
 
+## Stress testing and edge cases
+
+Beyond Phase 8's statistical battery, a separate round of targeted stress testing probed structural failure modes, reasoning edge cases, and product-relevant multi-step scenarios. Three real bugs were found and fixed:
+
+1. **Non-numeric outcome column** — previously reached `scipy` uncaught, crashing with a confusing `TypeError`. Now validated at plan-drafting time with a clear, early `ValueError`.
+2. **Invalid predictor edit at freeze** — editing the plan's predictors at the human-approval step to a nonexistent column previously crashed deep in execution with a bare `KeyError`. Now validated against the real dataset at the edit point itself.
+3. **Privacy leak in high-cardinality columns** — `top_values` in `ModelSafeView` was populated unconditionally regardless of cardinality, meaning a column like raw email addresses (200 distinct values) leaked real values through to the model. Fixed with a cardinality gate; the existing test whose name claimed to cover this case was strengthened, since it had never actually checked `top_values` at all.
+
+Also verified, with no issues found:
+- Chained rejections (two data-quality issues rejected in one wrangling checklist — both tracked and surfaced correctly)
+- Stakeholder-mode autonomy correctly always interrupts on missingness, never auto-approving it
+- Classification stability across repeated identical requests
+- Performance at 5,000 rows (no degradation)
+- Unicode/non-ASCII values throughout the pipeline
+- Multi-turn sessions: a second question against the same dataset correctly starts a fresh plan and builds on the first question's cleaned data lineage, not the raw original
+- Multi-interrupt sequencing (wrangling checklist followed by plan approval)
+
+**Known gaps, not yet tested:** the specific combination of an ambiguous *and* simultaneously messy dataset triggering classify's clarification gate together with wrangling's checklist in the same run; adversarial (as opposed to merely awkward) inputs designed to defeat guards; partial failure mid-sequence (e.g., a service outage after some wrangling operations already executed).
 
 ## Roadmap
 - [x] Environment + git setup
