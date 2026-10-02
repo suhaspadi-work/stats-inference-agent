@@ -136,6 +136,44 @@ elif st.session_state.get("authentication_status"):
                         )
                         st.session_state.graph_result = result
                         st.rerun()
+            elif itype == "wrangling_approval":
+                st.subheader("Review proposed data-cleaning steps")
+                st.write("The agent found some data-quality issues and proposes fixing them before analysis:")
+
+                if payload.get("auto_approved_note"):
+                    st.info(payload["auto_approved_note"])
+
+                decisions = []
+                for op in payload["proposed_operations"]:
+                    with st.container(border=True):
+                        st.write(f"**{op['op_type']}** — {op['rationale']}")
+                        st.caption(f"Alternative considered: {op['alternative']}")
+
+                        action = st.radio(
+                            "Decision", ["approve", "edit", "reject"],
+                            key=f"wrangle_action_{op['index']}", horizontal=True,
+                        )
+                        decision = {"index": op["index"], "action": action}
+
+                        if action == "reject":
+                            reason = st.text_input(
+                                "Reason for rejecting", key=f"wrangle_reason_{op['index']}",
+                            )
+                            decision["reason"] = reason or "No reason given"
+                        elif action == "edit":
+                            st.caption(f"Current params: {op['params']}")
+                            st.caption("Editing params via UI isn't built yet in this version — approving with original params instead.")
+                            decision["action"] = "approve"
+
+                        decisions.append(decision)
+
+                if st.button("Submit decisions"):
+                    result = st.session_state.agent_app.invoke(
+                        Command(resume={"decisions": decisions}), graph_config,
+                    )
+                    st.session_state.graph_result = result
+                    st.rerun()
+
             else:
                 st.warning(f"Interrupt type '{itype}' isn't wired up in the UI yet.")
                 st.json(payload)
