@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Statistical Inference Agent — Build Blueprint</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e6e8ec;
+    --muted: #9aa1ad;
+    --accent: #7dd3fc;
+    --accent-dim: #38495a;
+    --done: #34d399;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 40px 24px 100px; }
+  header { margin-bottom: 36px; }
+  h1 { font-size: 1.7rem; margin: 0 0 8px; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; }
+  .principle {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 24px 0 32px;
+    font-size: 0.95rem;
+  }
+  .principle strong { color: var(--accent); }
+
+  table.summary {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0 36px;
+    font-size: 0.88rem;
+  }
+  table.summary th, table.summary td {
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.summary th { background: var(--panel); color: var(--accent); font-weight: 600; }
+  table.summary tr:nth-child(even) td { background: #12141a; }
+
+  .phase {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+  }
+  .phase-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+  .phase-num {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.85rem;
+    background: var(--accent-dim);
+    border-radius: 5px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+  .phase-title { font-size: 1.05rem; font-weight: 600; }
+  .phase-body { display: none; }
+  .phase.open .phase-body { display: block; }
+  .phase-toggle { margin-left: auto; color: var(--muted); font-size: 0.8rem; }
+
+  ul.items { margin: 8px 0 14px; padding-left: 20px; }
+  ul.items li { margin-bottom: 6px; font-size: 0.93rem; }
+
+  .checkpoint {
+    background: #0d1a15;
+    border: 1px solid #1f4a38;
+    border-radius: 7px;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    margin-top: 10px;
+  }
+  .checkpoint strong { color: var(--done); }
+
+  .status-box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .status-box select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 0.85rem;
+  }
+  .phase.status-done { border-left: 3px solid var(--done); }
+  .phase.status-progress { border-left: 3px solid var(--warn); }
+  .phase.status-todo { border-left: 3px solid var(--border); }
+
+  .notes {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-top: 32px;
+    font-size: 0.9rem;
+  }
+  .notes h2 { font-size: 1.1rem; margin-top: 0; }
+  .notes ul { padding-left: 20px; }
+  .notes li { margin-bottom: 8px; }
+
+  .expand-all {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    margin-bottom: 16px;
+  }
+
+  footer {
+    margin-top: 40px;
+    color: var(--muted);
+    font-size: 0.8rem;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Statistical Inference Agent — Build Blueprint</h1>
+  <div class="subtitle">Reference document for the phase-wise build. Click a phase to expand it. Status is saved locally in this browser.</div>
+</header>
+
+<div class="principle">
+  <strong>Governing principle:</strong> the model chooses and interprets; deterministic code computes. The LLM never does arithmetic or estimates a statistic itself — every number in a report comes from a tool call to real code (pandas / scipy / statsmodels), never from the model's own generation.
+</div>
+
+<h2 style="font-size:1.1rem;">Design decisions locked in before build</h2>
+<table class="summary">
+  <tr><th>Area</th><th>Decision</th></tr>
+  <tr><td>Users</td><td>Analysts, stakeholders, and portfolio reviewers — one engine, two interaction modes</td></tr>
+  <tr><td>v1 ceiling</td><td>Hard tier (messy multi-file driver analysis), built in vertical slices: simple &rarr; medium &rarr; hard</td></tr>
+  <tr><td>Methods in scope</td><td>Descriptives, two/multi-group tests, A/B testing, linear regression, logistic regression</td></tr>
+  <tr><td>Methods out of scope (v1)</td><td>Survival analysis, prediction/ML, observational causal methods (propensity scores, DiD), count/Bayesian models</td></tr>
+  <tr><td>Core object</td><td>A structured analysis plan: draft &rarr; refined &rarr; frozen &rarr; deviations logged</td></tr>
+  <tr><td>Data access</td><td>Hybrid — typed tools for inference, declarative reviewable operations for wrangling</td></tr>
+  <tr><td>Data model</td><td>Handles, not rows; immutable versions with lineage; every operation logged with impact</td></tr>
+  <tr><td>Model visibility</td><td>Middle privacy tier by default — schema, types, value frequencies, format patterns; no raw rows</td></tr>
+  <tr><td>Evaluation</td><td>Synthetic data with planted ground truth (correctness) + public/real data (process and robustness)</td></tr>
+  <tr><td>Orchestration</td><td>Likely LangGraph — explicit stages, plan-freeze checkpoints, approval interrupts</td></tr>
+  <tr><td>Model provider</td><td>Groq (<code>openai/gpt-oss-120b</code>) via langchain-groq — verified with real token-budget testing after Gemini's free tier proved too rate-limited during the companion SQL project; Llama models were deprecated from Groq's catalog mid-search, landing on GPT-OSS instead</td></tr>
+  <tr><td>Decision auditability</td><td>Every method selection, wrangling choice, and classification carries a rationale, alternatives considered and rejected, and evidence — with later changes explicitly linked back (<code>supersedes</code>) to what they replaced and why</td></tr>
+  <tr><td>Privacy enforcement</td><td>Structural, not just policy — a dedicated <code>ModelSafeView</code> type is the only shape of data any tool may return to the model</td></tr>
+</table>
+
+<button class="expand-all" onclick="toggleAll()">Expand all phases</button>
+
+<div id="phases"></div>
+
+<div class="notes">
+  <h2>Notes on the plan as a whole</h2>
+  <ul>
+    <li><strong>Phases 0–8 are the real foundation.</strong> Everything from Phase 9 onward mostly adds another method or tier onto a working skeleton — the heavy lifting is front-loaded.</li>
+    <li><strong>No phase produces a number the agent generated itself.</strong> Every checkpoint explicitly compares against a direct library call (scipy / statsmodels), the same discipline used throughout the Text-to-SQL build.</li>
+    <li><strong>This is a bigger build than the SQL agent</strong> — sixteen phases versus nine, and Phases 11–13 (hard tier) are genuinely difficult. Worth pacing across multiple sessions.</li>
+    <li><strong>Synthetic data generation (Phase 3) is placed deliberately early</strong>, before any test-execution tools, so every later phase has ground truth to check against from day one — this is what makes rigorous evaluation possible later without retrofitting it.</li>
+    <li><strong>Every consequential decision the agent makes must carry a rationale and alternatives considered</strong> — not just the final method choice (MethodDecision, Phase 1), but the wrangling approach (WranglingRationale, Phase 1) and the request classification itself (ClassificationDecision, Phase 6). If a later result doesn't turn out as expected, the record must show what changed and why the new approach is the better fit — this is what makes the agent's reasoning auditable rather than just its output.</li>
+    <li><strong>The model is structurally prevented from seeing raw data</strong> (ModelSafeView, Phase 1) — tools are typed to return schema/frequency/pattern summaries only, never a DataFrame or raw rows, closing the privacy-tier design as an enforced boundary rather than a followed convention.</li>
+  </ul>
+</div>
+
+<footer>
+  Companion project to the Text-to-SQL agent. Same discipline: build in verifiable phases, verify each step by hand before trusting the agent, document real findings (including bugs) rather than hiding them.
+</footer>
+
+</div>
+
+<script>
+const phases = [
+  {
+    n: "Phase 0",
+    title: "Project scaffolding",
+    items: [
+      "New repo, .gitignore (env, venv, data files, .db), README skeleton with status/roadmap, git init, GitHub remote, first push",
+      "Virtual environment; core dependencies: langchain, langgraph, langchain-groq (or provider of choice), python-dotenv, pandas, numpy, scipy, statsmodels, pydantic"
+    ],
+    checkpoint: "Clean git status, all imports succeed, model connectivity verified (reuse the one-line test pattern from the SQL project)."
+  },
+  {
+    n: "Phase 1",
+    title: "Core data structures",
+    items: [
+      "No agent behavior yet — pure Python, the foundation everything else reads and writes",
+      "Dataset handle type: session-scoped name/version, lineage (parent version + operation that produced it), an opaque storage_key resolved by a pluggable DatasetStore (LocalDiskStore for v1) rather than a bare local path — so a future upload-based front end / cloud storage swap doesn't require touching this type",
+      "Operation schema: op type, inputs, params, approval status (including a FAILED state, distinct from REJECTED, for execution-time system faults), impact record, and a WranglingRationale (rationale + alternatives considered + evidence) — the reviewable object, now with the same audit trail as method decisions",
+      "AnalysisPlan schema: status enum (draft / refined / frozen / executed), a MethodDecision log (not a bare method string) recording rationale, alternatives considered, evidence, and supersedes links so a later method change is traceable back to what it replaced and why; freeze() structurally refuses causal claims on observational data",
+      "ModelSafeView: the only shape of data any tool may hand the model — schema, types, missingness, capped top-value frequencies, detected format patterns; no raw rows or full columns, ever",
+      "schema_version added to every record type, so future migrations of logged JSON Lines data are possible",
+      "A simple on-disk store: dataset versions as files, append-only log of operations and plan states (JSON Lines) — still pending as of this writeup"
+    ],
+    checkpoint: "Unit tests (no LLM involved): Dataset lineage and store round-trip verified; Operation's approve/reject/FAILED state machine and rationale persistence verified; AnalysisPlan's freeze guardrails (no method, causal claims on observational data) and MethodDecision supersession verified end to end."
+  },
+  {
+    n: "Phase 2",
+    title: "Ingestion and profiling tools",
+    items: [
+      "load_dataset(path) -> Dataset (CSV/Excel)",
+      "profile_dataset(handle) -> ProfileReport: row/column counts, types, missingness, duplicates, cardinality, value frequencies and format patterns (never raw rows, per privacy tier)"
+    ],
+    checkpoint: "Run directly (no agent) against one clean synthetic CSV; confirm the profile matches what you know is in the file by hand."
+  },
+  {
+    n: "Phase 3",
+    title: "Synthetic data generator",
+    items: [
+      "Deliberately placed early, before any test-execution tools, so every later phase has ground truth from day one",
+      "Generator for the simple tier first: two groups, a continuous outcome, configurable true effect size (including zero, for A/A testing)"
+    ],
+    checkpoint: "Generate an A/A dataset and an effect-planted dataset; run a plain scipy.stats.ttest_ind by hand against both; confirm A/A p-values behave as expected across repeated draws and the planted effect is detectable."
+  },
+  {
+    n: "Phase 4",
+    title: "Simple-tier wrangling operations",
+    items: [
+      "First operation family from the whitelist: cast types, rename, filter, dedupe — each a typed, logged Operation"
+    ],
+    checkpoint: "Call each operation directly; confirm the impact record (rows before/after) is correct; confirm a rejected/invalid operation is refused cleanly, not silently no-op'd."
+  },
+  {
+    n: "Phase 5",
+    title: "Hypothesis testing tools",
+    items: [
+      "run_two_group_test(handle, outcome, group_col): assumption checks (normality, variance homogeneity) feeding a decision between t-test / Welch / Mann-Whitney",
+      "Returns statistic, p-value, effect size, and CI — all real scipy output, never model-generated numbers"
+    ],
+    checkpoint: "Run against Phase 3's synthetic data directly (no agent); confirm results match an independent scipy calculation exactly."
+  },
+  {
+    n: "Phase 6",
+    title: "Plan classifier and simple-tier agent loop",
+    items: [
+      "First point an actual LLM agent exists",
+      "The router: given a natural-language request + a profiled dataset, produce a draft AnalysisPlan",
+      "The classification step itself (question_type, causal_status) must produce a ClassificationDecision — same shape as MethodDecision: chosen classification, alternatives considered and rejected, evidence — recorded BEFORE the AnalysisPlan is drafted, not decided silently",
+      "Low-confidence classifications must interrupt for human clarification, using the same interrupt mechanism as the plan-freeze gate — the agent does not silently proceed on a guess when the request is genuinely ambiguous (e.g. could plausibly be 'association' or 'driver_analysis')",
+      "Wire model + Phase 2/4/5 tools into a LangGraph graph: intake &rarr; classify (with ClassificationDecision, clarify if low-confidence) &rarr; profile &rarr; plan (draft) &rarr; plan (freeze, human-in-the-loop interrupt) &rarr; execute &rarr; report"
+    ],
+    checkpoint: "Full trace on one simple synthetic A/B question end to end; confirm the plan freezes before execution; confirm the reported effect size/CI matches Phase 5's direct-call result; confirm a deliberately ambiguous test request triggers the clarification interrupt rather than a silent guess."
+  },
+  {
+    n: "Phase 7",
+    title: "Human-in-the-loop and the autonomy dial",
+    items: [
+      "Interrupts on: plan freeze, any row-dropping or imputation operation, join operations with unmatched keys",
+      "Config-driven autonomy levels — analyst mode asks more; stakeholder mode uses conservative defaults and logs the choice"
+    ],
+    checkpoint: "Interrupt/approve/reject/resume verification, same as the SQL agent; confirm a rejected wrangling step doesn't get silently retried with fabricated results — direct callback to the fabrication bug found and fixed in the SQL build."
+  },
+  {
+    n: "Phase 8",
+    title: "Simple-tier evaluation",
+    items: [
+      "Run the classifier + full pipeline against a batch of synthetic A/A and planted-effect datasets"
+    ],
+    checkpoint: "A/A rejection rate near 5% at alpha 0.05 across repeated runs; planted effects recovered within their CI."
+  },
+  {
+    n: "Phase 9",
+    title: "Medium-tier: EDA and multi-group tools",
+    items: [
+      "EDA tool set: distribution summaries, correlation tables, group-comparison summaries (numeric/text output only, no raw row plotting)",
+      "Multi-group tests: ANOVA / Kruskal-Wallis, multiple-comparison correction (Bonferroni / Holm)"
+    ],
+    checkpoint: "Direct-call verification against statsmodels/scipy, then through the agent on a 3+ group synthetic dataset."
+  },
+  {
+    n: "Phase 10",
+    title: "Linear regression tools",
+    items: [
+      "fit_linear_regression: OLS via statsmodels, coefficients with CIs, diagnostic suite (residuals, heteroskedasticity test, VIF for multicollinearity, influence measures)",
+      "Causal-language guardrail: report generator caps claims to \"associated with\" unless the plan's causal_status says otherwise"
+    ],
+    checkpoint: "Synthetic data with a known linear relationship + a known confound; confirm coefficients recover planted values and the report avoids causal language on observational data."
+  },
+  {
+    n: "Phase 11",
+    title: "Multi-file data assembly (hard tier, part 1)",
+    items: [
+      "join_datasets operation with declared cardinality and fan-out/orphan-key detection",
+      "aggregate_dataset for collapsing many-rows-per-key tables before joining",
+      "Extend the synthetic generator: a multi-table churn scenario with known logistic coefficients"
+    ],
+    checkpoint: "Join two synthetic tables with a deliberately introduced fan-out bug; confirm the operation flags it rather than silently multiplying rows."
+  },
+  {
+    n: "Phase 12",
+    title: "Feature construction and logistic regression (hard tier, part 2)",
+    items: [
+      "Derive operations: date differences (tenure), binning, restricted-expression features",
+      "fit_logistic_regression: coefficients as odds ratios, CIs, assumption checks (separation, events-per-predictor rule)"
+    ],
+    checkpoint: "Run the full churn scenario from Phase 11's generator end to end; confirm recovered coefficients match planted values within CI."
+  },
+  {
+    n: "Phase 13",
+    title: "Full hard-tier integration",
+    items: [
+      "Complete pipeline on the three-messy-file churn scenario: classify &rarr; assemble &rarr; clean (with approvals) &rarr; EDA &rarr; plan freeze &rarr; logistic regression &rarr; report"
+    ],
+    checkpoint: "Full trace review; every reported number traced back through the operation log to raw input — the provenance requirement from the design discussion."
+  },
+  {
+    n: "Phase 14",
+    title: "Reporting layer and interaction modes",
+    items: [
+      "Plain-language report generator reading from the frozen plan + operation log + test results (never re-deriving numbers itself)",
+      "Analyst mode (full plan, code, diagnostics visible) vs. stakeholder mode (conservative defaults, plain language, technical detail collapsed)"
+    ],
+    checkpoint: "Same report content in both modes; confirm stakeholder mode loses no material caveat, only presentation."
+  },
+  {
+    n: "Phase 15",
+    title: "Real-world evaluation",
+    items: [
+      "One public dataset (churn or A/B, TBD) run through the full pipeline, cross-checked against a manual statsmodels analysis",
+      "Your own dataset, kept out of the repo, run the same way"
+    ],
+    checkpoint: "Documented findings, including any failure modes discovered — these become README material, not something to hide."
+  },
+  {
+    n: "Phase 16",
+    title: "Documentation and portfolio write-up",
+    items: [
+      "README with architecture, design rationale (privacy tiers, plan-freeze, hybrid tool/declarative-op split), known limitations, roadmap",
+      "Possibly a written case study on the churn scenario as a demonstration piece"
+    ],
+    checkpoint: "Repo is reviewable end to end by someone who wasn't in the build conversations."
+  }
+];
+
+const container = document.getElementById('phases');
+phases.forEach((p, i) => {
+  const div = document.createElement('div');
+  div.className = 'phase status-todo';
+  div.id = 'phase-' + i;
+  div.innerHTML = `
+    <div class="phase-header" onclick="this.parentElement.classList.toggle('open')">
+      <span class="phase-num">${p.n}</span>
+      <span class="phase-title">${p.title}</span>
+      <span class="phase-toggle">click to expand</span>
+    </div>
+    <div class="phase-body">
+      <ul class="items">${p.items.map(it => `<li>${it}</li>`).join('')}</ul>
+      <div class="checkpoint"><strong>Checkpoint:</strong> ${p.checkpoint}</div>
+      <div class="status-box">
+        <label style="font-size:0.85rem;color:var(--muted);">Status:</label>
+        <select onchange="setStatus(${i}, this.value)">
+          <option value="todo">Not started</option>
+          <option value="progress">In progress</option>
+          <option value="done">Done</option>
+        </select>
+      </div>
+    </div>
+  `;
+  container.appendChild(div);
+});
+
+function setStatus(i, status) {
+  const el = document.getElementById('phase-' + i);
+  el.classList.remove('status-todo', 'status-progress', 'status-done');
+  el.classList.add('status-' + status);
+  try { localStorage.setItem('phase-status-' + i, status); } catch (e) {}
+}
+
+function loadStatuses() {
+  phases.forEach((p, i) => {
+    try {
+      const s = localStorage.getItem('phase-status-' + i);
+      if (s) {
+        document.getElementById('phase-' + i).classList.remove('status-todo');
+        document.getElementById('phase-' + i).classList.add('status-' + s);
+        document.getElementById('phase-' + i).querySelector('select').value = s;
+      }
+    } catch (e) {}
+  });
+}
+loadStatuses();
+
+let allOpen = false;
+function toggleAll() {
+  allOpen = !allOpen;
+  document.querySelectorAll('.phase').forEach(p => {
+    if (allOpen) p.classList.add('open'); else p.classList.remove('open');
+  });
+  document.querySelector('.expand-all').textContent = allOpen ? 'Collapse all phases' : 'Expand all phases';
+}
+</script>
+
+</body>
+</html>

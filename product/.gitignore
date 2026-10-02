@@ -1,0 +1,5 @@
+.venv/
+config.yaml
+*.db
+__pycache__/
+generate_credentials.py
