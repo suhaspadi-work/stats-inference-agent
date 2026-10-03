@@ -8,7 +8,7 @@ from core.plan import ClassificationDecision
 from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
-from core.plan import AnalysisPlan
+from core.plan import AnalysisPlan, OutcomeType
 from core.testing import execute_two_group_test, select_two_group_method
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
@@ -22,6 +22,7 @@ from core.wrangling import (
 )
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
+from core.report import generate_report, check_for_causal_language, generate_descriptive_report
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -227,19 +228,36 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
     to the AnalysisPlan it needs to travel with (R2).
     """
     def draft_plan_node(state: AgentState) -> dict:
-        fields = draft_fn(state["request_text"], state["profile"])
-        validate_draft_plan_fields(fields, state["profile"])
+        classification = state["classification"]
 
-        plan = AnalysisPlan.from_classification(
-            request_text=state["request_text"],
-            session_id=state["session_id"],
-            classification=state["classification"],
-            outcome_name=fields.outcome_name,
-            outcome_type=fields.outcome_type,
-            unit_of_analysis=fields.unit_of_analysis,
-            data_sources=(state["dataset"].handle,),
-        )
-        plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
+        if classification.question_type.value == "descriptive":
+            # EDA describes the whole dataset -- there is no single outcome
+            # column or set of predictors to draft, so skip the LLM call
+            # entirely rather than forcing the model to invent values for
+            # fields that don't apply to this question type.
+            plan = AnalysisPlan.from_classification(
+                request_text=state["request_text"],
+                session_id=state["session_id"],
+                classification=classification,
+                outcome_name="(whole dataset)",
+                outcome_type=OutcomeType.CONTINUOUS,  # placeholder; eda_node never reads this
+                unit_of_analysis="row",
+                data_sources=(state["dataset"].handle,),
+            )
+        else:
+            fields = draft_fn(state["request_text"], state["profile"])
+            validate_draft_plan_fields(fields, state["profile"])
+
+            plan = AnalysisPlan.from_classification(
+                request_text=state["request_text"],
+                session_id=state["session_id"],
+                classification=classification,
+                outcome_name=fields.outcome_name,
+                outcome_type=fields.outcome_type,
+                unit_of_analysis=fields.unit_of_analysis,
+                data_sources=(state["dataset"].handle,),
+            )
+            plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
 
         pending = state.get("pending_unaddressed_issues")
         if pending:
@@ -393,7 +411,7 @@ def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             )
 
         result = compute_descriptive_stats(state["dataset"], store)
-        updated_plan = plan.mark_executed()
+        updated_plan = plan.mark_executed_descriptive()
 
         return {
             "plan": updated_plan,
@@ -424,7 +442,12 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
     """
     def report_node(state: AgentState) -> dict:
         plan = state["plan"]
-        report_text = report_fn(plan, state["test_result"])
-        check_for_causal_language(report_text, plan)
+        if plan.question_type.value == "descriptive":
+            report_text = generate_descriptive_report(plan, state["descriptive_result"])
+            # No check_for_causal_language call here: a pure description makes
+            # no inferential claim for that guard to meaningfully check.
+        else:
+            report_text = report_fn(plan, state["test_result"])
+            check_for_causal_language(report_text, plan)
         return {"report": report_text}
     return report_node

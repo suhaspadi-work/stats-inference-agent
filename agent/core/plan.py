@@ -226,3 +226,24 @@ class AnalysisPlan:
         if self.status != PlanStatus.FROZEN:
             raise ValueError("Cannot execute a plan that was never frozen.")
         return self._replace(status=PlanStatus.EXECUTED)
+
+    def mark_executed_descriptive(self) -> "AnalysisPlan":
+        """
+        A separate transition specifically for DESCRIPTIVE plans, which
+        structurally never go through freeze() -- EDA makes no method
+        choice for freeze's primary_method precondition to check, and no
+        causal claim for freeze's second guard to protect against. Rather
+        than relax mark_executed()'s guard (which would silently allow
+        ANY plan to skip the pre-registration discipline) or fabricate a
+        placeholder MethodDecision just to satisfy freeze() (which would
+        put a fictional "method chosen" entry in the audit trail for a
+        capability that never chooses one), this method makes the EDA
+        exception explicit and narrow: only DESCRIPTIVE plans may use it.
+        """
+        if self.question_type != QuestionType.DESCRIPTIVE:
+            raise ValueError(
+                f"mark_executed_descriptive() is only valid for DESCRIPTIVE plans, "
+                f"got question_type={self.question_type.value}. Use mark_executed() instead, "
+                f"which correctly requires the plan to have been frozen first."
+            )
+        return self._replace(status=PlanStatus.EXECUTED)

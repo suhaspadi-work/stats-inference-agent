@@ -116,3 +116,51 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
 
     check_for_causal_language(report_text, plan)
     return report_text
+
+def generate_descriptive_report(plan: AnalysisPlan, descriptive_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+    """
+    Generates a plain-language EDA summary -- structurally different from
+    generate_report: no p-value, no causal-language guard needed (a
+    description makes no inferential claim to guard against), and the
+    content is a dataset overview rather than a single test's conclusion.
+    """
+    model = init_chat_model(model_name, model_provider="groq")
+
+    column_summaries = []
+    for col in descriptive_result["column_stats"]:
+        if col["is_numeric"]:
+            column_summaries.append(
+                f"- {col['name']} (numeric): mean={col['mean']:.2f}, median={col['median']:.2f}, "
+                f"std={col['std']:.2f}, range=[{col['min']:.2f}, {col['max']:.2f}], skewness={col['skewness']:.2f}"
+            )
+        else:
+            top = ", ".join(f"{v} ({c})" for v, c in col["top_value_counts"][:3])
+            column_summaries.append(f"- {col['name']} (categorical): most common values: {top}")
+
+    correlation_text = ""
+    if descriptive_result["correlation_matrix"]:
+        cm = descriptive_result["correlation_matrix"]
+        pairs = []
+        for i, col_a in enumerate(cm["columns"]):
+            for j, col_b in enumerate(cm["columns"]):
+                if i < j:
+                    pairs.append(f"{col_a}-{col_b}: {cm['matrix'][i][j]:.2f}")
+        correlation_text = f"\n\nCorrelations between numeric columns: {', '.join(pairs)}"
+
+    system_prompt = (
+        "You write brief, plain-language summaries describing a dataset for a "
+        "non-technical audience. This is pure description -- there is no hypothesis "
+        "being tested and no causal or associational claim being made, so do not use "
+        "language implying a statistical test or comparison was run. Simply describe "
+        "what is in the data: typical values, spread, notable patterns, and any strong "
+        "correlations worth a reader's attention. Report the actual numbers given -- "
+        "never invent or round away meaningful precision. Keep it to 4-6 sentences."
+    )
+
+    human_prompt = (
+        f"Dataset has {descriptive_result['row_count']} rows.\n\n"
+        f"Columns:\n" + "\n".join(column_summaries) + correlation_text
+    )
+
+    response = model.invoke([("system", system_prompt), ("human", human_prompt)])
+    return response.content

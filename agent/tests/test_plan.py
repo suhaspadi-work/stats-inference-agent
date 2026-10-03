@@ -102,3 +102,26 @@ def test_record_method_decision_tolerates_list_from_checkpoint_deserialization(d
 
     assert len(result.method_decisions) == 2
     assert result.primary_method == "mann_whitney_u"
+
+def test_mark_executed_descriptive_works_without_freeze():
+    """EDA plans skip freeze entirely -- this transition must work from DRAFT status directly."""
+    plan = AnalysisPlan(
+        request_text="Describe this data", session_id="session-abc",
+        question_type=QuestionType.DESCRIPTIVE, causal_status=CausalStatus.OBSERVATIONAL,
+        outcome_name="(whole dataset)", outcome_type=OutcomeType.CONTINUOUS,
+        unit_of_analysis="row", data_sources=("test@v1",),
+    )
+    executed = plan.mark_executed_descriptive()
+    assert executed.status == PlanStatus.EXECUTED
+
+
+def test_mark_executed_descriptive_rejects_non_descriptive_plans():
+    """The guard must be narrow -- this is not a general freeze-bypass for any plan type."""
+    plan = AnalysisPlan(
+        request_text="Compare spend", session_id="session-abc",
+        question_type=QuestionType.TWO_GROUP_COMPARISON, causal_status=CausalStatus.OBSERVATIONAL,
+        outcome_name="total_spend", outcome_type=OutcomeType.CONTINUOUS,
+        unit_of_analysis="customer", data_sources=("test@v1",),
+    )
+    with pytest.raises(ValueError, match="only valid for DESCRIPTIVE plans"):
+        plan.mark_executed_descriptive()    
