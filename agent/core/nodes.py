@@ -284,13 +284,20 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
         predictors = plan.candidate_predictors or ()
         if len(predictors) != 1:
             raise ValueError(
-                f"select_two_group_method requires exactly one grouping predictor; "
+                f"Method selection requires exactly one grouping predictor; "
                 f"got {len(predictors)}: {predictors}."
             )
-        choice = select_two_group_method(
-            dataset=state["dataset"], store=store,
-            outcome_col=plan.outcome_name, group_col=predictors[0],
-        )
+
+        if plan.question_type.value == "multi_group_comparison":
+            choice = select_multi_group_method(
+                dataset=state["dataset"], store=store,
+                outcome_col=plan.outcome_name, group_col=predictors[0],
+            )
+        else:
+            choice = select_two_group_method(
+                dataset=state["dataset"], store=store,
+                outcome_col=plan.outcome_name, group_col=predictors[0],
+            )
         decision = choice.decision
         if plan.unaddressed_issues:
             decision = replace(decision, evidence={
@@ -363,34 +370,60 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         predictors = plan.candidate_predictors or ()
         if len(predictors) != 1:
             raise ValueError(
-                f"execute_two_group_test requires exactly one grouping predictor; "
+                f"Execution requires exactly one grouping predictor; "
                 f"got {len(predictors)}: {predictors}."
             )
         method = plan.primary_method
         if method is None:
             raise ValueError("Cannot execute: no method was selected on the plan before freeze.")
 
-        result = execute_two_group_test(
-            dataset=state["dataset"], store=store,
-            outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
-        )
-
         updated_plan = plan.mark_executed()  # no new MethodDecision -- already recorded pre-freeze
 
-        return {
-            "plan": updated_plan,
-            "test_result": {
-                "method": result.method,
-                "statistic": result.statistic,
-                "p_value": result.p_value,
-                "effect_size": result.effect_size,
-                "confidence_interval": result.confidence_interval,
-                "group_a_n": result.group_a_n,
-                "group_b_n": result.group_b_n,
-                "group_a_mean": result.group_a_mean,
-                "group_b_mean": result.group_b_mean,
-            },
-        }
+        if plan.question_type.value == "multi_group_comparison":
+            result = execute_multi_group_test(
+                dataset=state["dataset"], store=store,
+                outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
+            )
+            return {
+                "plan": updated_plan,
+                "test_result": {
+                    "result_type": "multi_group",
+                    "method": result.method,
+                    "statistic": result.statistic,
+                    "p_value": result.p_value,
+                    "post_hoc_method": result.post_hoc_method,
+                    "pairwise_comparisons": [
+                        {
+                            "group_a": c.group_a, "group_b": c.group_b, "mean_diff": c.mean_diff,
+                            "ci_lower": c.ci_lower, "ci_upper": c.ci_upper,
+                            "p_value": c.p_value, "significant": c.significant,
+                        }
+                        for c in result.pairwise_comparisons
+                    ],
+                    "group_ns": result.group_ns,
+                    "group_means": result.group_means,
+                },
+            }
+        else:
+            result = execute_two_group_test(
+                dataset=state["dataset"], store=store,
+                outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
+            )
+            return {
+                "plan": updated_plan,
+                "test_result": {
+                    "result_type": "two_group",
+                    "method": result.method,
+                    "statistic": result.statistic,
+                    "p_value": result.p_value,
+                    "effect_size": result.effect_size,
+                    "confidence_interval": result.confidence_interval,
+                    "group_a_n": result.group_a_n,
+                    "group_b_n": result.group_b_n,
+                    "group_a_mean": result.group_a_mean,
+                    "group_b_mean": result.group_b_mean,
+                },
+            }
     return execute_node
 
 def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
