@@ -114,3 +114,23 @@ def test_rejects_zero_variance_in_both_groups(store, tmp_path):
 
     with pytest.raises(ValueError, match="zero variance"):
         select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region")
+
+def test_chart_data_present_on_method_decision(store, tmp_path):
+    """Retroactive fix: two-group comparison should carry the same boxplot/qq_plot visual evidence as multi-group."""
+    import pandas as pd
+    from core.ingestion import load_dataset
+
+    df = pd.DataFrame({
+        "id": range(1, 41),
+        "region": ["East"] * 20 + ["West"] * 20,
+        "total_spend": [50.0 + i for i in range(20)] + [60.0 + i for i in range(20)],
+    })
+    path = tmp_path / "chart_check.csv"
+    df.to_csv(path, index=False)
+    dataset = load_dataset(path, session_id="session-abc", name="chart_check", store=store)
+
+    choice = select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region")
+    chart_types = {c["chart_type"] for c in choice.decision.chart_data}
+    assert "boxplot_by_group" in chart_types
+    assert "qq_plot" in chart_types
+    assert sum(1 for c in choice.decision.chart_data if c["chart_type"] == "qq_plot") == 2  # one per group

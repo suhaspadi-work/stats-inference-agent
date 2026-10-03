@@ -6,7 +6,7 @@ import pandas as pd
 
 from core.dataset import Dataset, DatasetStore
 from core.plan import MethodDecision, AlternativeConsidered
-from core.plan import MethodDecision, AlternativeConsidered
+import core.visualization as viz
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,14 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
             AlternativeConsidered(method="bootstrap_test", rejected_because="sample size is sufficient for a standard rank-based test"),
         )
 
-    decision = MethodDecision(stage="test_selection", chosen_method=method, rationale=rationale, alternatives=alternatives, evidence=evidence)
+    boxplot = viz.boxplot_by_group({str(group_a_label): a, str(group_b_label): b}, outcome_col)
+    qq_plots = [viz.qq_plot(a, str(group_a_label)), viz.qq_plot(b, str(group_b_label))]
+    chart_data = (boxplot, *qq_plots)
+
+    decision = MethodDecision(
+        stage="test_selection", chosen_method=method, rationale=rationale,
+        alternatives=alternatives, evidence=evidence, chart_data=chart_data,
+    )
     return TwoGroupMethodChoice(method=method, decision=decision)
 
 
