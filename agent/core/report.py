@@ -164,3 +164,71 @@ def generate_descriptive_report(plan: AnalysisPlan, descriptive_result: dict, mo
 
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     return response.content
+
+def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+    """
+    Generates a plain-language report for a multi-group comparison --
+    reuses the same causal-language guard as generate_report (a real
+    inferential claim is still being made here), but the content differs:
+    an omnibus p-value plus, when significant, which SPECIFIC group pairs
+    the post-hoc test found to differ.
+    """
+    model = init_chat_model(model_name, model_provider="groq")
+
+    language_constraint = (
+        "IMPORTANT: This data is observational, not from a randomized experiment. "
+        "You MUST describe the result as an association, not a cause. Never use words "
+        "like 'causes', 'drives', 'leads to', or 'results in'. Use phrasing like "
+        "'is associated with' or 'is correlated with' instead."
+        if plan.allowed_claims == "associations only"
+        else "This data comes from a randomized experiment, so causal language is appropriate here."
+    )
+
+    unaddressed_constraint = ""
+    if plan.unaddressed_issues:
+        issues_text = "; ".join(
+            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
+            for i in plan.unaddressed_issues
+        )
+        unaddressed_constraint = (
+            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
+            f"by explicit user decision: {issues_text}. You MUST mention this plainly."
+        )
+
+    group_summary = "\n".join(
+        f"- {label}: n={test_result['group_ns'][label]}, mean={test_result['group_means'][label]:.2f}"
+        for label in test_result["group_ns"]
+    )
+
+    post_hoc_summary = ""
+    if test_result["pairwise_comparisons"]:
+        sig_pairs = [c for c in test_result["pairwise_comparisons"] if c["significant"]]
+        non_sig_pairs = [c for c in test_result["pairwise_comparisons"] if not c["significant"]]
+        post_hoc_summary = (
+            f"\n\nPost-hoc test ({test_result['post_hoc_method']}) results:\n"
+            f"Significantly different pairs: "
+            + (", ".join(f"{c['group_a']} vs {c['group_b']} (p={c['p_value']:.4f})" for c in sig_pairs) if sig_pairs else "none")
+            + "\nNot significantly different pairs: "
+            + (", ".join(f"{c['group_a']} vs {c['group_b']}" for c in non_sig_pairs) if non_sig_pairs else "none")
+        )
+
+    system_prompt = (
+        "You write brief, plain-language summaries of a multi-group statistical "
+        "comparison for a non-technical audience. Report the actual numbers given -- "
+        "never invent or round away meaningful precision. If the omnibus test was "
+        "significant and post-hoc results are given, explicitly state WHICH group "
+        "pairs differ and which don't -- this is the key finding, not just the "
+        "overall p-value. Keep it to 5-7 sentences.\n\n"
+        f"{language_constraint}"
+        f"{unaddressed_constraint}"
+    )
+
+    human_prompt = (
+        f"Comparing {plan.outcome_name} across groups:\n{group_summary}\n\n"
+        f"Omnibus test: {test_result['method']}, statistic={test_result['statistic']:.4f}, "
+        f"p-value={test_result['p_value']:.6f}"
+        f"{post_hoc_summary}"
+    )
+
+    response = model.invoke([("system", system_prompt), ("human", human_prompt)])
+    return response.content

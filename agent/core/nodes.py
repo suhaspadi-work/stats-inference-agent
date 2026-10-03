@@ -10,6 +10,7 @@ from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan, OutcomeType
 from core.testing import execute_two_group_test, select_two_group_method
+from core.multi_group import execute_multi_group_test, select_multi_group_method
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
 from core.detection import detect_all_issues
@@ -22,7 +23,7 @@ from core.wrangling import (
 )
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
-from core.report import generate_report, check_for_causal_language, generate_descriptive_report
+from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -479,6 +480,9 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
             report_text = generate_descriptive_report(plan, state["descriptive_result"])
             # No check_for_causal_language call here: a pure description makes
             # no inferential claim for that guard to meaningfully check.
+        elif state["test_result"].get("result_type") == "multi_group":
+            report_text = generate_multi_group_report(plan, state["test_result"])
+            check_for_causal_language(report_text, plan)  # still a real inferential claim -- guard applies
         else:
             report_text = report_fn(plan, state["test_result"])
             check_for_causal_language(report_text, plan)
