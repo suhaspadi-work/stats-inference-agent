@@ -41,3 +41,5 @@ class AgentState(TypedDict, total=False):
     pending_unaddressed_issues: tuple  # set by wrangle_node if issues exist before the plan is created
 
     autonomy_mode: str  # "analyst" (default behavior: interrupt on everything) or "stakeholder"
+
+    descriptive_result: dict  # set by eda_node for DESCRIPTIVE question types

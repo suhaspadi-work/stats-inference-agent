@@ -21,6 +21,7 @@ from core.wrangling import (
     propose_filter, execute_filter, propose_dedupe, execute_dedupe,
 )
 from dataclasses import replace
+from core.descriptive import compute_descriptive_stats
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -373,6 +374,45 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             },
         }
     return execute_node
+
+def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Runs descriptive statistics -- the EDA capability's execution step.
+    Unlike execute_node, this never requires the plan to be FROZEN first:
+    EDA makes no inferential method choice for a human to approve, so
+    there is nothing for freeze's interrupt to meaningfully gate. It does
+    still require question_type == DESCRIPTIVE, structurally enforced so
+    this node can never silently run in place of a real hypothesis test.
+    """
+    def eda_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        if plan.question_type.value != "descriptive":
+            raise ValueError(
+                f"eda_node called on a non-descriptive plan (question_type={plan.question_type.value}). "
+                f"This indicates a routing bug in the graph, not a user input problem."
+            )
+
+        result = compute_descriptive_stats(state["dataset"], store)
+        updated_plan = plan.mark_executed()
+
+        return {
+            "plan": updated_plan,
+            "descriptive_result": {
+                "row_count": result.row_count,
+                "column_stats": [
+                    {
+                        "name": c.name, "dtype": c.dtype, "is_numeric": c.is_numeric,
+                        "mean": c.mean, "median": c.median, "std": c.std,
+                        "min": c.min, "max": c.max, "q1": c.q1, "q3": c.q3, "skewness": c.skewness,
+                        "mode": c.mode, "top_value_counts": list(c.top_value_counts),
+                    }
+                    for c in result.column_stats
+                ],
+                "correlation_matrix": result.correlation_matrix,
+                "chart_data": list(result.chart_data),
+            },
+        }
+    return eda_node
 
 def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
     """
