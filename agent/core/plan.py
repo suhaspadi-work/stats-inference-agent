@@ -83,6 +83,7 @@ class MethodDecision:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: int = 1
+    chart_data: tuple[dict, ...] = field(default_factory=tuple)
 
 @dataclass(frozen=True)
 class ClassificationDecision:
