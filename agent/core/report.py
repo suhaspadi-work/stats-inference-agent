@@ -232,3 +232,76 @@ def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_nam
 
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     return response.content
+
+def generate_regression_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+    """Plain-language regression summary. Same causal-language guard as other inferential reports."""
+    model = init_chat_model(model_name, model_provider="groq")
+
+    language_constraint = (
+        "IMPORTANT: This data is observational, not from a randomized experiment. "
+        "You MUST describe every result as an association, not a cause. Never use words "
+        "like 'causes', 'drives', 'leads to', 'results in', 'increases' or 'effect of'. Use "
+        "phrasing like 'is associated with' instead."
+        if plan.allowed_claims == "associations only"
+        else "This data comes from a randomized experiment, so causal language is appropriate here."
+    )
+
+    unaddressed_constraint = ""
+    if plan.unaddressed_issues:
+        issues_text = "; ".join(
+            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
+            for i in plan.unaddressed_issues
+        )
+        unaddressed_constraint = (
+            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
+            f"by explicit user decision: {issues_text}. You MUST mention this plainly."
+        )
+
+    coefs = test_result["coefficients"]
+    slopes = [c for c in coefs if c["name"] != "const"]
+    coef_lines = "\n".join(
+        f"- {c['name']}: estimate={c['estimate']:.4f}, 95% CI [{c['ci_lower']:.4f}, {c['ci_upper']:.4f}], p={c['p_value']:.4g}"
+        for c in slopes
+    )
+    intercept = next((c for c in coefs if c["name"] == "const"), None)
+
+    encoding_lines = []
+    for col, spec in test_result["encodings"].items():
+        if spec["scheme"] == "treatment":
+            encoding_lines.append(f"{col}: each coefficient is the difference from the baseline level '{spec['reference']}'")
+        elif spec["scheme"] == "effect":
+            encoding_lines.append(f"{col}: each coefficient is a level's deviation from the average of all levels")
+        else:
+            encoding_lines.append(f"{col}: each coefficient is the change per step up the scale {' < '.join(spec['order'])}")
+
+    high_vif = [c["name"] for c in slopes if c["vif"] is not None and c["vif"] > 5]
+    notes = []
+    if test_result["method"] == "ols_hc3_robust":
+        notes.append("Robust standard errors were used because the spread of the residuals was not constant.")
+    if high_vif:
+        notes.append(f"These predictors are strongly correlated with other predictors, so their individual coefficients are less reliable: {high_vif}.")
+    if test_result["n_dropped_missing"]:
+        notes.append(f"{test_result['n_dropped_missing']} rows were left out because of missing values.")
+
+    system_prompt = (
+        "You write brief, plain-language summaries of a multiple linear regression for a "
+        "non-technical audience. Report the actual numbers given and never invent any. State how "
+        "much of the variation in the outcome the model accounts for (R-squared), say which "
+        "predictors have a statistically detectable association (95% CI excluding zero), and "
+        "describe each notable coefficient as holding the other predictors fixed. Explain what "
+        "categorical coefficients are compared against. Mention every note provided. "
+        "Keep it to 6-9 sentences.\n\n"
+        f"{language_constraint}{unaddressed_constraint}"
+    )
+    human_prompt = (
+        f"Outcome: {plan.outcome_name}. Observations used: {test_result['n_observations']}.\n"
+        f"R-squared={test_result['r_squared']:.3f}, adjusted R-squared={test_result['adj_r_squared']:.3f}, "
+        f"overall F-test p={test_result['f_p_value']:.4g}.\n"
+        + (f"Intercept: {intercept['estimate']:.4f}\n" if intercept else "")
+        + f"Predictor coefficients:\n{coef_lines}\n"
+        + ("Encoding of categorical predictors:\n" + "\n".join(encoding_lines) + "\n" if encoding_lines else "")
+        + ("Notes:\n" + "\n".join(f"- {n}" for n in notes) if notes else "")
+    )
+
+    response = model.invoke([("system", system_prompt), ("human", human_prompt)])
+    return response.content

@@ -11,6 +11,8 @@ from core.classifier import draft_plan_fields, validate_draft_plan_fields
 from core.plan import AnalysisPlan, OutcomeType
 from core.testing import execute_two_group_test, select_two_group_method
 from core.multi_group import execute_multi_group_test, select_multi_group_method
+from core.regression import execute_regression, select_regression_method
+from dataclasses import asdict
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
 from core.detection import detect_all_issues
@@ -23,7 +25,7 @@ from core.wrangling import (
 )
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
-from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report
+from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -283,13 +285,18 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
     def select_method_node(state: AgentState) -> dict:
         plan = state["plan"]
         predictors = plan.candidate_predictors or ()
-        if len(predictors) != 1:
+        if plan.question_type.value != "driver_analysis" and len(predictors) != 1:
             raise ValueError(
                 f"Method selection requires exactly one grouping predictor; "
                 f"got {len(predictors)}: {predictors}."
             )
 
-        if plan.question_type.value == "multi_group_comparison":
+        if plan.question_type.value == "driver_analysis":
+            choice = select_regression_method(
+                dataset=state["dataset"], store=store,
+                outcome_col=plan.outcome_name, predictors=list(predictors),
+            )
+        elif plan.question_type.value == "multi_group_comparison":
             choice = select_multi_group_method(
                 dataset=state["dataset"], store=store,
                 outcome_col=plan.outcome_name, group_col=predictors[0],
@@ -369,7 +376,7 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             raise ValueError(f"Cannot execute a plan that is not FROZEN (status: {plan.status.value}).")
 
         predictors = plan.candidate_predictors or ()
-        if len(predictors) != 1:
+        if plan.question_type.value != "driver_analysis" and len(predictors) != 1:
             raise ValueError(
                 f"Execution requires exactly one grouping predictor; "
                 f"got {len(predictors)}: {predictors}."
@@ -380,7 +387,44 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
 
         updated_plan = plan.mark_executed()  # no new MethodDecision -- already recorded pre-freeze
 
-        if plan.question_type.value == "multi_group_comparison":
+        if plan.question_type.value == "driver_analysis":
+            # The encodings the approver saw are stored in the MethodDecision evidence.
+            decision = plan.latest_decision
+            stored = (decision.evidence.get("encodings") if decision else None) or {}
+            encodings = {
+                col: {k: spec.get(k) for k in ("scheme", "reference", "order", "source")}
+                for col, spec in stored.items()
+            } or None
+            result = execute_regression(
+                dataset=state["dataset"], store=store, outcome_col=plan.outcome_name,
+                predictors=list(predictors), method=method, encodings=encodings,
+            )
+            return {
+                "plan": updated_plan,
+                "test_result": {
+                    "result_type": "regression",
+                    "method": result.method,
+                    "n_observations": result.n_observations,
+                    "n_dropped_missing": result.n_dropped_missing,
+                    "r_squared": result.r_squared,
+                    "adj_r_squared": result.adj_r_squared,
+                    "aic": result.aic,
+                    "f_statistic": result.f_statistic,
+                    "f_p_value": result.f_p_value,
+                    "coefficients": [asdict(c) for c in result.coefficients],
+                    "encodings": result.encodings,
+                    "alternative_fits": [
+                        {
+                            "label": f.label, "description": f.description,
+                            "same_fitted_model": f.same_fitted_model,
+                            "r_squared": f.r_squared, "adj_r_squared": f.adj_r_squared, "aic": f.aic,
+                            "coefficients": [asdict(c) for c in f.coefficients],
+                        }
+                        for f in result.alternative_fits
+                    ],
+                },
+            }
+        elif plan.question_type.value == "multi_group_comparison":
             result = execute_multi_group_test(
                 dataset=state["dataset"], store=store,
                 outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
@@ -483,6 +527,9 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
         elif state["test_result"].get("result_type") == "multi_group":
             report_text = generate_multi_group_report(plan, state["test_result"])
             check_for_causal_language(report_text, plan)  # still a real inferential claim -- guard applies
+        elif state["test_result"].get("result_type") == "regression":
+            report_text = generate_regression_report(plan, state["test_result"])
+            check_for_causal_language(report_text, plan)
         else:
             report_text = report_fn(plan, state["test_result"])
             check_for_causal_language(report_text, plan)

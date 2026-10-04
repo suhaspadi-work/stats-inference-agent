@@ -105,7 +105,7 @@ def draft_plan_fields(request_text: str, profile: ModelSafeView, model_name: str
     structured_model = model.with_structured_output(_DraftPlanOut)
 
     column_summary = "\n".join(
-        f"- {c.name} (type: {c.dtype}, missing: {c.missing_pct:.1%}"
+        f"- {c.name} (type: {c.dtype}, distinct values: {c.distinct_count}, missing: {c.missing_pct:.1%}"
         + (f", {c.detected_format}" if c.detected_format else "")
         + ")"
         for c in profile.columns
@@ -115,7 +115,10 @@ def draft_plan_fields(request_text: str, profile: ModelSafeView, model_name: str
         "columns (names, types, and detected patterns only -- you do not see actual values), "
         "choose the outcome column, its type, the unit of analysis, and candidate predictor "
         "columns. You MUST choose outcome_name and every candidate_predictor from the exact "
-        "column names listed below -- never invent a column name.\n\n"
+        "column names listed below -- never invent a column name. For questions about what "
+        "predicts, drives or is associated with an outcome, choose every plausible predictor "
+        "column. Never choose an identifier column (one where nearly every value is distinct, "
+        "such as an ID) as a predictor, and never use the outcome column as a predictor.\n\n"
         f"Available columns:\n{column_summary}"
     )
 
