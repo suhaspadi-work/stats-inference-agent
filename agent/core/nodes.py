@@ -26,6 +26,7 @@ from core.wrangling import (
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
+from core.capabilities import capability_for_plan, analysis_for_result
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -284,29 +285,16 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
     """
     def select_method_node(state: AgentState) -> dict:
         plan = state["plan"]
-        predictors = plan.candidate_predictors or ()
-        if plan.question_type.value != "driver_analysis" and len(predictors) != 1:
+        capability = capability_for_plan(plan)
+        if capability.kind != "analysis":
             raise ValueError(
-                f"Method selection requires exactly one grouping predictor; "
-                f"got {len(predictors)}: {predictors}."
+                f"select_method_node called on a '{capability.name}' plan "
+                f"(question_type={plan.question_type.value}). "
+                f"This indicates a routing bug in the graph, not a user input problem."
             )
+        capability.validate_predictors(plan, "Method selection")
 
-        if plan.question_type.value == "driver_analysis":
-            choice = select_regression_method(
-                dataset=state["dataset"], store=store,
-                outcome_col=plan.outcome_name, predictors=list(predictors),
-            )
-        elif plan.question_type.value == "multi_group_comparison":
-            choice = select_multi_group_method(
-                dataset=state["dataset"], store=store,
-                outcome_col=plan.outcome_name, group_col=predictors[0],
-            )
-        else:
-            choice = select_two_group_method(
-                dataset=state["dataset"], store=store,
-                outcome_col=plan.outcome_name, group_col=predictors[0],
-            )
-        decision = choice.decision
+        decision = capability.select(state["dataset"], store, plan)
         if plan.unaddressed_issues:
             decision = replace(decision, evidence={
                 **decision.evidence,
@@ -362,6 +350,8 @@ def freeze_node(state: AgentState) -> dict:
 
     frozen_plan = plan.freeze()
     return {"plan": frozen_plan}
+
+
 def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     Runs the actual hypothesis test -- using the method ALREADY selected and
@@ -375,100 +365,20 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         if plan.status.value != "frozen":
             raise ValueError(f"Cannot execute a plan that is not FROZEN (status: {plan.status.value}).")
 
-        predictors = plan.candidate_predictors or ()
-        if plan.question_type.value != "driver_analysis" and len(predictors) != 1:
+        capability = capability_for_plan(plan)
+        if capability.kind != "analysis":
             raise ValueError(
-                f"Execution requires exactly one grouping predictor; "
-                f"got {len(predictors)}: {predictors}."
+                f"execute_node called on a '{capability.name}' plan "
+                f"(question_type={plan.question_type.value}). "
+                f"This indicates a routing bug in the graph, not a user input problem."
             )
-        method = plan.primary_method
-        if method is None:
+        capability.validate_predictors(plan, "Execution")
+        if plan.primary_method is None:
             raise ValueError("Cannot execute: no method was selected on the plan before freeze.")
 
         updated_plan = plan.mark_executed()  # no new MethodDecision -- already recorded pre-freeze
-
-        if plan.question_type.value == "driver_analysis":
-            # The encodings the approver saw are stored in the MethodDecision evidence.
-            decision = plan.latest_decision
-            stored = (decision.evidence.get("encodings") if decision else None) or {}
-            encodings = {
-                col: {k: spec.get(k) for k in ("scheme", "reference", "order", "source")}
-                for col, spec in stored.items()
-            } or None
-            result = execute_regression(
-                dataset=state["dataset"], store=store, outcome_col=plan.outcome_name,
-                predictors=list(predictors), method=method, encodings=encodings,
-            )
-            return {
-                "plan": updated_plan,
-                "test_result": {
-                    "result_type": "regression",
-                    "method": result.method,
-                    "n_observations": result.n_observations,
-                    "n_dropped_missing": result.n_dropped_missing,
-                    "r_squared": result.r_squared,
-                    "adj_r_squared": result.adj_r_squared,
-                    "aic": result.aic,
-                    "f_statistic": result.f_statistic,
-                    "f_p_value": result.f_p_value,
-                    "coefficients": [asdict(c) for c in result.coefficients],
-                    "encodings": result.encodings,
-                    "alternative_fits": [
-                        {
-                            "label": f.label, "description": f.description,
-                            "same_fitted_model": f.same_fitted_model,
-                            "r_squared": f.r_squared, "adj_r_squared": f.adj_r_squared, "aic": f.aic,
-                            "coefficients": [asdict(c) for c in f.coefficients],
-                        }
-                        for f in result.alternative_fits
-                    ],
-                },
-            }
-        elif plan.question_type.value == "multi_group_comparison":
-            result = execute_multi_group_test(
-                dataset=state["dataset"], store=store,
-                outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
-            )
-            return {
-                "plan": updated_plan,
-                "test_result": {
-                    "result_type": "multi_group",
-                    "method": result.method,
-                    "statistic": result.statistic,
-                    "p_value": result.p_value,
-                    "post_hoc_method": result.post_hoc_method,
-                    "pairwise_comparisons": [
-                        {
-                            "group_a": c.group_a, "group_b": c.group_b, "mean_diff": c.mean_diff,
-                            "ci_lower": c.ci_lower, "ci_upper": c.ci_upper,
-                            "p_value": c.p_value, "significant": c.significant,
-                        }
-                        for c in result.pairwise_comparisons
-                    ],
-                    "group_ns": result.group_ns,
-                    "group_means": result.group_means,
-                },
-            }
-        else:
-            result = execute_two_group_test(
-                dataset=state["dataset"], store=store,
-                outcome_col=plan.outcome_name, group_col=predictors[0], method=method,
-            )
-            return {
-                "plan": updated_plan,
-                "test_result": {
-                    "result_type": "two_group",
-                    "method": result.method,
-                    "statistic": result.statistic,
-                    "p_value": result.p_value,
-                    "effect_size": result.effect_size,
-                    "confidence_interval": result.confidence_interval,
-                    "group_a_n": result.group_a_n,
-                    "group_b_n": result.group_b_n,
-                    "group_a_mean": result.group_a_mean,
-                    "group_b_mean": result.group_b_mean,
-                },
-            }
+        result = capability.execute(state["dataset"], store, plan)
+        return {"plan": updated_plan, "test_result": result}
     return execute_node
 
 def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -477,37 +387,21 @@ def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     Unlike execute_node, this never requires the plan to be FROZEN first:
     EDA makes no inferential method choice for a human to approve, so
     there is nothing for freeze's interrupt to meaningfully gate. It does
-    still require question_type == DESCRIPTIVE, structurally enforced so
+    still require a diagnostic capability, structurally enforced so
     this node can never silently run in place of a real hypothesis test.
     """
     def eda_node(state: AgentState) -> dict:
         plan = state["plan"]
-        if plan.question_type.value != "descriptive":
+        capability = capability_for_plan(plan)
+        if capability.kind != "diagnostic":
             raise ValueError(
                 f"eda_node called on a non-descriptive plan (question_type={plan.question_type.value}). "
                 f"This indicates a routing bug in the graph, not a user input problem."
             )
 
-        result = compute_descriptive_stats(state["dataset"], store)
+        result = capability.compute(state["dataset"], store)
         updated_plan = plan.mark_executed_descriptive()
-
-        return {
-            "plan": updated_plan,
-            "descriptive_result": {
-                "row_count": result.row_count,
-                "column_stats": [
-                    {
-                        "name": c.name, "dtype": c.dtype, "is_numeric": c.is_numeric,
-                        "mean": c.mean, "median": c.median, "std": c.std,
-                        "min": c.min, "max": c.max, "q1": c.q1, "q3": c.q3, "skewness": c.skewness,
-                        "mode": c.mode, "top_value_counts": list(c.top_value_counts),
-                    }
-                    for c in result.column_stats
-                ],
-                "correlation_matrix": result.correlation_matrix,
-                "chart_data": list(result.chart_data),
-            },
-        }
+        return {"plan": updated_plan, capability.result_key: result}
     return eda_node
 
 def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
@@ -520,18 +414,18 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
     """
     def report_node(state: AgentState) -> dict:
         plan = state["plan"]
-        if plan.question_type.value == "descriptive":
-            report_text = generate_descriptive_report(plan, state["descriptive_result"])
+        capability = capability_for_plan(plan)
+        if capability.kind == "diagnostic":
+            report_text = capability.report(plan, state[capability.result_key])
             # No check_for_causal_language call here: a pure description makes
             # no inferential claim for that guard to meaningfully check.
-        elif state["test_result"].get("result_type") == "multi_group":
-            report_text = generate_multi_group_report(plan, state["test_result"])
-            check_for_causal_language(report_text, plan)  # still a real inferential claim -- guard applies
-        elif state["test_result"].get("result_type") == "regression":
-            report_text = generate_regression_report(plan, state["test_result"])
-            check_for_causal_language(report_text, plan)
         else:
-            report_text = report_fn(plan, state["test_result"])
+            result = state["test_result"]
+            analysis = analysis_for_result(result)
+            if analysis.result_type == "two_group":
+                report_text = report_fn(plan, result)  # the injectable stub applies here only, as before
+            else:
+                report_text = analysis.report(plan, result)
             check_for_causal_language(report_text, plan)
         return {"report": report_text}
     return report_node
