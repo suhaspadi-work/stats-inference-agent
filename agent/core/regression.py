@@ -50,6 +50,13 @@ class CoefficientResult:
     ci_lower: float
     ci_upper: float
     vif: float | None  # None for the intercept
+    # Structured meaning of the term, so reports never parse the name.
+    # kind: "intercept", "numeric", "binary" (a 0/1 column), "level" (vs a reference level),
+    #       "level_vs_mean" (effect coding) or "ordinal" (one slope per step).
+    kind: str = "numeric"
+    column: str | None = None
+    level: str | None = None
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,11 +179,15 @@ def _resolve_encodings(categorical: list[str], level_counts: dict, overrides: di
 
 
 def _design(sub: pd.DataFrame, outcome_col: str, predictors: list[str], specs: dict):
-    """Builds (y, X) with an intercept. Column names state what each coefficient compares."""
+    """Builds (y, X) with an intercept. Column names state what each coefficient compares.
+    X.attrs["terms"] maps each column name to its structured meaning (see CoefficientResult)."""
     cols = {}
+    terms = {"const": {"kind": "intercept", "column": None, "level": None, "reference": None}}
     for p in predictors:
         if p not in specs:
             cols[p] = sub[p].astype(float)
+            kind = "binary" if set(sub[p].dropna().unique().tolist()) == {0, 1} else "numeric"
+            terms[p] = {"kind": kind, "column": p, "level": None, "reference": None}
             continue
         spec = specs[p]
         s = sub[p].astype(str)
@@ -184,16 +195,23 @@ def _design(sub: pd.DataFrame, outcome_col: str, predictors: list[str], specs: d
         if spec["scheme"] == "treatment":
             for lvl in levels:
                 if lvl != spec["reference"]:
-                    cols[f"{p}[{lvl} vs {spec['reference']}]"] = (s == lvl).astype(float)
+                    name = f"{p}[{lvl} vs {spec['reference']}]"
+                    cols[name] = (s == lvl).astype(float)
+                    terms[name] = {"kind": "level", "column": p, "level": lvl, "reference": spec["reference"]}
         elif spec["scheme"] == "effect":
             for lvl in levels:
                 if lvl != spec["reference"]:  # the reference level is the omitted level
-                    cols[f"{p}[{lvl} vs mean]"] = (s == lvl).astype(float) - (s == spec["reference"]).astype(float)
+                    name = f"{p}[{lvl} vs mean]"
+                    cols[name] = (s == lvl).astype(float) - (s == spec["reference"]).astype(float)
+                    terms[name] = {"kind": "level_vs_mean", "column": p, "level": lvl, "reference": None}
         else:
             position = {lvl: i for i, lvl in enumerate(spec["order"])}
-            cols[f"{p}[per step]"] = s.map(position).astype(float)
+            name = f"{p}[per step]"
+            cols[name] = s.map(position).astype(float)
+            terms[name] = {"kind": "ordinal", "column": p, "level": None, "reference": None}
     X = pd.DataFrame(cols, index=sub.index)
     X = sm.add_constant(X, has_constant="add")
+    X.attrs["terms"] = terms
     y = sub[outcome_col].astype(float)
     return y, X
 
@@ -229,15 +247,19 @@ def _vifs(X: pd.DataFrame) -> dict:
 def _coef_results(res, X: pd.DataFrame) -> tuple:
     vifs = _vifs(X)
     ci = res.conf_int()
-    return tuple(
-        CoefficientResult(
+    terms = X.attrs.get("terms", {})
+    out = []
+    for name in X.columns:
+        t = terms.get(name, {})
+        out.append(CoefficientResult(
             name=str(name), estimate=float(res.params[name]), std_error=float(res.bse[name]),
             t_statistic=float(res.tvalues[name]), p_value=float(res.pvalues[name]),
             ci_lower=float(ci.loc[name, 0]), ci_upper=float(ci.loc[name, 1]),
             vif=None if name == "const" else vifs[name],
-        )
-        for name in X.columns
-    )
+            kind=t.get("kind", "numeric"), column=t.get("column"),
+            level=t.get("level"), reference=t.get("reference"),
+        ))
+    return tuple(out)
 
 
 # ------------------------------------------------------------ method selection
