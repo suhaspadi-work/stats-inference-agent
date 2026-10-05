@@ -131,6 +131,8 @@ def _execute_two_group(dataset, store, plan):
         "group_b_n": r.group_b_n,
         "group_a_mean": r.group_a_mean,
         "group_b_mean": r.group_b_mean,
+        "group_a_label": r.group_a_label,
+        "group_b_label": r.group_b_label,
     }
 
 

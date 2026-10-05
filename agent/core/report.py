@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 from langchain.chat_models import init_chat_model
+from core.report_facts import two_group_facts
 
 from core.plan import AnalysisPlan
 
@@ -60,9 +61,9 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
     """
     Generate the plain-language report. The model writes the prose, but
     every number in the prompt comes from real computation (test_result),
-    and the output is checked by check_for_causal_language before being
-    trusted -- the model's job is to explain real numbers, not to decide
-    what language is allowed.
+    and the labels, direction, and differences come from code too
+    (report_facts), so the model restates facts instead of inferring them.
+    The output is checked by check_for_causal_language before being trusted.
     """
     model = init_chat_model(model_name, model_provider="groq")
 
@@ -91,24 +92,20 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
 
     system_prompt = (
         "You write brief, plain-language summaries of statistical analyses for a "
-        "non-technical audience. Report the actual numbers given -- never invent or "
-        "round away meaningful precision. Keep it to 4-6 sentences if there is an "
-        "unaddressed data-quality caveat to mention, otherwise 3-5 sentences.\n\n"
+        "non-technical audience. You are given facts computed by code. Report the actual "
+        "numbers given -- never invent or round away meaningful precision. State which "
+        "group is higher and the direction of every difference exactly as the facts give "
+        "it, refer to groups by the names in the facts, and never recompute or reverse a "
+        "comparison. Keep it to 4-6 sentences if there is an unaddressed data-quality "
+        "caveat to mention, otherwise 3-5 sentences.\n\n"
         f"{language_constraint}"
         f"{unaddressed_constraint}"
     )
 
+    predictor = plan.candidate_predictors[0] if plan.candidate_predictors else "N/A"
     human_prompt = (
-        f"Original question: {plan.request_text}\n"
-        f"Outcome variable: {plan.outcome_name}\n"
-        f"Comparing groups on: {plan.candidate_predictors[0] if plan.candidate_predictors else 'N/A'}\n"
-        f"Method used: {test_result['method']}\n"
-        f"Group A (n={test_result['group_a_n']}): mean = {test_result['group_a_mean']:.2f}\n"
-        f"Group B (n={test_result['group_b_n']}): mean = {test_result['group_b_mean']:.2f}\n"
-        f"p-value: {test_result['p_value']:.4f}\n"
-        f"Effect size: {test_result['effect_size']:.3f}\n"
-        f"95% CI on the difference: ({test_result['confidence_interval'][0]:.2f}, "
-        f"{test_result['confidence_interval'][1]:.2f})"
+        f"Original question: {plan.request_text}\n\n"
+        f"Facts computed from the data:\n{two_group_facts(test_result, plan.outcome_name, predictor)}"
     )
 
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])

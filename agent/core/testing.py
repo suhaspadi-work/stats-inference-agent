@@ -24,6 +24,15 @@ class TwoGroupTestResult:
     group_b_n: int
     group_a_mean: float
     group_b_mean: float
+    # Names of the two groups, in comparison order: group A is the first level
+    # when sorted, group B the second.
+    group_a_label: str = "Group A"
+    group_b_label: str = "Group B"
+    # Sign conventions (these are what the report facts assume):
+    #   confidence_interval and Cohen's d are group B minus group A.
+    #   The Mann-Whitney effect size (rank-biserial) is positive when B tends higher.
+    #   The test statistic is computed on (A, B), so for the t tests it is
+    #   positive when A is HIGHER. Do not show it to a report model as a direction.
 @dataclass(frozen=True)
 class TwoGroupMethodChoice:
     """The method-selection half of what run_two_group_test does, extracted so it can run before execution."""
@@ -130,6 +139,7 @@ def execute_two_group_test(
 
     ci = _mean_diff_ci(a, b)
     return TwoGroupTestResult(
+        group_a_label=str(groups[0]), group_b_label=str(groups[1]),
         method=method, statistic=float(stat), p_value=float(p_value),
         effect_size=float(effect_size), confidence_interval=ci,
         group_a_n=len(a), group_b_n=len(b),
@@ -178,6 +188,7 @@ def run_two_group_test(
 
     ci = _mean_diff_ci(a, b)
     result = TwoGroupTestResult(
+        group_a_label=str(groups[0]), group_b_label=str(groups[1]),
         method=choice.method, statistic=float(stat), p_value=float(p_value),
         effect_size=float(effect_size), confidence_interval=ci,
         group_a_n=len(a), group_b_n=len(b),
