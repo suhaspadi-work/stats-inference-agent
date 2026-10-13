@@ -37,7 +37,7 @@ def route_after_draft_plan(state: AgentState) -> str:
     return "select_method"
 
 
-def build_agent_graph(store: DatasetStore):
+def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, propose_fn=None):
     """
     Wires every node from Phase 6 into one complete graph:
     intake (implicit -- caller provides request_text/dataset in initial state)
@@ -51,16 +51,31 @@ def build_agent_graph(store: DatasetStore):
       -> execute
       -> report
       -> END
+
+    classify_fn, draft_fn and propose_fn exist so tests can run the real graph without the model;
+    left as None, each node uses its real model call.
     """
     graph = StateGraph(AgentState)
 
-    graph.add_node("classify", classify_node)
+    if classify_fn is None:
+        graph.add_node("classify", classify_node)
+    else:
+        graph.add_node("classify", lambda state: classify_node(state, classify_fn=classify_fn))
     graph.add_node("clarify", clarify_node)
-    graph.add_node("reclassify", reclassify_node)
+    if classify_fn is None:
+        graph.add_node("reclassify", reclassify_node)
+    else:
+        graph.add_node("reclassify", lambda state: reclassify_node(state, classify_fn=classify_fn))
     graph.add_node("profile", make_profile_node(store))
-    graph.add_node("wrangle_propose", make_wrangle_propose_node(store))
+    if propose_fn is None:
+        graph.add_node("wrangle_propose", make_wrangle_propose_node(store))
+    else:
+        graph.add_node("wrangle_propose", make_wrangle_propose_node(store, propose_fn=propose_fn))
     graph.add_node("wrangle_review", make_wrangle_review_node(store))
-    graph.add_node("draft_plan", make_draft_plan_node())
+    if draft_fn is None:
+        graph.add_node("draft_plan", make_draft_plan_node())
+    else:
+        graph.add_node("draft_plan", make_draft_plan_node(draft_fn=draft_fn))
     graph.add_node("eda", make_eda_node(store))
     graph.add_node("select_method", make_select_method_node(store))
     graph.add_node("freeze", freeze_node)
