@@ -4,8 +4,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from core.agent_state import AgentState
+from core.classifier import _DraftPlanOut
+from core.decision_log import log_update
+from core.draft_plan_records import draft_plan_records
+from core.model_safe_view import ColumnSummary, ModelSafeView
 from core.nodes import freeze_node
 from core.plan import AnalysisPlan, MethodDecision, AlternativeConsidered, QuestionType, CausalStatus, OutcomeType
+from core.selection_records import two_group_selection_record
 
 
 def make_test_plan():
@@ -121,3 +126,144 @@ def test_edit_rejects_a_nonexistent_predictor_column():
         app.invoke(
             Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config,
         )
+
+
+# --- plan approval decision records (M0.2 step 9) ---------------------------------
+
+def _profile():
+    return ModelSafeView(
+        dataset_handle="test@v1", row_count=100, column_count=3,
+        columns=(
+            ColumnSummary(name="region", dtype="object", missing_pct=0.0, missing_count=0, distinct_count=2),
+            ColumnSummary(name="plan_type", dtype="object", missing_pct=0.0, missing_count=0, distinct_count=2),
+            ColumnSummary(name="total_spend", dtype="float64", missing_pct=0.0, missing_count=0, distinct_count=100),
+        ),
+    )
+
+
+def _seed_log(with_selection=True):
+    """A starting decision_log built with the real builders: the draft's predictors record and the test selection."""
+    fields = _DraftPlanOut(outcome_name="total_spend", outcome_type=OutcomeType.CONTINUOUS,
+                           unit_of_analysis="customer", candidate_predictors=["region"], rationale="draft")
+    predictors = draft_plan_records(fields, _profile())[2]
+    records = [predictors]
+    if with_selection:
+        selection = two_group_selection_record(MethodDecision(
+            stage="test_selection", chosen_method="welch_t_test", rationale="selector", alternatives=(),
+            evidence={"shapiro_p_group_a": 0.3, "shapiro_p_group_b": 0.4, "levene_p": 0.01,
+                      "n_group_a": 50, "n_group_b": 50, "group_a_label": "East", "group_b_label": "West",
+                      "group_a_passes_normality": True, "group_b_passes_normality": True,
+                      "variances_equal": False},
+        ))
+        records.append(selection)
+    return log_update(*records)["decision_log"]
+
+
+def _pause(thread, with_selection=True):
+    app = build_freeze_graph()
+    config = {"configurable": {"thread_id": thread}}
+    seed = _seed_log(with_selection)
+    paused = app.invoke({"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc",
+                         "profile": _profile(), "decision_log": seed}, config)
+    return app, config, seed, paused
+
+
+def _new_records(result, seed):
+    return result["decision_log"][len(seed):]
+
+
+def test_approve_logs_one_plan_approval_record():
+    app, config, seed, _ = _pause("rec-approve")
+    result = app.invoke(Command(resume={"action": "approve"}), config)
+    new = _new_records(result, seed)
+    assert [r["decision_point"] for r in new] == ["planner.plan_approval"]
+    assert new[0]["chosen"] == "approve" and new[0]["decided_by"] == "human"
+    assert new[0]["evidence"]["selection_record_id"] == seed[1]["id"]
+    assert new[0]["evidence"]["method_at_approval"] == result["plan"].primary_method == "welch_t_test"
+    assert result["plan"].status.value == "frozen"
+
+
+def test_edit_logs_predictors_then_approval():
+    app, config, seed, _ = _pause("rec-edit")
+    result = app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["region", "plan_type"]}), config)
+    predictors, approval = _new_records(result, seed)
+    assert (predictors["decision_point"], approval["decision_point"]) == ("planner.predictors", "planner.plan_approval")
+    assert predictors["supersedes"] == seed[0]["id"]
+    assert predictors["decided_by"] == "human" and predictors["overridden_by_human"] is True
+    assert predictors["original_choice"] == "region"
+    assert predictors["chosen"] == "region, plan_type"
+    assert predictors["evidence"]["predictors_before"] == ["region"]
+    assert predictors["evidence"]["predictors_after"] == ["region", "plan_type"]
+    assert predictors["evidence"]["selection_record_id"] == seed[1]["id"]
+    assert approval["chosen"] == "edit"
+    assert approval["evidence"]["predictors_record_id"] == predictors["id"]
+    assert approval["original_choice"] == "approve as drafted: predictors [region]"
+    assert list(result["plan"].candidate_predictors) == ["region", "plan_type"]
+
+
+def test_reject_logs_one_record_and_does_not_freeze():
+    app, config, seed, _ = _pause("rec-reject")
+    result = app.invoke(Command(resume={"action": "reject", "reason": "Wrong predictors"}), config)
+    new = _new_records(result, seed)
+    assert [(r["decision_point"], r["chosen"]) for r in new] == [("planner.plan_approval", "reject")]
+    assert new[0]["rationale"] == "Wrong predictors"
+    assert new[0]["evidence"]["frozen"] is False
+    assert result["plan"].status.value != "frozen"
+    assert result["clarification_needed"] == "Plan rejected: Wrong predictors"
+
+
+def test_unrecognized_action_freezes_by_code_rule():
+    app, config, seed, _ = _pause("rec-g36-maybe")
+    result = app.invoke(Command(resume={"action": "maybe"}), config)
+    (approval,) = _new_records(result, seed)
+    assert (approval["chosen"], approval["decided_by"]) == ("approve", "code_rule")
+    assert approval["evidence"]["received_action"] == "maybe"
+    assert result["plan"].status.value == "frozen"
+
+
+def test_empty_resume_does_not_resume_the_node():
+    """
+    Pins LangGraph's behaviour: Command(resume={}) does not resume the paused
+    node, so freeze_node never sees an empty decision. The run stays paused,
+    nothing is logged and the plan is not frozen. (The builder's handling of
+    an empty decision is covered in tests/test_freeze_records.py.)
+    """
+    app, config, seed, _ = _pause("rec-g36-empty")
+    result = app.invoke(Command(resume={}), config)
+    assert "__interrupt__" in result
+    assert result["decision_log"] == seed
+    assert result["plan"].status.value == "draft"
+    assert app.get_state(config).next == ("freeze",)
+
+
+def test_invalid_edit_raises_and_leaves_no_records():
+    app, config, seed, _ = _pause("rec-invalid")
+    with pytest.raises(ValueError, match="not present in the dataset"):
+        app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config)
+    assert app.get_state(config).values["decision_log"] == seed
+
+
+def test_no_earlier_selection_record_gives_none():
+    app, config, seed, _ = _pause("rec-no-selection", with_selection=False)
+    result = app.invoke(Command(resume={"action": "approve"}), config)
+    (approval,) = _new_records(result, seed)
+    assert approval["evidence"]["selection_record_id"] is None
+
+
+def test_record_ids_unique_across_pause_and_resume():
+    app, config, seed, paused = _pause("rec-ids")
+    assert paused["decision_log"] == seed  # nothing is logged at the pause
+    result = app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["plan_type"]}), config)
+    ids = [r["id"] for r in result["decision_log"]]
+    assert len(ids) == len(set(ids)) == len(seed) + 2
+
+
+def test_pause_payload_keys_unchanged():
+    _, _, _, paused = _pause("rec-payload")
+    payload = paused["__interrupt__"][0].value
+    assert set(payload) == {
+        "type", "question", "request_text", "question_type", "causal_status", "outcome_name",
+        "outcome_type", "candidate_predictors", "classification_rationale", "allowed_decisions",
+    }
+    assert payload["type"] == "plan_approval"
+    assert payload["question"] == "Review this analysis plan before it is frozen and executed."

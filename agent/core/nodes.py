@@ -32,8 +32,10 @@ from core.classification_records import (
     clarification_gate_record, clarification_record, question_type_record,
 )
 from core.decision_log import log_update
-from core.draft_plan_records import draft_plan_records
+from core.draft_plan_records import draft_plan_records, PREDICTORS_POINT
 from core.cleaning_records import scan_record, fix_record, approval_record, execution_record
+from core.freeze_records import plan_approval_record, edited_predictors_record
+from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -443,12 +445,19 @@ def freeze_node(state: AgentState) -> dict:
     })
 
     action = decision.get("action")
+    selection_record_id = next(
+        (e.get("id") for e in reversed(state.get("decision_log") or [])
+         if e.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)),
+        None,
+    )
 
     if action == "reject":
         # A rejected plan is never frozen -- the graph should route to a
         # clean stop, not silently proceed. We signal this the same way
         # classify_node signals "needs clarification": a distinct state key.
-        return {"plan": plan, "clarification_needed": f"Plan rejected: {decision.get('reason', 'no reason given')}"}
+        approval = plan_approval_record(plan, decision, selection_record_id)
+        return {"plan": plan, "clarification_needed": f"Plan rejected: {decision.get('reason', 'no reason given')}",
+                **log_update(approval)}
 
     if action == "edit":
         new_predictors = tuple(decision.get("candidate_predictors", plan.candidate_predictors or ()))
@@ -459,10 +468,16 @@ def freeze_node(state: AgentState) -> dict:
                 f"Edited predictor(s) not present in the dataset: {invalid}. "
                 f"Available columns: {sorted(valid_names)}"
             )
+        edited = edited_predictors_record(plan, new_predictors, state["profile"],
+                                          _latest_record_id(state, PREDICTORS_POINT), selection_record_id)
+        approval = plan_approval_record(plan, decision, selection_record_id, predictors_record_id=edited.id)
+        records = (edited, approval)
         plan = plan.refine(candidate_predictors=new_predictors)
+    else:
+        records = (plan_approval_record(plan, decision, selection_record_id),)
 
     frozen_plan = plan.freeze()
-    return {"plan": frozen_plan}
+    return {"plan": frozen_plan, **log_update(*records)}
 
 
 def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:

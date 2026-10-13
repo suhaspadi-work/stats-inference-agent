@@ -74,20 +74,27 @@ def _outcome_type_record(fields, outcome_col: ColumnSummary) -> DecisionRecord:
     )
 
 
-def _predictors_record(fields, profile: ModelSafeView) -> DecisionRecord:
-    chosen = list(fields.candidate_predictors)
+def predictor_candidates(profile: ModelSafeView, outcome_name: str, chosen_names) -> tuple[Candidate, ...]:
+    """Every profile column as a predictor candidate; the outcome column is ineligible."""
+    chosen = list(chosen_names)
     candidates = []
     for col in profile.columns:
-        if col.name == fields.outcome_name:
+        if col.name == outcome_name:
             eligible, reason = False, "the outcome cannot also be a predictor"
         else:
             eligible = True
             reason = _CHOSEN_REASON if col.name in chosen else _NOT_CHOSEN_REASON
         candidates.append(Candidate(option=col.name, eligible=eligible, reason=reason,
                                     evidence=_column_evidence(col)))
+    return tuple(candidates)
+
+
+def _predictors_record(fields, profile: ModelSafeView) -> DecisionRecord:
+    chosen = list(fields.candidate_predictors)
+    candidates = predictor_candidates(profile, fields.outcome_name, chosen)
     return DecisionRecord(
         decision_point=PREDICTORS_POINT, chosen=", ".join(chosen) if chosen else "none",
-        decided_by="model", candidates=tuple(candidates), rationale=fields.rationale,
+        decided_by="model", candidates=candidates, rationale=fields.rationale,
         evidence={"n_columns": len(profile.columns), "n_chosen": len(chosen)},
     )
 
