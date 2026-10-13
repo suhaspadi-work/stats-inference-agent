@@ -8,6 +8,7 @@ from core.ingestion import load_dataset, profile_dataset
 from core.nodes import make_draft_plan_node
 from core.plan import ClassificationDecision, QuestionType, CausalStatus, OutcomeType
 from core.classifier import _DraftPlanOut
+from core.capabilities import capability_for_plan
 
 
 @pytest.fixture
@@ -99,7 +100,7 @@ def _run_draft(dataset, profile, classification, draft_fn):
     })
 
 
-def test_draft_plan_node_logs_four_records_and_plan_is_unchanged(dataset_and_profile):
+def test_draft_plan_node_logs_five_records_and_plan_is_unchanged(dataset_and_profile):
     dataset, profile = dataset_and_profile
 
     def fake_draft_fn(request_text, profile):
@@ -117,6 +118,7 @@ def test_draft_plan_node_logs_four_records_and_plan_is_unchanged(dataset_and_pro
         ("planner.outcome_type", "continuous"),
         ("planner.predictors", "region"),
         ("planner.unit_of_analysis", "customer"),
+        ("planner.route", "two_group"),
     ]
     assert log[0]["rationale"] == "Comparing spend across two named regions"
     assert [c["option"] for c in log[0]["candidates"]] == [c.name for c in profile.columns]
@@ -128,7 +130,7 @@ def test_draft_plan_node_logs_four_records_and_plan_is_unchanged(dataset_and_pro
     assert plan.candidate_predictors == ("region",)
 
 
-def test_descriptive_classification_adds_no_records_and_keeps_placeholders(dataset_and_profile):
+def test_descriptive_classification_logs_skip_and_route_and_keeps_placeholders(dataset_and_profile):
     dataset, profile = dataset_and_profile
     descriptive = ClassificationDecision(
         question_type=QuestionType.DESCRIPTIVE, causal_status=CausalStatus.OBSERVATIONAL,
@@ -139,11 +141,37 @@ def test_descriptive_classification_adds_no_records_and_keeps_placeholders(datas
         raise AssertionError("descriptive plans must not call the draft model")
 
     result = _run_draft(dataset, profile, descriptive, must_not_be_called)
-    assert "decision_log" not in result or result["decision_log"] == []
+    assert [(e["decision_point"], e["chosen"]) for e in result["decision_log"]] == [
+        ("planner.draft_plan", "skipped"),
+        ("planner.route", "descriptive"),
+    ]
     plan = result["plan"]
     assert plan.outcome_name == "(whole dataset)"
     assert plan.outcome_type == OutcomeType.CONTINUOUS
     assert plan.unit_of_analysis == "row"
+
+
+@pytest.mark.parametrize("question_type", list(QuestionType))
+def test_route_record_matches_the_capability_for_every_question_type(dataset_and_profile, question_type):
+    dataset, profile = dataset_and_profile
+    classification = ClassificationDecision(
+        question_type=question_type, causal_status=CausalStatus.OBSERVATIONAL,
+        rationale="test", alternatives=(), confidence=0.9, evidence={},
+    )
+
+    def fake_draft_fn(request_text, profile):
+        predictors = ["region", "customer_id"] if question_type == QuestionType.DRIVER_ANALYSIS else ["region"]
+        return _DraftPlanOut(outcome_name="total_spend", outcome_type=OutcomeType.CONTINUOUS,
+                             unit_of_analysis="customer", candidate_predictors=predictors, rationale="r")
+
+    result = _run_draft(dataset, profile, classification, fake_draft_fn)
+    route = result["decision_log"][-1]
+    assert route["decision_point"] == "planner.route"
+    capability = capability_for_plan(result["plan"])
+    expected = "descriptive" if capability.kind == "diagnostic" else capability.name
+    assert route["chosen"] == expected
+    ids = [e["id"] for e in result["decision_log"]]
+    assert len(ids) == len(set(ids))
 
 
 @pytest.mark.live

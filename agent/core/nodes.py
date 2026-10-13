@@ -35,6 +35,7 @@ from core.decision_log import log_update
 from core.draft_plan_records import draft_plan_records, PREDICTORS_POINT
 from core.cleaning_records import scan_record, fix_record, approval_record, execution_record
 from core.freeze_records import plan_approval_record, edited_predictors_record
+from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
 
 CONFIDENCE_THRESHOLD = 0.6
@@ -340,7 +341,6 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
     """
     def draft_plan_node(state: AgentState) -> dict:
         classification = state["classification"]
-        records = ()
 
         if classification.question_type.value == "descriptive":
             # EDA describes the whole dataset -- there is no single outcome
@@ -356,6 +356,7 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 unit_of_analysis="row",
                 data_sources=(state["dataset"].handle,),
             )
+            records = (skipped_draft_record(plan), route_record(plan, state["profile"]))
         else:
             fields = draft_fn(state["request_text"], state["profile"])
             validate_draft_plan_fields(fields, state["profile"])
@@ -370,16 +371,14 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 data_sources=(state["dataset"].handle,),
             )
             plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
-            records = draft_plan_records(fields, state["profile"])
+            records = (*draft_plan_records(fields, state["profile"]), route_record(plan, state["profile"]))
 
         pending = state.get("pending_unaddressed_issues")
         if pending:
             for issue in pending:
                 plan = plan.record_unaddressed_issue(issue)
 
-        if records:
-            return {"plan": plan, **log_update(*records)}
-        return {"plan": plan}
+        return {"plan": plan, **log_update(*records)}
     return draft_plan_node
 
 def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]:
