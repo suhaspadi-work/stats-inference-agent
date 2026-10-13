@@ -120,3 +120,30 @@ def test_dunn_missing_ci_is_explicitly_nan_not_fabricated(tmp_path, store):
     choice = select_multi_group_method(ds, store, outcome_col="x", group_col="region")
     result = execute_multi_group_test(ds, store, outcome_col="x", group_col="region", method=choice.method)
     assert any(math.isnan(c.ci_lower) for c in result.pairwise_comparisons)
+
+
+def test_selection_evidence_has_structured_per_group_keys(tmp_path, store):
+    from scipy import stats
+    rng = np.random.default_rng(4)
+    arrays = {"East": rng.normal(50, 10, 40), "North": rng.exponential(10, 35), "West": rng.normal(55, 10, 30)}
+    df = pd.DataFrame({
+        "region": [label for label, arr in arrays.items() for _ in arr],
+        "x": np.concatenate(list(arrays.values())),
+    })
+    ds = make_dataset(df, tmp_path, store)
+    ev = select_multi_group_method(ds, store, outcome_col="x", group_col="region").decision.evidence
+
+    shapiro = {label: float(stats.shapiro(arr)[1]) for label, arr in arrays.items()}
+    levene = float(stats.levene(*arrays.values())[1])
+
+    assert ev["group_labels"] == ["East", "North", "West"]
+    assert ev["n_by_group"] == {"East": 40, "North": 35, "West": 30}
+    assert all(type(n) is int for n in ev["n_by_group"].values())
+    assert ev["normality_p_by_group"] == {label: round(p, 4) for label, p in shapiro.items()}
+    assert ev["passes_normality_by_group"] == {label: p > 0.05 for label, p in shapiro.items()}
+    assert all(type(f) is bool for f in ev["passes_normality_by_group"].values())
+    assert ev["variances_equal"] is (levene > 0.05)
+    # The original keys are unchanged.
+    for label, p in shapiro.items():
+        assert ev[f"shapiro_p_{label}"] == round(p, 4)
+    assert ev["levene_p"] == round(levene, 4)

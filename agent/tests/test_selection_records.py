@@ -22,10 +22,15 @@ from tests.test_testing import make_dataset
 
 
 def _decision(method, a_p=0.21, b_p=0.35, levene=0.45, n_a=40, n_b=38,
-              a_label="West", b_label="East", chart_data=(), **extra):
+              a_label="West", b_label="East", chart_data=(),
+              a_passes=None, b_passes=None, variances_equal=None, **extra):
+    """The selector's flags default to p > 0.05 on the given values; pass them to override (G30)."""
     evidence = {
         "shapiro_p_group_a": a_p, "shapiro_p_group_b": b_p, "levene_p": levene,
         "n_group_a": n_a, "n_group_b": n_b, "group_a_label": a_label, "group_b_label": b_label,
+        "group_a_passes_normality": a_p > 0.05 if a_passes is None else a_passes,
+        "group_b_passes_normality": b_p > 0.05 if b_passes is None else b_passes,
+        "variances_equal": levene > 0.05 if variances_equal is None else variances_equal,
         **extra,
     }
     return MethodDecision(
@@ -146,6 +151,43 @@ def test_h_missing_evidence_key_raises(key):
                          alternatives=(), evidence=evidence)
     with pytest.raises(ValueError, match=key):
         two_group_selection_record(bad)
+
+
+@pytest.mark.parametrize("key", ["group_a_passes_normality", "group_b_passes_normality", "variances_equal"])
+def test_h_missing_flag_raises(key):
+    d = _decision("student_t_test")
+    evidence = {k: v for k, v in d.evidence.items() if k != key}
+    bad = MethodDecision(stage=d.stage, chosen_method=d.chosen_method, rationale="r",
+                         alternatives=(), evidence=evidence)
+    with pytest.raises(ValueError, match=key):
+        two_group_selection_record(bad)
+
+
+# --- G30: flags from unrounded values decide; rounded quotes carry a note -----
+
+def test_g30_rounded_0_05_with_pass_flag_treated_as_passing():
+    # Selector saw p = 0.05003 (> 0.05, passes); evidence stores 0.05 after rounding.
+    r = two_group_selection_record(_decision("student_t_test", a_p=0.05, a_passes=True))
+    c = _by_option(r)
+    assert c["student_t_test"].eligible is True
+    assert c["welch_t_test"].eligible is True
+    assert "West n=40: Shapiro-Wilk p = 0.0500 [rounded; the selector used the unrounded value]" \
+        in c["student_t_test"].reason
+
+
+def test_g30_rounded_0_05_with_fail_flag_treated_as_failing():
+    r = two_group_selection_record(_decision("mann_whitney_u", a_p=0.05, a_passes=False))
+    c = _by_option(r)
+    assert c["student_t_test"].eligible is False and c["welch_t_test"].eligible is False
+    assert "West fails the normality check (n=40, Shapiro-Wilk p = 0.0500 [rounded;" in c["welch_t_test"].reason
+    assert c["mann_whitney_u"].reason.startswith("chosen:")
+
+
+def test_g30_levene_0_05_with_equal_flag():
+    r = two_group_selection_record(_decision("student_t_test", levene=0.05, variances_equal=True))
+    student = _by_option(r)["student_t_test"]
+    assert student.eligible is True
+    assert "Levene's p = 0.0500 [rounded; the selector used the unrounded value] is above 0.05" in student.reason
 
 
 def test_h_unknown_method_raises():

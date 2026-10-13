@@ -75,6 +75,10 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
         "n_group_b": int(len(b)),
         "group_a_label": str(group_a_label),
         "group_b_label": str(group_b_label),
+        # Pass/fail from the UNROUNDED values, the same comparisons the rule below makes (G30)
+        "group_a_passes_normality": bool(shapiro_p_a > 0.05),
+        "group_b_passes_normality": bool(shapiro_p_b > 0.05),
+        "variances_equal": bool(levene_p > 0.05),
     }
 
     if normal_enough:

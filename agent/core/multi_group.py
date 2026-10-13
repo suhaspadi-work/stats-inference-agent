@@ -84,6 +84,13 @@ def select_multi_group_method(dataset: Dataset, store: DatasetStore, outcome_col
     evidence = {
         **{f"shapiro_p_{label}": round(p, 4) for label, p in shapiro_ps.items()},
         "levene_p": round(levene_p, 4),
+        # Structured per-group evidence: labels are never parsed out of key names.
+        # Pass/fail flags come from the UNROUNDED values, the same comparisons as the rule below (G30).
+        "group_labels": list(group_arrays),
+        "n_by_group": {label: int(len(arr)) for label, arr in group_arrays.items()},
+        "normality_p_by_group": {label: round(p, 4) for label, p in shapiro_ps.items()},
+        "passes_normality_by_group": {label: bool(p > 0.05) for label, p in shapiro_ps.items()},
+        "variances_equal": bool(equal_var),
     }
 
     if normal_enough and equal_var:

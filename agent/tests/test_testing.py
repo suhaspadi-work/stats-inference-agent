@@ -170,3 +170,18 @@ def test_mann_whitney_decision_lists_no_bootstrap_alternative(tmp_path, store):
     methods = [alt.method for alt in choice.decision.alternatives]
     assert "bootstrap_test" not in methods
     assert "welch_t_test" in methods
+
+
+def test_selection_flags_are_plain_bools_from_unrounded_values(store, tmp_path):
+    import numpy as np
+    rng = np.random.default_rng(8)
+    east, west = rng.normal(50, 4, 60), rng.exponential(10, 60)
+    df = pd.DataFrame({"region": ["East"] * 60 + ["West"] * 60, "total_spend": np.concatenate([east, west])})
+    dataset = make_dataset(df, tmp_path, store, name="flags_check")
+    ev = select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region").decision.evidence
+
+    for key in ("group_a_passes_normality", "group_b_passes_normality", "variances_equal"):
+        assert type(ev[key]) is bool, key
+    assert ev["group_a_passes_normality"] == (stats.shapiro(east)[1] > 0.05)
+    assert ev["group_b_passes_normality"] == (stats.shapiro(west)[1] > 0.05)
+    assert ev["variances_equal"] == (stats.levene(east, west)[1] > 0.05)
