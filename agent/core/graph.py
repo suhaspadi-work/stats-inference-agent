@@ -5,7 +5,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from core.agent_state import AgentState
 from core.dataset import DatasetStore
 from core.nodes import (
-    classify_node, make_profile_node, make_wrangle_node, make_draft_plan_node,
+    classify_node, clarify_node, reclassify_node, route_after_classify,
+    make_profile_node, make_wrangle_node, make_draft_plan_node,
     make_select_method_node, freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
 
@@ -39,7 +40,8 @@ def build_agent_graph(store: DatasetStore):
     """
     Wires every node from Phase 6 into one complete graph:
     intake (implicit -- caller provides request_text/dataset in initial state)
-      -> classify (clarification interrupt handled internally)
+      -> classify (first pass, records question type, causal status and the clarification gate)
+         -> if confidence is low: clarify (clarification interrupt) -> reclassify (second pass)
       -> profile
       -> draft_plan
       -> freeze (approval interrupt; routes to execute or END)
@@ -50,6 +52,8 @@ def build_agent_graph(store: DatasetStore):
     graph = StateGraph(AgentState)
 
     graph.add_node("classify", classify_node)
+    graph.add_node("clarify", clarify_node)
+    graph.add_node("reclassify", reclassify_node)
     graph.add_node("profile", make_profile_node(store))
     graph.add_node("wrangle", make_wrangle_node(store))
     graph.add_node("draft_plan", make_draft_plan_node())
@@ -60,7 +64,9 @@ def build_agent_graph(store: DatasetStore):
     graph.add_node("report", make_report_node())
 
     graph.add_edge(START, "classify")
-    graph.add_edge("classify", "profile")
+    graph.add_conditional_edges("classify", route_after_classify, {"profile": "profile", "clarify": "clarify"})
+    graph.add_edge("clarify", "reclassify")
+    graph.add_edge("reclassify", "profile")
     graph.add_edge("profile", "wrangle")
     graph.add_edge("wrangle", "draft_plan")
     graph.add_conditional_edges("draft_plan", route_after_draft_plan, {"eda": "eda", "select_method": "select_method"})

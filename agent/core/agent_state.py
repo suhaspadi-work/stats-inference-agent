@@ -23,6 +23,9 @@ class AgentState(TypedDict, total=False):
     request_text: str
     session_id: str
     classification: ClassificationDecision  # set by the classify node
+    # First-pass result held while the human is asked to clarify; None once resolved
+    pending_classification: Optional[ClassificationDecision]
+    clarification_answer: str  # the human's answer at the clarification interrupt
 
     dataset: Dataset               # set once, by intake -- before this node, it doesn't exist
     profile: ModelSafeView         # set by the profile node

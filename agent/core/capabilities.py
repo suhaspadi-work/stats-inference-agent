@@ -303,11 +303,16 @@ _BY_QUESTION_TYPE = {
 _BY_RESULT_TYPE = {a.result_type: a for a in ANALYSES}
 
 
-def capability_for_plan(plan: AnalysisPlan) -> Union[Analysis, Diagnostic]:
+def capability_for_question_type(question_type: str) -> Union[Analysis, Diagnostic]:
+    """Read-only routing lookup: the capability a question type value dispatches to."""
     try:
-        return _BY_QUESTION_TYPE[plan.question_type.value]
+        return _BY_QUESTION_TYPE[question_type]
     except KeyError:
-        raise ValueError(f"No capability is registered for question type '{plan.question_type.value}'.")
+        raise ValueError(f"No capability is registered for question type '{question_type}'.")
+
+
+def capability_for_plan(plan: AnalysisPlan) -> Union[Analysis, Diagnostic]:
+    return capability_for_question_type(plan.question_type.value)
 
 
 def analysis_for_result(result: Optional[dict]) -> Analysis:

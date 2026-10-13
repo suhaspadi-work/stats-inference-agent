@@ -27,6 +27,11 @@ from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
 from core.capabilities import capability_for_plan, analysis_for_result
+from core.classification_records import (
+    CAUSAL_STATUS_POINT, QUESTION_TYPE_POINT, causal_status_record,
+    clarification_gate_record, clarification_record, question_type_record,
+)
+from core.decision_log import log_update
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -36,34 +41,78 @@ def classify_node(
     classify_fn: Callable[[str], ClassificationDecision] = classify_request,
 ) -> dict:
     """
-    Classify the request. If confidence is below CONFIDENCE_THRESHOLD, this
-    is the #5 gap from our design review made real: interrupt and wait for
-    a human to clarify, rather than silently guessing. The clarification
-    interrupt resumes with the human's answer, which is appended to the
-    original request and re-classified -- not blindly trusted as a new
-    classification itself.
+    First-pass classification. If confidence is below CONFIDENCE_THRESHOLD,
+    "classification" is NOT set: the decision is held in
+    pending_classification and route_after_classify sends the run to
+    clarify_node, rather than silently guessing.
 
-    `classify_fn` is injectable so the interrupt/routing LOGIC can be tested
+    The clarification interrupt lives in its own node so that resuming it
+    re-runs only clarify_node, never this one: the first-pass model call
+    happens exactly once.
+
+    `classify_fn` is injectable so the routing LOGIC can be tested
     deterministically without a live model call; production use relies on
     the default (the real classify_request).
     """
     decision = classify_fn(state["request_text"])
+    records = [question_type_record(decision, pass_number=1),
+               causal_status_record(decision, pass_number=1)]
+    gate = clarification_gate_record(decision.confidence, CONFIDENCE_THRESHOLD)
 
-    if decision.confidence < CONFIDENCE_THRESHOLD:
-        clarification_answer = interrupt({
-            "type": "clarification_needed",
-            "question": (
-                f"Your request could reasonably be read more than one way "
-                f"(confidence: {decision.confidence:.2f}). {decision.rationale} "
-                f"Could you clarify what you're asking?"
-            ),
-            "original_request": state["request_text"],
-            "tentative_classification": decision.question_type.value,
-        })
-        combined_request = f"{state['request_text']}\n\nClarification: {clarification_answer}"
-        decision = classify_fn(combined_request)
+    if gate.chosen == "ask_human":
+        return {"pending_classification": decision, **log_update(*records, gate)}
+    return {"classification": decision, "pending_classification": None, **log_update(*records, gate)}
 
-    return {"classification": decision}
+
+def route_after_classify(state: AgentState) -> str:
+    return "clarify" if state.get("pending_classification") is not None else "profile"
+
+
+def clarify_node(state: AgentState) -> dict:
+    """
+    Ask the human to clarify a low-confidence classification. interrupt() is
+    the first thing this node does, so the re-run on resume has no side
+    effects before it.
+    """
+    decision = state["pending_classification"]
+    answer = interrupt({
+        "type": "clarification_needed",
+        "question": (
+            f"Your request could reasonably be read more than one way "
+            f"(confidence: {decision.confidence:.2f}). {decision.rationale} "
+            f"Could you clarify what you're asking?"
+        ),
+        "original_request": state["request_text"],
+        "tentative_classification": decision.question_type.value,
+    })
+    return {"clarification_answer": answer, **log_update(clarification_record(answer))}
+
+
+def _latest_record_id(state: AgentState, decision_point: str):
+    for entry in reversed(state.get("decision_log") or []):
+        if entry.get("decision_point") == decision_point:
+            return entry.get("id")
+    return None
+
+
+def reclassify_node(
+    state: AgentState,
+    classify_fn: Callable[[str], ClassificationDecision] = classify_request,
+) -> dict:
+    """
+    Second pass: the human's answer is appended to the original request and
+    re-classified -- not blindly trusted as a new classification itself.
+    Each second-pass record supersedes the matching first-pass record.
+    """
+    combined_request = f"{state['request_text']}\n\nClarification: {state['clarification_answer']}"
+    decision = classify_fn(combined_request)
+    records = (
+        question_type_record(decision, pass_number=2,
+                             supersedes=_latest_record_id(state, QUESTION_TYPE_POINT)),
+        causal_status_record(decision, pass_number=2,
+                             supersedes=_latest_record_id(state, CAUSAL_STATUS_POINT)),
+    )
+    return {"classification": decision, "pending_classification": None, **log_update(*records)}
 
 def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
