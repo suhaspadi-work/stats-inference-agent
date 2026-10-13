@@ -71,6 +71,10 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
         "shapiro_p_group_a": round(float(shapiro_p_a), 4),
         "shapiro_p_group_b": round(float(shapiro_p_b), 4),
         "levene_p": round(float(levene_p), 4),
+        "n_group_a": int(len(a)),
+        "n_group_b": int(len(b)),
+        "group_a_label": str(group_a_label),
+        "group_b_label": str(group_b_label),
     }
 
     if normal_enough:
@@ -95,7 +99,6 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
         )
         alternatives = (
             AlternativeConsidered(method="welch_t_test", rejected_because="normality assumption violated per Shapiro-Wilk check"),
-            AlternativeConsidered(method="bootstrap_test", rejected_because="sample size is sufficient for a standard rank-based test"),
         )
 
     boxplot = viz.boxplot_by_group({str(group_a_label): a, str(group_b_label): b}, outcome_col)

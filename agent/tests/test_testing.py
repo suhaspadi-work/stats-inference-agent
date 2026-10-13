@@ -134,3 +134,39 @@ def test_chart_data_present_on_method_decision(store, tmp_path):
     assert "boxplot_by_group" in chart_types
     assert "qq_plot" in chart_types
     assert sum(1 for c in choice.decision.chart_data if c["chart_type"] == "qq_plot") == 2  # one per group
+
+
+def test_selection_evidence_carries_group_sizes_and_labels(store, tmp_path):
+    df = pd.DataFrame({
+        "region": ["West"] * 25 + ["East"] * 31,
+        "total_spend": [50.0 + (i % 7) for i in range(25)] + [55.0 + (i % 5) for i in range(31)],
+    })
+    dataset = make_dataset(df, tmp_path, store, name="labels_check")
+    ev = select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region").decision.evidence
+
+    # Labels are sorted, so East is group A.
+    assert ev["group_a_label"] == "East" and ev["group_b_label"] == "West"
+    assert ev["n_group_a"] == 31 and ev["n_group_b"] == 25
+    assert type(ev["n_group_a"]) is int and type(ev["group_a_label"]) is str
+
+    east = df.loc[df.region == "East", "total_spend"].to_numpy()
+    west = df.loc[df.region == "West", "total_spend"].to_numpy()
+    assert ev["shapiro_p_group_a"] == round(float(stats.shapiro(east)[1]), 4)
+    assert ev["shapiro_p_group_b"] == round(float(stats.shapiro(west)[1]), 4)
+    assert ev["levene_p"] == round(float(stats.levene(east, west)[1]), 4)
+
+
+def test_mann_whitney_decision_lists_no_bootstrap_alternative(tmp_path, store):
+    import numpy as np
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame({
+        "region": ["East"] * 150 + ["West"] * 150,
+        "total_spend": np.concatenate([rng.exponential(5.0, 150), rng.exponential(7.0, 150)]),
+    })
+    dataset = make_dataset(df, tmp_path, store, name="skewed_alts")
+    choice = select_two_group_method(dataset, store, outcome_col="total_spend", group_col="region")
+
+    assert choice.method == "mann_whitney_u"
+    methods = [alt.method for alt in choice.decision.alternatives]
+    assert "bootstrap_test" not in methods
+    assert "welch_t_test" in methods

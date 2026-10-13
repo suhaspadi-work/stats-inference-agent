@@ -20,6 +20,8 @@ from typing import Callable, Optional, Union
 from core.dataset import Dataset, DatasetStore
 from core.model_safe_view import ModelSafeView
 from core.plan import AnalysisPlan, MethodDecision
+from core.decision_record import DecisionRecord
+from core.selection_records import two_group_selection_record
 from core.testing import select_two_group_method, execute_two_group_test
 from core.multi_group import select_multi_group_method, execute_multi_group_test
 from core.regression import select_regression_method, execute_regression
@@ -249,6 +251,8 @@ class Analysis:
     report: Callable[[AnalysisPlan, dict], str]
     kind: str = "analysis"
     guard_causal_language: bool = True
+    # Builds the stage2.test_selection DecisionRecord from the MethodDecision (M0.2 step 5)
+    record: Optional[Callable[[MethodDecision], DecisionRecord]] = None
 
     def validate_predictors(self, plan: AnalysisPlan, phase: str) -> None:
         predictors = plan.candidate_predictors or ()
@@ -274,6 +278,7 @@ TWO_GROUP = Analysis(
     name="two_group", stage=2, result_type="two_group", predictor_rule="exactly_one",
     applicability=_applicable_two_group, select=_select_two_group,
     execute=_execute_two_group, report=generate_report,
+    record=two_group_selection_record,
 )
 MULTI_GROUP = Analysis(
     name="multi_group", stage=2, result_type="multi_group", predictor_rule="exactly_one",
