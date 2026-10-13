@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Optional, TypedDict
+import operator
+from typing import Annotated, Optional, TypedDict
 
 from core.dataset import Dataset
 from core.model_safe_view import ModelSafeView
@@ -43,3 +44,8 @@ class AgentState(TypedDict, total=False):
     autonomy_mode: str  # "analyst" (default behavior: interrupt on everything) or "stakeholder"
 
     descriptive_result: dict  # set by eda_node for DESCRIPTIVE question types
+
+    # Every DecisionRecord, as plain dicts, in the order made. Appended by
+    # LangGraph (operator.add): a node returns only its new records via
+    # core.decision_log.log_update and can never overwrite earlier ones.
+    decision_log: Annotated[list[dict], operator.add]
