@@ -1,5 +1,5 @@
 """
-Decision records for test selection (M0.2 steps 5 and 6, G15, G30). Pure
+Decision records for test selection (M0.2 steps 5 to 7, G15, G30). Pure
 functions: no graph, no model calls, no data access. Each record is built
 from the MethodDecision the selector already produced. Every pass/fail is
 read from the selector's own flags, which it computed from the unrounded
@@ -228,3 +228,125 @@ def multi_group_selection_record(decision: MethodDecision) -> DecisionRecord:
     ]
     return _record(decision, candidates, "multi_group", groups,
                    {"post_hoc_if_omnibus_significant": _POST_HOC[decision.chosen_method]})
+
+
+# ----------------------------------------------------------------- regression
+
+REGRESSION_METHOD_POINT = "stage3.regression_method"
+ENCODING_POINT = "stage3.encoding"
+REGRESSION_METHODS = ("ols", "ols_hc3_robust")
+ENCODING_SCHEMES = ("treatment", "effect", "ordinal")
+_REGRESSION_REQUIRED = (
+    "n_observations", "n_parameters", "breusch_pagan_p", "heteroscedasticity_detected", "encodings",
+)
+_DEFAULT_ENCODING = "default: treatment coding against the largest level"
+_NO_ORDER = "no category order was supplied, and an order cannot be inferred from the data"
+
+
+def _regression_method_record(decision: MethodDecision) -> DecisionRecord:
+    ev = decision.evidence
+    bp = float(ev["breusch_pagan_p"])
+    n = int(ev["n_observations"])
+    hetero = bool(ev["heteroscedasticity_detected"])
+    chosen = decision.chosen_method
+
+    if hetero:
+        ols = (False, f"not eligible: Breusch-Pagan {_p(bp)} is at or below {ALPHA}, so the residual variance "
+                      f"is not constant and classical standard errors would be unreliable")
+    elif chosen == "ols":
+        ols = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is above {ALPHA}, so classical standard errors "
+                     f"are valid and more efficient")
+    else:
+        ols = (True, "eligible; not chosen by the selection rule")
+
+    if chosen == "ols_hc3_robust" and hetero:
+        robust = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is at or below {ALPHA}, so the residual variance "
+                        f"is not constant and heteroscedasticity-robust (HC3) standard errors are used")
+    elif chosen == "ols" and not hetero:
+        robust = (True, f"eligible, and also valid when variance is constant, but Breusch-Pagan {_p(bp)} is above "
+                        f"{ALPHA}, so classical standard errors are used, which are more efficient")
+    else:
+        robust = (True, "eligible; not chosen by the selection rule")
+
+    reasons = {"ols": ols, "ols_hc3_robust": robust}
+    candidates = tuple(
+        Candidate(option=m, eligible=reasons[m][0], reason=reasons[m][1], evidence={"breusch_pagan_p": bp})
+        for m in REGRESSION_METHODS
+    )
+    evidence = copy.deepcopy(dict(ev))
+    evidence["family"] = "regression"
+    # chart_data is deliberately not copied: the charts hold raw values (M0.5 guard decision).
+    return DecisionRecord(
+        decision_point=REGRESSION_METHOD_POINT, chosen=chosen, decided_by="code_rule",
+        candidates=candidates, rationale=decision.rationale, evidence=evidence,
+    )
+
+
+def _encoding_record(column: str, spec: dict) -> DecisionRecord:
+    scheme = spec["scheme"]
+    if scheme not in ENCODING_SCHEMES:
+        raise ValueError(f"regression_selection_records: unknown encoding scheme {scheme!r} for {column!r}")
+    levels = dict(spec.get("levels") or {})
+    k = len(levels)
+    ref = spec.get("reference")
+    ref_n = int(levels[ref]) if ref is not None and ref in levels else None
+    order = list(spec.get("order") or [])
+    by_user = spec.get("source") == "user"
+
+    if scheme == "treatment":
+        if by_user:
+            rationale = f"treatment coding against '{ref}', the level you chose"
+            fact = f"treatment coding against '{ref}' (n={ref_n}), the level you chose, of {k} levels"
+        else:
+            rationale = (f"treatment coding against '{ref}', the largest of {k} levels (n={ref_n}); this is a "
+                         f"fixed default rule and no ordering evidence was considered (G33)")
+            fact = f"treatment coding against '{ref}', the largest of {k} levels (n={ref_n})"
+    elif scheme == "effect":
+        rationale = "effect coding was explicitly requested for this column"
+        fact = f"effect coding was explicitly requested for this column; coefficients are deviations from the average of all {k} levels"
+    else:
+        rationale = f"ordinal coding using the supplied order {' < '.join(order)}"
+        fact = f"ordinal coding using the supplied order {' < '.join(order)}; one slope per step, assuming equal spacing"
+
+    ordinal_note = "not chosen because an order was supplied, so one slope per step is used and equal spacing is assumed"
+    reasons = {}
+    for option in ENCODING_SCHEMES:
+        if option == scheme:
+            reasons[option] = (True, f"chosen: {fact}")
+        elif option == "ordinal":
+            reasons[option] = (False, _NO_ORDER)
+        elif scheme == "ordinal":
+            reasons[option] = (True, f"eligible; {ordinal_note}")
+        elif option == "effect":
+            reasons[option] = (True, "eligible, and gives the same fitted model, but coefficients become deviations "
+                                     "from the average of all levels; not chosen because no effect coding was "
+                                     "requested for this column")
+        else:  # treatment, while effect was chosen
+            reasons[option] = (True, "eligible, and gives the same fitted model, but coefficients would be "
+                                     "differences from one reference level; not chosen because effect coding was "
+                                     "requested for this column")
+
+    candidates = tuple(
+        Candidate(option=o, eligible=reasons[o][0], reason=reasons[o][1]) for o in ENCODING_SCHEMES
+    )
+    return DecisionRecord(
+        decision_point=ENCODING_POINT, chosen=scheme,
+        decided_by="human" if by_user else "code_rule",
+        overridden_by_human=by_user,
+        original_choice=_DEFAULT_ENCODING if by_user else None,
+        candidates=candidates, rationale=rationale,
+        evidence={
+            "column": column, "scheme": scheme, "reference": ref, "source": spec.get("source"),
+            "n_levels": k, "reference_n": ref_n, "levels": copy.deepcopy(levels),
+        },
+    )
+
+
+def regression_selection_records(decision: MethodDecision) -> tuple[DecisionRecord, ...]:
+    """The stage3.regression_method record, then one stage3.encoding record per categorical column."""
+    ev = decision.evidence
+    _require(ev, _REGRESSION_REQUIRED, "regression_selection_records")
+    _require_method(decision.chosen_method, REGRESSION_METHODS, "regression_selection_records")
+    records = [_regression_method_record(decision)]
+    records.extend(_encoding_record(str(col), spec) for col, spec in ev["encodings"].items())
+    return tuple(records)

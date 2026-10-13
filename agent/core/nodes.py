@@ -359,7 +359,9 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
             })
         updated_plan = plan.record_method_decision(decision)
         if capability.record is not None:
-            return {"plan": updated_plan, **log_update(capability.record(decision))}
+            result = capability.record(decision)
+            records = result if isinstance(result, (tuple, list)) else (result,)
+            return {"plan": updated_plan, **log_update(*records)}
         return {"plan": updated_plan}
     return select_method_node
 

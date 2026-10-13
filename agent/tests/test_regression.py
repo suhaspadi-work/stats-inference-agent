@@ -236,3 +236,27 @@ def test_chart_data_present_and_json_serializable(tmp_path, store):
 def test_single_numeric_predictor_adds_scatter_with_fit(tmp_path, store):
     choice, _ = run(known_data(), tmp_path, store, ["x1"])
     assert "scatter_with_fit" in {c["chart_type"] for c in choice.decision.chart_data}
+
+
+def test_heteroscedasticity_flag_is_a_plain_bool_from_the_unrounded_test(tmp_path, store):
+    import statsmodels.api as sm
+    from statsmodels.stats.diagnostic import het_breuschpagan
+
+    df = known_data()
+    choice, _ = run(df, tmp_path, store, ["x1", "x2"])
+    ev = choice.decision.evidence
+    X = sm.add_constant(df[["x1", "x2"]])
+    bp_p = float(het_breuschpagan(sm.OLS(df["y"], X).fit().resid, X.values)[1])
+    assert type(ev["heteroscedasticity_detected"]) is bool
+    assert ev["heteroscedasticity_detected"] == (bp_p <= 0.05)
+    assert ev["breusch_pagan_p"] == round(bp_p, 4)
+    for key in ("n_observations", "n_dropped_missing", "n_parameters", "breusch_pagan_p",
+                "shapiro_p_residuals", "max_vif", "high_vif_columns", "rare_levels", "encodings"):
+        assert key in ev, key
+
+    df2 = level_data(ABC_SIZES, ABC_EFFECTS)
+    choice2, _ = run(df2, tmp_path, store, ["region"])
+    assert choice2.decision.evidence["encodings"] == {
+        "region": {"scheme": "treatment", "reference": "Beta", "order": None, "source": "default",
+                   "levels": {"Alpha": 30, "Beta": 200, "Gamma": 70}},
+    }

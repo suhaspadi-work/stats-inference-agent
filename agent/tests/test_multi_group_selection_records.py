@@ -15,7 +15,7 @@ from core.decision_log import log_update
 from core.multi_group import select_multi_group_method
 from core.nodes import make_select_method_node
 from core.plan import AnalysisPlan, CausalStatus, MethodDecision, OutcomeType, QuestionType
-from core.selection_records import multi_group_selection_record
+from core.selection_records import multi_group_selection_record, regression_selection_records
 from tests.test_testing import make_dataset
 
 LABELS = ("East", "North", "West")
@@ -214,7 +214,7 @@ def test_l_g30_flag_overrides_rounded_value():
 def test_m_capability_wiring():
     assert MULTI_GROUP.record is multi_group_selection_record
     assert capability_for_question_type("multi_group_comparison").record is multi_group_selection_record
-    assert REGRESSION.record is None
+    assert REGRESSION.record is regression_selection_records
 
 
 def test_n_selector_threshold_guard():

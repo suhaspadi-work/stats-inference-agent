@@ -377,6 +377,7 @@ def select_regression_method(
         "n_dropped_missing": int(n_dropped),
         "n_parameters": int(X.shape[1]),
         "breusch_pagan_p": round(bp_p, 4),
+        "heteroscedasticity_detected": bool(robust),  # from the unrounded bp_p, as the rule above (G30)
         "shapiro_p_residuals": round(shapiro_p, 4),
         "max_vif": round(max(vifs.values()), 4) if vifs else 0.0,
         "high_vif_columns": high_vif,

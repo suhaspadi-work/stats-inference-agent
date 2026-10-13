@@ -21,7 +21,9 @@ from core.dataset import Dataset, DatasetStore
 from core.model_safe_view import ModelSafeView
 from core.plan import AnalysisPlan, MethodDecision
 from core.decision_record import DecisionRecord
-from core.selection_records import two_group_selection_record, multi_group_selection_record
+from core.selection_records import (
+    two_group_selection_record, multi_group_selection_record, regression_selection_records,
+)
 from core.testing import select_two_group_method, execute_two_group_test
 from core.multi_group import select_multi_group_method, execute_multi_group_test
 from core.regression import select_regression_method, execute_regression
@@ -251,8 +253,9 @@ class Analysis:
     report: Callable[[AnalysisPlan, dict], str]
     kind: str = "analysis"
     guard_causal_language: bool = True
-    # Builds the stage2.test_selection DecisionRecord from the MethodDecision (M0.2 step 5)
-    record: Optional[Callable[[MethodDecision], DecisionRecord]] = None
+    # Builds the selection DecisionRecord(s) from the MethodDecision (M0.2 steps 5 to 7):
+    # one record for the test families, a tuple (method, then one per encoding) for regression
+    record: Optional[Callable[[MethodDecision], Union[DecisionRecord, tuple[DecisionRecord, ...]]]] = None
 
     def validate_predictors(self, plan: AnalysisPlan, phase: str) -> None:
         predictors = plan.candidate_predictors or ()
@@ -290,6 +293,7 @@ REGRESSION = Analysis(
     name="regression", stage=3, result_type="regression", predictor_rule="any",
     applicability=_applicable_regression, select=_select_regression,
     execute=_execute_regression, report=generate_regression_report,
+    record=regression_selection_records,
 )
 DESCRIPTIVE = Diagnostic(
     name="descriptive", stage=1, result_key="descriptive_result",
