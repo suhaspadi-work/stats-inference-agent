@@ -33,6 +33,7 @@ from core.classification_records import (
 )
 from core.decision_log import log_update
 from core.draft_plan_records import draft_plan_records
+from core.cleaning_records import scan_record, fix_record, approval_record, execution_record
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -194,8 +195,9 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         autonomy_mode = state.get("autonomy_mode", "analyst")
 
         issues = detect_all_issues(dataset, profile, store)
+        scan = scan_record(profile, issues)
         if not issues:
-            return {"dataset": dataset, "pending_wrangling": None}
+            return {"dataset": dataset, "pending_wrangling": None, **log_update(scan)}
 
         proposals = propose_fn(issues)
         operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
@@ -206,12 +208,15 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
                 if issues[p.issue_index].issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES:
                     auto_indices.add(i)
 
+        fixes = [fix_record(issues[p.issue_index], op, p.issue_index) for p, op in zip(proposals, operations)]
+
         return {"pending_wrangling": {
             "issues": issues,
             "operations": operations,
             "issue_indices": [p.issue_index for p in proposals],
             "auto_indices": sorted(auto_indices),
-        }}
+            "fix_record_ids": [f.id for f in fixes],
+        }, **log_update(scan, *fixes)}
 
     return wrangle_propose_node
 
@@ -246,6 +251,7 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
         decisions_by_index = {}
         for i in auto_indices:
             decisions_by_index[i] = {"index": i, "action": "approve"}
+        auto_decisions = {i: decisions_by_index[i] for i in auto_indices}
 
         if needs_review_indices:
             review_payload = {
@@ -272,14 +278,26 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
         current_dataset = dataset
         unaddressed = ()
+        records = []
+        fix_ids = pending.get("fix_record_ids") or [None] * len(operations)
+        auto_rule = (f"stakeholder mode auto-approves "
+                     f"{', '.join(sorted(_STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES))} only")
 
-        for idx in sorted(decisions_by_index):
+        # Every operation index gets an approval record; indices without a decision are
+        # skipped exactly as before. Decision indices run in the same ascending order.
+        for idx in sorted(set(range(len(operations))) | set(decisions_by_index)):
+            if idx not in decisions_by_index:
+                records.append(approval_record(operations[idx], issues[issue_indices[idx]], None, None,
+                                               fix_ids[idx]))
+                continue
             decision = decisions_by_index[idx]
             op = operations[idx]
             issue = issues[issue_indices[idx]]
             action = decision.get("action")
+            is_auto = auto_decisions.get(idx) is decision
 
             if action == "reject":
+                records.append(approval_record(op, issue, decision, None, fix_ids[idx]))
                 unaddressed += (UnaddressedIssue(
                     issue_type=issue.issue_type, description=issue.description,
                     proposed_operation=f"{op.op_type}({op.params})",
@@ -290,6 +308,9 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
             raw_params = decision.get("params", op.params) if action == "edit" else op.params
             params = _normalize_params(op.op_type, raw_params)
+            approval = approval_record(op, issue, decision, auto_rule if is_auto else None, fix_ids[idx],
+                                       edited_params=params if action == "edit" else None)
+            records.append(approval)
             op = Operation(
                 op_type=op.op_type, session_id=op.session_id,
                 input_handles=(current_dataset.handle,), params=params,
@@ -297,9 +318,10 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
             )
             approved_op = op.approve()
             execute_fn = _EXECUTE_FNS[op.op_type]
-            current_dataset, _finished_op = execute_fn(current_dataset, store, approved_op)
+            current_dataset, finished_op = execute_fn(current_dataset, store, approved_op)
+            records.append(execution_record(finished_op, approval.id))
 
-        result = {"dataset": current_dataset, "pending_wrangling": None}
+        result = {"dataset": current_dataset, "pending_wrangling": None, **log_update(*records)}
         if unaddressed:
             result["pending_unaddressed_issues"] = unaddressed
         return result
