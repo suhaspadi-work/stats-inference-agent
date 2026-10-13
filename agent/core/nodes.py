@@ -169,18 +169,16 @@ def _build_operation_from_proposal(dataset, proposal, issue) -> Operation:
 _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
 
 
-def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_operations) -> Callable[[AgentState], dict]:
     """
-    Detect real data-quality issues (7a), propose fixes for all of them in
-    one batched model call (7b), present the whole list as a checklist
-    interrupt, then execute each approved/edited operation in sequence
-    (producing a chained Dataset version per operation) and record any
-    rejection as an UnaddressedIssue -- via pending_unaddressed_issues,
-    since no AnalysisPlan exists yet at this point in the graph -- so the
-    caveat survives into method selection and the final report.
+    Detect real data-quality issues (7a) and propose fixes for all of them in
+    one batched model call (7b). The proposals are held in pending_wrangling
+    for make_wrangle_review_node, which owns the checklist interrupt. Keeping
+    the model call in its own node means resuming the interrupt never re-runs
+    it, so the operations a human approves are exactly the ones shown (G26).
 
-    If no issues are detected, this node is a no-op: no model call, no
-    interrupt, the dataset passes through unchanged.
+    If no issues are detected, this node is a no-op: no model call, and
+    route_after_wrangle_propose skips the review node entirely.
 
     autonomy_mode (from state, defaults to "analyst" if absent) controls
     which issue types require human approval. In "stakeholder" mode, issue
@@ -190,16 +188,16 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     difference is who/what made the approval decision, which is itself
     worth recording for honesty.
     """
-    def wrangle_node(state: AgentState) -> dict:
+    def wrangle_propose_node(state: AgentState) -> dict:
         dataset = state["dataset"]
         profile = state["profile"]
         autonomy_mode = state.get("autonomy_mode", "analyst")
 
         issues = detect_all_issues(dataset, profile, store)
         if not issues:
-            return {"dataset": dataset}
+            return {"dataset": dataset, "pending_wrangling": None}
 
-        proposals = propose_wrangling_operations(issues)
+        proposals = propose_fn(issues)
         operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
 
         auto_indices = set()
@@ -207,6 +205,41 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             for i, p in enumerate(proposals):
                 if issues[p.issue_index].issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES:
                     auto_indices.add(i)
+
+        return {"pending_wrangling": {
+            "issues": issues,
+            "operations": operations,
+            "issue_indices": [p.issue_index for p in proposals],
+            "auto_indices": sorted(auto_indices),
+        }}
+
+    return wrangle_propose_node
+
+
+def route_after_wrangle_propose(state: AgentState) -> str:
+    return "wrangle_review" if state.get("pending_wrangling") is not None else "draft_plan"
+
+
+def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    Present the proposed operations as a checklist interrupt, then execute
+    each approved/edited operation in sequence (producing a chained Dataset
+    version per operation) and record any rejection as an UnaddressedIssue
+    -- via pending_unaddressed_issues, since no AnalysisPlan exists yet at
+    this point in the graph -- so the caveat survives into method selection
+    and the final report.
+
+    interrupt() is the first side-effecting call in this node, so the re-run
+    on resume repeats nothing before it.
+    """
+    def wrangle_review_node(state: AgentState) -> dict:
+        dataset = state["dataset"]
+        autonomy_mode = state.get("autonomy_mode", "analyst")
+        pending = state["pending_wrangling"]
+        issues = pending["issues"]
+        operations = pending["operations"]
+        issue_indices = pending["issue_indices"]
+        auto_indices = set(pending["auto_indices"])
 
         needs_review_indices = [i for i in range(len(operations)) if i not in auto_indices]
 
@@ -243,7 +276,7 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         for idx in sorted(decisions_by_index):
             decision = decisions_by_index[idx]
             op = operations[idx]
-            issue = issues[proposals[idx].issue_index]
+            issue = issues[issue_indices[idx]]
             action = decision.get("action")
 
             if action == "reject":
@@ -266,12 +299,12 @@ def make_wrangle_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             execute_fn = _EXECUTE_FNS[op.op_type]
             current_dataset, _finished_op = execute_fn(current_dataset, store, approved_op)
 
-        result = {"dataset": current_dataset}
+        result = {"dataset": current_dataset, "pending_wrangling": None}
         if unaddressed:
             result["pending_unaddressed_issues"] = unaddressed
         return result
 
-    return wrangle_node
+    return wrangle_review_node
 
 def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
     """

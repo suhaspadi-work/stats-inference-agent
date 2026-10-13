@@ -6,7 +6,8 @@ from core.agent_state import AgentState
 from core.dataset import DatasetStore
 from core.nodes import (
     classify_node, clarify_node, reclassify_node, route_after_classify,
-    make_profile_node, make_wrangle_node, make_draft_plan_node,
+    make_profile_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
+    make_draft_plan_node,
     make_select_method_node, freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
 
@@ -43,6 +44,8 @@ def build_agent_graph(store: DatasetStore):
       -> classify (first pass, records question type, causal status and the clarification gate)
          -> if confidence is low: clarify (clarification interrupt) -> reclassify (second pass)
       -> profile
+      -> wrangle_propose (detect issues, one model call for fixes)
+         -> if any issues: wrangle_review (checklist interrupt, then execute)
       -> draft_plan
       -> freeze (approval interrupt; routes to execute or END)
       -> execute
@@ -55,7 +58,8 @@ def build_agent_graph(store: DatasetStore):
     graph.add_node("clarify", clarify_node)
     graph.add_node("reclassify", reclassify_node)
     graph.add_node("profile", make_profile_node(store))
-    graph.add_node("wrangle", make_wrangle_node(store))
+    graph.add_node("wrangle_propose", make_wrangle_propose_node(store))
+    graph.add_node("wrangle_review", make_wrangle_review_node(store))
     graph.add_node("draft_plan", make_draft_plan_node())
     graph.add_node("eda", make_eda_node(store))
     graph.add_node("select_method", make_select_method_node(store))
@@ -67,8 +71,10 @@ def build_agent_graph(store: DatasetStore):
     graph.add_conditional_edges("classify", route_after_classify, {"profile": "profile", "clarify": "clarify"})
     graph.add_edge("clarify", "reclassify")
     graph.add_edge("reclassify", "profile")
-    graph.add_edge("profile", "wrangle")
-    graph.add_edge("wrangle", "draft_plan")
+    graph.add_edge("profile", "wrangle_propose")
+    graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
+                                {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
+    graph.add_edge("wrangle_review", "draft_plan")
     graph.add_conditional_edges("draft_plan", route_after_draft_plan, {"eda": "eda", "select_method": "select_method"})
     graph.add_edge("select_method", "freeze")
     graph.add_edge("eda", "report")

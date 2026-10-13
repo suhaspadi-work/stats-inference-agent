@@ -42,7 +42,11 @@ class AgentState(TypedDict, total=False):
     # Final plain-language output, populated by the report node
     report: Optional[str]
 
-    pending_unaddressed_issues: tuple  # set by wrangle_node if issues exist before the plan is created
+    pending_unaddressed_issues: tuple  # set by wrangle_review if issues exist before the plan is created
+    # Held between wrangle_propose and wrangle_review: the detected issues, the proposed
+    # Operations (dataclasses, the G4 caveat), each operation's issue index and the
+    # auto-approved indices. None once resolved.
+    pending_wrangling: Optional[dict]
 
     autonomy_mode: str  # "analyst" (default behavior: interrupt on everything) or "stakeholder"
 

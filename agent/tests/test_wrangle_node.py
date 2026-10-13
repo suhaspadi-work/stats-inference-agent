@@ -7,7 +7,7 @@ from langgraph.types import Command
 from core.agent_state import AgentState
 from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset, profile_dataset
-from core.nodes import make_wrangle_node
+from core.nodes import make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose
 from core.nodes import _normalize_params
 
 
@@ -23,10 +23,16 @@ def make_dataset(df, tmp_path, store, name="data"):
 
 
 def build_wrangle_graph(store):
+    """wrangle_propose -> (wrangle_review) -> a stub draft_plan, wired as in the real graph."""
     graph = StateGraph(AgentState)
-    graph.add_node("wrangle", make_wrangle_node(store))
-    graph.add_edge(START, "wrangle")
-    graph.add_edge("wrangle", END)
+    graph.add_node("wrangle_propose", make_wrangle_propose_node(store))
+    graph.add_node("wrangle_review", make_wrangle_review_node(store))
+    graph.add_node("draft_plan", lambda state: {})
+    graph.add_edge(START, "wrangle_propose")
+    graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
+                                {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
+    graph.add_edge("wrangle_review", "draft_plan")
+    graph.add_edge("draft_plan", END)
     return graph.compile(checkpointer=InMemorySaver())
 
 
