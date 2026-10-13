@@ -505,7 +505,13 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
 
         updated_plan = plan.mark_executed()  # no new MethodDecision -- already recorded pre-freeze
         result = capability.execute(state["dataset"], store, plan)
-        return {"plan": updated_plan, "test_result": result}
+        selection_entry = next(
+            (e for e in reversed(state.get("decision_log") or [])
+             if e.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)),
+            None,
+        )
+        records = capability.execution_records(result, selection_entry) if capability.execution_records is not None else ()
+        return {"plan": updated_plan, "test_result": result, **log_update(*records)}
     return execute_node
 
 def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:

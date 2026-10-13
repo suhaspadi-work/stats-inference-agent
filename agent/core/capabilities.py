@@ -21,6 +21,7 @@ from core.dataset import Dataset, DatasetStore
 from core.model_safe_view import ModelSafeView
 from core.plan import AnalysisPlan, MethodDecision
 from core.decision_record import DecisionRecord
+from core.execution_records import multi_group_execution_records
 from core.selection_records import (
     two_group_selection_record, multi_group_selection_record, regression_selection_records,
 )
@@ -103,6 +104,17 @@ def _applicable_regression(plan: AnalysisPlan, profile: ModelSafeView) -> Applic
     return Applicability(True, f"Numeric outcome with {len(predictors)} predictor(s).", {"predictor_count": len(predictors)})
 
 
+def _plain_charts(charts) -> list:
+    """Run-time charts as plain lists and dicts (tuples become lists; NaN values are kept)."""
+    def plain(v):
+        if isinstance(v, dict):
+            return {k: plain(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [plain(x) for x in v]
+        return v
+    return [plain(c) for c in (charts or ())]
+
+
 def _require_method(plan: AnalysisPlan) -> str:
     method = plan.primary_method
     if method is None:
@@ -170,6 +182,7 @@ def _execute_multi_group(dataset, store, plan):
         ],
         "group_ns": r.group_ns,
         "group_means": r.group_means,
+        "chart_data": _plain_charts(r.chart_data),
     }
 
 
@@ -216,6 +229,7 @@ def _execute_regression(dataset, store, plan):
             }
             for f in r.alternative_fits
         ],
+        "chart_data": _plain_charts(r.chart_data),
     }
 
 
@@ -256,6 +270,8 @@ class Analysis:
     # Builds the selection DecisionRecord(s) from the MethodDecision (M0.2 steps 5 to 7):
     # one record for the test families, a tuple (method, then one per encoding) for regression
     record: Optional[Callable[[MethodDecision], Union[DecisionRecord, tuple[DecisionRecord, ...]]]] = None
+    # M0.2 step 11: records for choices made at run time, from the result and the selection record
+    execution_records: Optional[Callable[[dict, Optional[dict]], tuple[DecisionRecord, ...]]] = None
 
     def validate_predictors(self, plan: AnalysisPlan, phase: str) -> None:
         predictors = plan.candidate_predictors or ()
@@ -288,6 +304,7 @@ MULTI_GROUP = Analysis(
     applicability=_applicable_multi_group, select=_select_multi_group,
     execute=_execute_multi_group, report=generate_multi_group_report,
     record=multi_group_selection_record,
+    execution_records=multi_group_execution_records,
 )
 REGRESSION = Analysis(
     name="regression", stage=3, result_type="regression", predictor_rule="any",
