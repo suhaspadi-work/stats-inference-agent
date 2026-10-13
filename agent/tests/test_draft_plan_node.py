@@ -88,6 +88,64 @@ def test_draft_plan_node_rejects_hallucinated_column(dataset_and_profile):
         })
 
 
+def _run_draft(dataset, profile, classification, draft_fn):
+    graph = StateGraph(AgentState)
+    graph.add_node("draft_plan", make_draft_plan_node(draft_fn=draft_fn))
+    graph.add_edge(START, "draft_plan")
+    graph.add_edge("draft_plan", END)
+    return graph.compile().invoke({
+        "request_text": "Did West spend more than East?", "session_id": "session-abc",
+        "dataset": dataset, "profile": profile, "classification": classification,
+    })
+
+
+def test_draft_plan_node_logs_four_records_and_plan_is_unchanged(dataset_and_profile):
+    dataset, profile = dataset_and_profile
+
+    def fake_draft_fn(request_text, profile):
+        return _DraftPlanOut(
+            outcome_name="total_spend", outcome_type=OutcomeType.CONTINUOUS,
+            unit_of_analysis="customer", candidate_predictors=["region"],
+            rationale="Comparing spend across two named regions",
+        )
+
+    result = _run_draft(dataset, profile, fake_classification(), fake_draft_fn)
+
+    log = result["decision_log"]
+    assert [(e["decision_point"], e["chosen"]) for e in log] == [
+        ("planner.outcome", "total_spend"),
+        ("planner.outcome_type", "continuous"),
+        ("planner.predictors", "region"),
+        ("planner.unit_of_analysis", "customer"),
+    ]
+    assert log[0]["rationale"] == "Comparing spend across two named regions"
+    assert [c["option"] for c in log[0]["candidates"]] == [c.name for c in profile.columns]
+
+    plan = result["plan"]
+    assert plan.outcome_name == "total_spend"
+    assert plan.outcome_type == OutcomeType.CONTINUOUS
+    assert plan.unit_of_analysis == "customer"
+    assert plan.candidate_predictors == ("region",)
+
+
+def test_descriptive_classification_adds_no_records_and_keeps_placeholders(dataset_and_profile):
+    dataset, profile = dataset_and_profile
+    descriptive = ClassificationDecision(
+        question_type=QuestionType.DESCRIPTIVE, causal_status=CausalStatus.OBSERVATIONAL,
+        rationale="describe", alternatives=(), confidence=0.9, evidence={},
+    )
+
+    def must_not_be_called(request_text, profile):
+        raise AssertionError("descriptive plans must not call the draft model")
+
+    result = _run_draft(dataset, profile, descriptive, must_not_be_called)
+    assert "decision_log" not in result or result["decision_log"] == []
+    plan = result["plan"]
+    assert plan.outcome_name == "(whole dataset)"
+    assert plan.outcome_type == OutcomeType.CONTINUOUS
+    assert plan.unit_of_analysis == "row"
+
+
 @pytest.mark.live
 def test_live_draft_plan_node_picks_real_columns(dataset_and_profile):
     dataset, profile = dataset_and_profile

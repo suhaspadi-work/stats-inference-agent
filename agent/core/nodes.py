@@ -32,6 +32,7 @@ from core.classification_records import (
     clarification_gate_record, clarification_record, question_type_record,
 )
 from core.decision_log import log_update
+from core.draft_plan_records import draft_plan_records
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -282,6 +283,7 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
     """
     def draft_plan_node(state: AgentState) -> dict:
         classification = state["classification"]
+        records = ()
 
         if classification.question_type.value == "descriptive":
             # EDA describes the whole dataset -- there is no single outcome
@@ -311,12 +313,15 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 data_sources=(state["dataset"].handle,),
             )
             plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
+            records = draft_plan_records(fields, state["profile"])
 
         pending = state.get("pending_unaddressed_issues")
         if pending:
             for issue in pending:
                 plan = plan.record_unaddressed_issue(issue)
 
+        if records:
+            return {"plan": plan, **log_update(*records)}
         return {"plan": plan}
     return draft_plan_node
 
