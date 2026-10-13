@@ -1,5 +1,9 @@
+import json
+import math
+
 import pytest
-from core.event_log import EventLog
+import core.event_log as event_log_module
+from core.event_log import EventLog, events_path, read_decision_log
 from core.dataset import Dataset
 from core.operation import Operation, OperationImpact, ApprovalStatus
 from core.plan import AnalysisPlan, QuestionType, CausalStatus, OutcomeType, MethodDecision
@@ -103,3 +107,76 @@ def test_log_persists_across_separate_instances(tmp_path):
     entries = log2.read_by_type("dataset")
     assert len(entries) == 1
     assert entries[0]["name"] == "customers"
+
+
+# --- meta, non-finite floats, decision logs and paths (M0.2 step 13) -------------------
+
+def _strict_lines(path):
+    def reject(constant):
+        raise ValueError(f"non-strict JSON constant {constant}")
+    return [json.loads(line, parse_constant=reject) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_meta_is_stored_only_when_given(log):
+    log.append("decision", {"id": "a"})
+    log.append("decision", {"id": "b"}, meta={"node": "classify", "thread_id": "t1"})
+    raw = _strict_lines(log.log_path)
+    assert raw[0] == {"record_type": "decision", "data": {"id": "a"}}
+    assert raw[1] == {"record_type": "decision", "data": {"id": "b"}, "meta": {"node": "classify", "thread_id": "t1"}}
+
+
+def test_non_finite_floats_are_tagged_strict_and_restored(tmp_path):
+    path = tmp_path / "events.jsonl"
+    EventLog(log_path=path).append("decision", {
+        "ci": [float("nan"), 1.5, None], "bounds": {"hi": float("inf"), "lo": float("-inf")},
+        "nested": [{"x": [float("nan")]}],
+    })
+    (raw,) = _strict_lines(path)
+    assert raw["data"]["ci"] == [{"$float": "nan"}, 1.5, None]
+    assert raw["data"]["bounds"] == {"hi": {"$float": "inf"}, "lo": {"$float": "-inf"}}
+    assert raw["data"]["nested"] == [{"x": [{"$float": "nan"}]}]
+
+    (data,) = EventLog(log_path=path).read_by_type("decision")
+    assert math.isnan(data["ci"][0]) and data["ci"][1] == 1.5 and data["ci"][2] is None
+    assert math.isinf(data["bounds"]["hi"]) and data["bounds"]["hi"] > 0
+    assert math.isinf(data["bounds"]["lo"]) and data["bounds"]["lo"] < 0
+    assert math.isnan(data["nested"][0]["x"][0])
+    (entry,) = EventLog(log_path=path).read_all()
+    assert math.isnan(entry["data"]["ci"][0])
+
+
+def test_a_non_finite_float_that_bypasses_tagging_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(event_log_module, "_serialize", lambda obj: obj)
+    with pytest.raises(ValueError):
+        EventLog(log_path=tmp_path / "events.jsonl").append("decision", {"x": float("nan")})
+
+
+def test_read_decision_log(tmp_path):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(log_path=path)
+    log.append("decision", {"id": "d1"}, meta={"node": "a"})
+    log.append("dataset", {"name": "customers"})
+    log.append("decision", {"id": "d2", "p": float("nan")})
+    decisions = read_decision_log(path)
+    assert [d["id"] for d in decisions] == ["d1", "d2"]
+    assert math.isnan(decisions[1]["p"])
+    assert read_decision_log(tmp_path / "missing" / "events.jsonl") == []
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("thread_id, folder", [
+    ("../evil", ".._evil"), ("a/b", "a_b"), (".", "_"), ("..", "_"), ("run 1", "run_1"),
+    ("café", "caf_"), ("ok-1_A.b", "ok-1_A.b"),
+])
+def test_events_path_sanitises_and_stays_inside_base(tmp_path, thread_id, folder):
+    base = tmp_path / "events"
+    path = events_path(base, thread_id)
+    assert path == base / folder / "events.jsonl"
+    assert path.resolve().is_relative_to(base.resolve())
+    assert not base.exists()
+
+
+@pytest.mark.parametrize("thread_id", ["", None, 7])
+def test_events_path_rejects_bad_thread_ids(tmp_path, thread_id):
+    with pytest.raises(ValueError):
+        events_path(tmp_path, thread_id)
