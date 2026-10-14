@@ -89,6 +89,21 @@ def print_lineage(state, log):
                             else f"FAIL (last applied operation {last_op}, dataset created_from_operation {made_by})"))
 
 
+def print_route(state, label):
+    """For the routing runs: the planner.route record and the plan's final question type, labelled by status."""
+    route = next((e for e in reversed(state.get("decision_log") or []) if e["decision_point"] == "planner.route"), None)
+    if route is None:
+        print(f"   route [{label}]: no planner.route record")
+        return
+    ev = route.get("evidence") or {}
+    plan = state.get("plan")
+    print(f"   route [{label}]: outcome={ev.get('status')} chosen={route['chosen']} "
+          f"classifier_question_type={ev.get('classifier_question_type')} question_type={ev.get('question_type')} "
+          f"plan question_type={plan.question_type.value if plan else None}")
+    if ev.get("status") == "unsupported":
+        print(f"   route [{label}]: message={ev.get('message')!r}")
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
@@ -119,6 +134,8 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     if label == "messy":
         print_cleaning_lines(log)
         print_lineage(state, state_log)
+    if label in ("mismatch", "unsupported"):
+        print_route(state, label)
 
 
 def main():
@@ -155,6 +172,10 @@ def main():
         ("regression", df3, "What factors drive total spend? Consider region, tenure and visits."),
         ("descriptive", df3, "Can you describe this dataset for me?"),
         ("messy", df_messy, "Did West customers spend more than East customers?"),
+        # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
+        ("mismatch", df3, "Did West customers spend more than East customers?"),
+        # M0.3: the request that crashed select_method before M0.3 (expected to stop before method selection)
+        ("unsupported", df_messy, "Is there a relationship between region, tenure and spend?"),
     ]
     for i, (label, df, question) in enumerate(runs):
         cfg = {"configurable": {"thread_id": f"live-{label}"}}
@@ -174,6 +195,13 @@ def main():
                 else:
                     resume = question
                 result = app.invoke(Command(resume=resume), cfg)
+            if result.get("clarification_needed") and not result.get("report"):
+                print(f"[{label}] ended before method selection: {result['clarification_needed']}")
+                print(f"   interrupts={seen}")
+                report_event_log(app, cfg, label, events, all_points, failed=False)
+                if i < len(runs) - 1:
+                    time.sleep(20)  # stay under the per-minute token limit
+                continue
             plan = result["plan"]
             tr = result.get("test_result") or {}
             kind = tr.get("result_type", "descriptive_result" if "descriptive_result" in result else None)
