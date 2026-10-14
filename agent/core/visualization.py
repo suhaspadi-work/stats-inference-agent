@@ -10,6 +10,21 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+# Raw-value charts hold data values (one point per row, or the sorted data) and are for the UI only,
+# never for a prompt or a decision record. Summary charts hold counts, estimates and intervals.
+RAW_VALUE_CHART_TYPES = (
+    "histogram", "boxplot_by_group", "boxplot_single_column", "qq_plot", "scatter_with_fit",
+    "residual_plot", "residual_qq_plot", "residuals_vs_leverage", "scatter_matrix",
+)
+SUMMARY_CHART_TYPES = (
+    "bar_chart", "coefficient_plot", "correlation_heatmap", "missingness_chart",
+    "pairwise_categorical_chart", "post_hoc_comparison_chart",
+)
+
+
+def is_raw_value_chart(chart: dict) -> bool:
+    return chart.get("chart_type") in RAW_VALUE_CHART_TYPES
+
 
 def _to_plain_list(arr) -> list:
     """Numpy arrays/pandas Series must never leak into chart_data raw -- same discipline as every other numeric boundary in this project."""

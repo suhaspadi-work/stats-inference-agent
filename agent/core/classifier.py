@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
 
 from core.plan import ClassificationDecision, AlternativeConsidered, QuestionType, CausalStatus
-from core.model_safe_view import ModelSafeView
+from core.model_safe_view import ModelSafeView, assert_model_safe
 from core.plan import OutcomeType
 from core.detection import CandidateIssue
 
@@ -101,6 +101,7 @@ def draft_plan_fields(request_text: str, profile: ModelSafeView, model_name: str
     responsible for validating the chosen names actually exist in the
     dataset before trusting this output (see validate_draft_plan_fields).
     """
+    assert_model_safe(profile, "profile")
     model = init_chat_model(model_name, model_provider="groq")
     structured_model = model.with_structured_output(_DraftPlanOut)
 
@@ -188,6 +189,7 @@ def propose_wrangling_operations(
     if not issues:
         return []
 
+    assert_model_safe(issues, "issues")
     model = init_chat_model(model_name, model_provider="groq")
     structured_model = model.with_structured_output(_WranglingProposalsOut)
 

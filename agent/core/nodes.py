@@ -28,6 +28,7 @@ from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
 from core.capabilities import capability_for_plan, capability_named, analysis_for_result
 from core.routing import route_for_plan
+from core.model_boundary import prepare_for_model
 from core.classification_records import (
     CAUSAL_STATUS_POINT, QUESTION_TYPE_POINT, causal_status_record,
     clarification_gate_record, clarification_record, question_type_record,
@@ -567,16 +568,18 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
         plan = state["plan"]
         capability = _capability_for_state(state)
         if capability.kind == "diagnostic":
-            report_text = capability.report(plan, state[capability.result_key])
+            safe_plan, safe_result = prepare_for_model(plan, state[capability.result_key])
+            report_text = capability.report(safe_plan, safe_result)
             # No check_for_causal_language call here: a pure description makes
             # no inferential claim for that guard to meaningfully check.
         else:
             result = state["test_result"]
             analysis = analysis_for_result(result)
+            safe_plan, safe_result = prepare_for_model(plan, result)  # no chart data reaches a prompt (M0.5)
             if analysis.result_type == "two_group":
-                report_text = report_fn(plan, result)  # the injectable stub applies here only, as before
+                report_text = report_fn(safe_plan, safe_result)  # the injectable stub applies here only, as before
             else:
-                report_text = analysis.report(plan, result)
+                report_text = analysis.report(safe_plan, safe_result)
             check_for_causal_language(report_text, plan)
         return {"report": report_text}
     return report_node
