@@ -4,6 +4,7 @@ from langchain.chat_models import init_chat_model
 from core.report_facts import two_group_facts
 from core.report_facts import multi_group_facts, regression_facts
 
+from core.ingestion import HIGH_CARDINALITY_THRESHOLD
 from core.plan import AnalysisPlan
 
 # A deliberately narrow, high-precision list -- catching obvious causal
@@ -130,6 +131,11 @@ def generate_descriptive_report(plan: AnalysisPlan, descriptive_result: dict, mo
             column_summaries.append(
                 f"- {col['name']} (numeric): mean={col['mean']:.2f}, median={col['median']:.2f}, "
                 f"std={col['std']:.2f}, range=[{col['min']:.2f}, {col['max']:.2f}], skewness={col['skewness']:.2f}"
+            )
+        elif col.get("distinct_count", 0) > HIGH_CARDINALITY_THRESHOLD:
+            column_summaries.append(
+                f"- {col['name']} (categorical): {col['distinct_count']} distinct values; "
+                "individual values are withheld"
             )
         else:
             top = ", ".join(f"{v} ({c})" for v, c in col["top_value_counts"][:3])

@@ -273,7 +273,7 @@ def _compute_descriptive(dataset, store):
                 "name": c.name, "dtype": c.dtype, "is_numeric": c.is_numeric,
                 "mean": c.mean, "median": c.median, "std": c.std,
                 "min": c.min, "max": c.max, "q1": c.q1, "q3": c.q3, "skewness": c.skewness,
-                "mode": c.mode, "top_value_counts": list(c.top_value_counts),
+                "mode": c.mode, "top_value_counts": list(c.top_value_counts), "distinct_count": c.distinct_count,
             }
             for c in r.column_stats
         ],
