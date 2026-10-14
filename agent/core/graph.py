@@ -32,7 +32,15 @@ def route_after_draft_plan(state: AgentState) -> str:
     straight to EDA avoids an approval gate that would protect nothing.
     Every other question_type continues through the normal
     select_method -> freeze -> execute chain.
+
+    Since M0.3 the route that draft_plan_node stores in state decides: an unsupported route ends the run
+    before method selection, with clarification_needed set. Without a route, the question type decides as before.
     """
+    route = state.get("route")
+    if route is not None and route["status"] == "unsupported":
+        return END
+    if route is not None:
+        return "eda" if route["capability"] == "descriptive" else "select_method"
     if state["plan"].question_type.value == "descriptive":
         return "eda"
     return "select_method"
@@ -96,7 +104,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
                                 {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
     graph.add_edge("wrangle_review", "draft_plan")
-    graph.add_conditional_edges("draft_plan", route_after_draft_plan, {"eda": "eda", "select_method": "select_method"})
+    graph.add_conditional_edges("draft_plan", route_after_draft_plan,
+                                {"eda": "eda", "select_method": "select_method", END: END})
     graph.add_edge("select_method", "freeze")
     graph.add_edge("eda", "report")
     graph.add_conditional_edges("freeze", route_after_freeze, {"execute": "execute", END: END})

@@ -52,6 +52,10 @@ class AgentState(TypedDict, total=False):
 
     descriptive_result: dict  # set by eda_node for DESCRIPTIVE question types
 
+    # The route chosen by draft_plan_node (capability, status, question types, reason, message,
+    # evidence), from core.routing.route_for_plan; None for older states.
+    route: Optional[dict]
+
     # Every DecisionRecord, as plain dicts, in the order made. Appended by
     # LangGraph (operator.add): a node returns only its new records via
     # core.decision_log.log_update and can never overwrite earlier ones.

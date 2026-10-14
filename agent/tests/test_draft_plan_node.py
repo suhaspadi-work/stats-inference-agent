@@ -8,7 +8,7 @@ from core.ingestion import load_dataset, profile_dataset
 from core.nodes import make_draft_plan_node
 from core.plan import ClassificationDecision, QuestionType, CausalStatus, OutcomeType
 from core.classifier import _DraftPlanOut
-from core.capabilities import capability_for_plan
+from core.routing import route_for_plan
 
 
 @pytest.fixture
@@ -167,9 +167,12 @@ def test_route_record_matches_the_capability_for_every_question_type(dataset_and
     result = _run_draft(dataset, profile, classification, fake_draft_fn)
     route = result["decision_log"][-1]
     assert route["decision_point"] == "planner.route"
-    capability = capability_for_plan(result["plan"])
-    expected = "descriptive" if capability.kind == "diagnostic" else capability.name
-    assert route["chosen"] == expected
+    # M0.3: the oracle is route_for_plan (the data can reconcile or reject the question type)
+    oracle = route_for_plan(result["plan"], profile)
+    assert route["chosen"] == (oracle["capability"] or "unsupported")
+    explicit = {"association": "unsupported", "multi_group_comparison": "two_group"}  # region has 2 levels
+    if question_type.value in explicit:
+        assert route["chosen"] == explicit[question_type.value]
     ids = [e["id"] for e in result["decision_log"]]
     assert len(ids) == len(set(ids))
 

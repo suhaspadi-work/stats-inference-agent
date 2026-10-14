@@ -8,7 +8,7 @@ from core.plan import ClassificationDecision
 from core.dataset import DatasetStore
 from core.ingestion import profile_dataset
 from core.classifier import draft_plan_fields, validate_draft_plan_fields
-from core.plan import AnalysisPlan, OutcomeType
+from core.plan import AnalysisPlan, OutcomeType, QuestionType
 from core.testing import execute_two_group_test, select_two_group_method
 from core.multi_group import execute_multi_group_test, select_multi_group_method
 from core.regression import execute_regression, select_regression_method
@@ -26,7 +26,8 @@ from core.wrangling import (
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
-from core.capabilities import capability_for_plan, analysis_for_result
+from core.capabilities import capability_for_plan, capability_named, analysis_for_result
+from core.routing import route_for_plan
 from core.classification_records import (
     CAUSAL_STATUS_POINT, QUESTION_TYPE_POINT, causal_status_record,
     clarification_gate_record, clarification_record, question_type_record,
@@ -39,6 +40,14 @@ from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
 
 CONFIDENCE_THRESHOLD = 0.6
+
+
+def _capability_for_state(state: AgentState):
+    """The capability from the route draft_plan_node chose; the question-type lookup when no route is in state."""
+    route = state.get("route")
+    if route and route.get("capability"):
+        return capability_named(route["capability"])
+    return capability_for_plan(state["plan"])
 
 
 def classify_node(
@@ -356,7 +365,8 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 unit_of_analysis="row",
                 data_sources=(state["dataset"].handle,),
             )
-            records = (skipped_draft_record(plan), route_record(plan, state["profile"]))
+            route = route_for_plan(plan, state["profile"])
+            records = (skipped_draft_record(plan), route_record(plan, state["profile"], route))
         else:
             fields = draft_fn(state["request_text"], state["profile"])
             validate_draft_plan_fields(fields, state["profile"])
@@ -371,14 +381,22 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 data_sources=(state["dataset"].handle,),
             )
             plan = plan.refine(candidate_predictors=tuple(fields.candidate_predictors))
-            records = (*draft_plan_records(fields, state["profile"]), route_record(plan, state["profile"]))
+            route = route_for_plan(plan, state["profile"])
+            if route["status"] == "reconciled":
+                # The data supports a different comparison than the question type routes to (G2):
+                # the plan carries the routed question type; the classification stays as the model gave it.
+                plan = plan.refine(question_type=QuestionType(route["question_type"]))
+            records = (*draft_plan_records(fields, state["profile"]), route_record(plan, state["profile"], route))
 
         pending = state.get("pending_unaddressed_issues")
         if pending:
             for issue in pending:
                 plan = plan.record_unaddressed_issue(issue)
 
-        return {"plan": plan, **log_update(*records)}
+        update = {"plan": plan, "route": route, **log_update(*records)}
+        if route["status"] == "unsupported":
+            update["clarification_needed"] = route["message"]
+        return update
     return draft_plan_node
 
 def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -395,7 +413,7 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
     """
     def select_method_node(state: AgentState) -> dict:
         plan = state["plan"]
-        capability = capability_for_plan(plan)
+        capability = _capability_for_state(state)
         if capability.kind != "analysis":
             raise ValueError(
                 f"select_method_node called on a '{capability.name}' plan "
@@ -492,7 +510,7 @@ def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         if plan.status.value != "frozen":
             raise ValueError(f"Cannot execute a plan that is not FROZEN (status: {plan.status.value}).")
 
-        capability = capability_for_plan(plan)
+        capability = _capability_for_state(state)
         if capability.kind != "analysis":
             raise ValueError(
                 f"execute_node called on a '{capability.name}' plan "
@@ -525,7 +543,7 @@ def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     def eda_node(state: AgentState) -> dict:
         plan = state["plan"]
-        capability = capability_for_plan(plan)
+        capability = _capability_for_state(state)
         if capability.kind != "diagnostic":
             raise ValueError(
                 f"eda_node called on a non-descriptive plan (question_type={plan.question_type.value}). "
@@ -547,7 +565,7 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
     """
     def report_node(state: AgentState) -> dict:
         plan = state["plan"]
-        capability = capability_for_plan(plan)
+        capability = _capability_for_state(state)
         if capability.kind == "diagnostic":
             report_text = capability.report(plan, state[capability.result_key])
             # No check_for_causal_language call here: a pure description makes

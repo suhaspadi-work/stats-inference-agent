@@ -389,6 +389,16 @@ def scenario_runs(tmp_path_factory):
                             draft_fn=fake_draft([]), propose_fn=must_not_propose)
     runs["S7"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s7"), "Describe this data."), "s7", [])
 
+    # S8: association with two predictors is unsupported and ends after draft_plan (M0.3).
+    app = build_agent_graph(store, classify_fn=confident(QuestionType.ASSOCIATION),
+                            draft_fn=fake_draft(["region", "channel"]), propose_fn=must_not_propose)
+    runs["S8"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s8"), "Are region and channel related to spend?"), "s8", [])
+
+    # S9: a two-group question on a 3-level column is reconciled to multi-group (M0.3).
+    app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                            draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
+    runs["S9"] = drive(app, start(_dataset(mg, tmp, store, "s9"), "Did regions differ?"), "s9", [{"action": "approve"}])
+
     return runs, emitted
 
 
@@ -407,14 +417,16 @@ def emitted_by_node(scenario_runs):
 EXPECTED_PAUSES = {
     "S1": ["clarification_needed", "wrangling_approval", "plan_approval"],
     "S2": ["plan_approval"], "S3": ["plan_approval"], "S4": ["plan_approval"],
-    "S5": ["plan_approval"], "S6": ["plan_approval"], "S7": [],
+    "S5": ["plan_approval"], "S6": ["plan_approval"], "S7": [], "S8": [], "S9": ["plan_approval"],
 }
+ENDS_WITHOUT_STOP = {"S3", "S8"}  # runs that end at END rather than at the stop before report
 
 
 def test_each_scenario_pauses_in_order_and_stops_where_expected(scenario_logs):
     for name, (result, pauses, next_nodes) in scenario_logs.items():
         assert pauses == EXPECTED_PAUSES[name], name
-        assert next_nodes == (() if name == "S3" else ("report",)), name
+        # M0.3: a run that ends before the stop (rejected plan, unsupported route) has next ()
+        assert next_nodes == (() if name in ENDS_WITHOUT_STOP else ("report",)), name
     assert scenario_logs["S3"][0]["plan"].status.value != "frozen"
     assert scenario_logs["S7"][0]["plan"].question_type.value == "descriptive"
 

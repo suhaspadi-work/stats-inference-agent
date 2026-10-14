@@ -371,6 +371,14 @@ def capability_for_plan(plan: AnalysisPlan) -> Union[Analysis, Diagnostic]:
     return capability_for_question_type(plan.question_type.value)
 
 
+def capability_named(name: str) -> Union[Analysis, Diagnostic]:
+    """The registry entry (an analysis or the descriptive diagnostic) with this name."""
+    for entry in (*ANALYSES, DESCRIPTIVE):
+        if entry.name == name:
+            return entry
+    raise ValueError(f"No capability is named '{name}'.")
+
+
 def analysis_for_result(result: Optional[dict]) -> Analysis:
     """Dispatch a result to its report by the result's own tag. Untagged results are two-group, as before."""
     return _BY_RESULT_TYPE[(result or {}).get("result_type", "two_group")]
