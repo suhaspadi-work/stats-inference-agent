@@ -28,7 +28,8 @@ from core.selection_records import (
 from core.testing import select_two_group_method, execute_two_group_test
 from core.multi_group import select_multi_group_method, execute_multi_group_test
 from core.regression import select_regression_method, execute_regression
-from core.descriptive import compute_descriptive_stats
+from core.descriptive import column_stats_to_dicts, compute_descriptive_stats
+from core.diagnostics import compute_diagnostics, diagnostics_to_dict
 from core.report import (
     generate_report, generate_multi_group_report,
     generate_regression_report, generate_descriptive_report,
@@ -268,18 +269,14 @@ def _compute_descriptive(dataset, store):
     r = compute_descriptive_stats(dataset, store)
     return {
         "row_count": r.row_count,
-        "column_stats": [
-            {
-                "name": c.name, "dtype": c.dtype, "is_numeric": c.is_numeric,
-                "mean": c.mean, "median": c.median, "std": c.std,
-                "min": c.min, "max": c.max, "q1": c.q1, "q3": c.q3, "skewness": c.skewness,
-                "mode": c.mode, "top_value_counts": list(c.top_value_counts), "distinct_count": c.distinct_count,
-            }
-            for c in r.column_stats
-        ],
+        "column_stats": column_stats_to_dicts(r.column_stats),
         "correlation_matrix": r.correlation_matrix,
         "chart_data": list(r.chart_data),
     }
+
+
+def _compute_diagnostics(dataset, store):
+    return diagnostics_to_dict(compute_diagnostics(dataset, store))
 
 
 # -------------------------------------------------------------------- entries
@@ -317,7 +314,7 @@ class Diagnostic:
     stage: int
     result_key: str                  # AgentState key the result is stored under
     compute: Callable[[Dataset, DatasetStore], dict]
-    report: Callable[[AnalysisPlan, dict], str]
+    report: Optional[Callable[[AnalysisPlan, dict], str]] = None  # None: the result is not reported (diagnose)
     kind: str = "diagnostic"
     guard_causal_language: bool = False
 
@@ -344,6 +341,10 @@ REGRESSION = Analysis(
 DESCRIPTIVE = Diagnostic(
     name="descriptive", stage=1, result_key="descriptive_result",
     compute=_compute_descriptive, report=generate_descriptive_report,
+)
+# M0.6 (G16): the chart-free diagnostics. Nothing routes to it yet; the Stage 1 controller (M1, M2) will.
+DIAGNOSE = Diagnostic(
+    name="diagnose", stage=1, result_key="diagnostics_result", compute=_compute_diagnostics,
 )
 
 ANALYSES = (TWO_GROUP, MULTI_GROUP, REGRESSION)
@@ -372,8 +373,8 @@ def capability_for_plan(plan: AnalysisPlan) -> Union[Analysis, Diagnostic]:
 
 
 def capability_named(name: str) -> Union[Analysis, Diagnostic]:
-    """The registry entry (an analysis or the descriptive diagnostic) with this name."""
-    for entry in (*ANALYSES, DESCRIPTIVE):
+    """The registry entry (an analysis, the descriptive diagnostic or diagnose) with this name."""
+    for entry in (*ANALYSES, DESCRIPTIVE, DIAGNOSE):
         if entry.name == name:
             return entry
     raise ValueError(f"No capability is named '{name}'.")

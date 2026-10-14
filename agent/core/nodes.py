@@ -568,6 +568,8 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
         plan = state["plan"]
         capability = _capability_for_state(state)
         if capability.kind == "diagnostic":
+            if capability.report is None:
+                raise ValueError(f"Capability '{capability.name}' has no report.")
             safe_plan, safe_result = prepare_for_model(plan, state[capability.result_key])
             report_text = capability.report(safe_plan, safe_result)
             # No check_for_causal_language call here: a pure description makes

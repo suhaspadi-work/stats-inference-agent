@@ -51,6 +51,7 @@ class AgentState(TypedDict, total=False):
     autonomy_mode: str  # "analyst" (default behavior: interrupt on everything) or "stakeholder"
 
     descriptive_result: dict  # set by eda_node for DESCRIPTIVE question types
+    diagnostics_result: dict  # the DIAGNOSE result (M0.6); set by the Stage 1 controller from M1 and M2; nothing sets it yet
 
     # The route chosen by draft_plan_node (capability, status, question types, reason, message,
     # evidence), from core.routing.route_for_plan; None for older states.
