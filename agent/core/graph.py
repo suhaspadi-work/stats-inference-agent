@@ -1,8 +1,8 @@
 from __future__ import annotations
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import InMemorySaver
 
 from core.agent_state import AgentState
+from core.checkpoint_types import make_checkpointer
 from core.dataset import DatasetStore
 from core.event_sink import with_event_log
 from core.nodes import (
@@ -47,7 +47,7 @@ def route_after_draft_plan(state: AgentState) -> str:
 
 
 def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, propose_fn=None,
-                      event_log_dir=None):
+                      event_log_dir=None, checkpointer=None):
     """
     Wires every node from Phase 6 into one complete graph:
     intake (implicit -- caller provides request_text/dataset in initial state)
@@ -65,6 +65,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     classify_fn, draft_fn and propose_fn exist so tests can run the real graph without the model;
     left as None, each node uses its real model call. When event_log_dir is given, every node's new
     decision records are also written to <event_log_dir>/<thread id>/events.jsonl as the node returns.
+    The graph compiles with the given checkpointer, or by default an in-memory one whose serializer allows the state types (G4).
     """
     graph = StateGraph(AgentState)
 
@@ -112,4 +113,4 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_edge("execute", "report")
     graph.add_edge("report", END)
 
-    return graph.compile(checkpointer=InMemorySaver())
+    return graph.compile(checkpointer=checkpointer if checkpointer is not None else make_checkpointer())
