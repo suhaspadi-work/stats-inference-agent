@@ -56,7 +56,7 @@ Get a free Groq API key at https://console.groq.com/keys.
 
 ### 4. Verify setup
 \`\`\`bash
-python test_connection.py
+python -m eval.check_connection
 \`\`\`
 Should print a response from the model, confirming your API key and dependencies are working.
 
