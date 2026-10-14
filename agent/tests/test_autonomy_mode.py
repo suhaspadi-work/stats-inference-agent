@@ -5,6 +5,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from core.agent_state import AgentState
+from core.classifier import _ProposedOperationOut
 from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset, profile_dataset
 from core.nodes import make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose
@@ -22,10 +23,39 @@ def make_dataset_with_duplicates(tmp_path, store):
     return load_dataset(path, session_id="session-abc", name="customers", store=store)
 
 
-def build_wrangle_graph(store):
-    """wrangle_propose -> (wrangle_review) -> a stub draft_plan, wired as in the real graph."""
+class FakeProposer:
+    """Stands in for the model's cleaning proposals (G23) and counts its calls."""
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, issues):
+        self.calls += 1
+        proposals = []
+        for i, issue in enumerate(issues):
+            if issue.issue_type == "duplicate_rows":
+                op, params = "dedupe", {"subset": []}
+            elif issue.issue_type == "high_missingness":
+                op, params = "filter", {"column": issue.affected_columns[0], "condition": "not_null", "value": None}
+            else:
+                raise AssertionError(f"no fake proposal for issue type {issue.issue_type!r}")
+            proposals.append(_ProposedOperationOut(
+                issue_index=i, op_type=op, params=params, rationale="fake",
+                alternative_approach="leave the data as is", alternative_rejected_because="fake",
+            ))
+        return proposals
+
+
+@pytest.fixture
+def fake_proposer():
+    return FakeProposer()
+
+
+def build_wrangle_graph(store, propose_fn=None):
+    """wrangle_propose -> (wrangle_review) -> a stub draft_plan, wired as in the real graph.
+    Without propose_fn the real (live) proposer is used."""
     graph = StateGraph(AgentState)
-    graph.add_node("wrangle_propose", make_wrangle_propose_node(store))
+    propose = make_wrangle_propose_node(store) if propose_fn is None else make_wrangle_propose_node(store, propose_fn=propose_fn)
+    graph.add_node("wrangle_propose", propose)
     graph.add_node("wrangle_review", make_wrangle_review_node(store))
     graph.add_node("draft_plan", lambda state: {})
     graph.add_edge(START, "wrangle_propose")
@@ -36,29 +66,39 @@ def build_wrangle_graph(store):
     return graph.compile(checkpointer=InMemorySaver())
 
 
-def test_default_autonomy_mode_still_interrupts(tmp_path, store):
+def _assert_one_dedupe_pause(result, fake_proposer):
+    assert fake_proposer.calls == 1
+    (pause,) = result["__interrupt__"]
+    assert pause.value["type"] == "wrangling_approval"
+    assert [op["op_type"] for op in pause.value["proposed_operations"]] == ["dedupe"]
+    assert "auto_approved_note" not in pause.value
+
+
+def test_default_autonomy_mode_still_interrupts(tmp_path, store, fake_proposer):
     """No autonomy_mode key at all -- must behave exactly like before this change (defaults to 'analyst')."""
     ds = make_dataset_with_duplicates(tmp_path, store)
     profile = profile_dataset(ds, store=store)
-    app = build_wrangle_graph(store)
+    app = build_wrangle_graph(store, propose_fn=fake_proposer)
 
     result = app.invoke(
         {"dataset": ds, "profile": profile, "request_text": "x", "session_id": "session-abc"},
         {"configurable": {"thread_id": "t1"}},
     )
     assert "__interrupt__" in result
+    _assert_one_dedupe_pause(result, fake_proposer)
 
 
-def test_analyst_mode_explicit_still_interrupts(tmp_path, store):
+def test_analyst_mode_explicit_still_interrupts(tmp_path, store, fake_proposer):
     ds = make_dataset_with_duplicates(tmp_path, store)
     profile = profile_dataset(ds, store=store)
-    app = build_wrangle_graph(store)
+    app = build_wrangle_graph(store, propose_fn=fake_proposer)
 
     result = app.invoke(
         {"dataset": ds, "profile": profile, "request_text": "x", "session_id": "session-abc", "autonomy_mode": "analyst"},
         {"configurable": {"thread_id": "t2"}},
     )
     assert "__interrupt__" in result
+    _assert_one_dedupe_pause(result, fake_proposer)
 
 
 @pytest.mark.live
