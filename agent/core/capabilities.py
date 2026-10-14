@@ -19,7 +19,7 @@ from typing import Callable, Optional, Union
 
 from core.dataset import Dataset, DatasetStore
 from core.model_safe_view import ModelSafeView
-from core.plan import AnalysisPlan, MethodDecision
+from core.plan import AnalysisPlan, MethodDecision, OutcomeType
 from core.decision_record import DecisionRecord
 from core.execution_records import multi_group_execution_records
 from core.selection_records import (
@@ -50,6 +50,17 @@ def is_numeric_dtype_name(dtype: str) -> bool:
     return str(dtype).startswith(_NUMERIC_PREFIXES)
 
 
+# A grouping column has 2 to 10 distinct values, whatever its dtype. The 10 mirrors
+# regression.MAX_CATEGORICAL_LEVELS (a test asserts the two are equal).
+GROUPING_MIN_LEVELS = 2
+GROUPING_MAX_LEVELS = 10
+
+
+def is_grouping_column(column) -> bool:
+    """True when the column has between GROUPING_MIN_LEVELS and GROUPING_MAX_LEVELS distinct values."""
+    return GROUPING_MIN_LEVELS <= column.distinct_count <= GROUPING_MAX_LEVELS
+
+
 def _check_inputs(plan: AnalysisPlan, profile: ModelSafeView):
     """Shared checks. Returns (problem or None, columns by name, predictors)."""
     cols = {c.name: c for c in profile.columns}
@@ -57,6 +68,12 @@ def _check_inputs(plan: AnalysisPlan, profile: ModelSafeView):
     missing = [n for n in (plan.outcome_name, *predictors) if n not in cols]
     if missing:
         return Applicability(False, f"Columns not in the dataset: {missing}.", {"missing_columns": missing}), cols, predictors
+    if plan.outcome_type is OutcomeType.BINARY:
+        return Applicability(
+            False,
+            f"Outcome '{plan.outcome_name}' is binary; binary outcomes are not supported yet (G3).",
+            {"outcome": plan.outcome_name, "outcome_type": "binary"},
+        ), cols, predictors
     outcome = cols[plan.outcome_name]
     if not is_numeric_dtype_name(outcome.dtype):
         return Applicability(
@@ -75,6 +92,12 @@ def _applicable_two_group(plan: AnalysisPlan, profile: ModelSafeView) -> Applica
         return Applicability(False, f"Needs exactly one grouping column; got {len(predictors)}.", {"predictor_count": len(predictors)})
     group = predictors[0]
     levels = cols[group].distinct_count
+    if levels > GROUPING_MAX_LEVELS:
+        return Applicability(
+            False,
+            f"'{group}' has {levels} distinct values; a grouping column can have {GROUPING_MIN_LEVELS} to {GROUPING_MAX_LEVELS}.",
+            {"group_column": group, "levels": levels, "max_levels": GROUPING_MAX_LEVELS},
+        )
     if levels != 2:
         return Applicability(False, f"'{group}' has {levels} levels; a two-group comparison needs exactly 2.", {"group_column": group, "levels": levels})
     return Applicability(True, f"'{group}' has exactly 2 levels and the outcome is numeric.", {"group_column": group, "levels": levels})
@@ -88,6 +111,12 @@ def _applicable_multi_group(plan: AnalysisPlan, profile: ModelSafeView) -> Appli
         return Applicability(False, f"Needs exactly one grouping column; got {len(predictors)}.", {"predictor_count": len(predictors)})
     group = predictors[0]
     levels = cols[group].distinct_count
+    if levels > GROUPING_MAX_LEVELS:
+        return Applicability(
+            False,
+            f"'{group}' has {levels} distinct values; a grouping column can have {GROUPING_MIN_LEVELS} to {GROUPING_MAX_LEVELS}.",
+            {"group_column": group, "levels": levels, "max_levels": GROUPING_MAX_LEVELS},
+        )
     if levels < 3:
         return Applicability(False, f"'{group}' has {levels} levels; a multi-group comparison needs 3 or more.", {"group_column": group, "levels": levels})
     return Applicability(True, f"'{group}' has {levels} levels and the outcome is numeric.", {"group_column": group, "levels": levels})
