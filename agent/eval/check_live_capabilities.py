@@ -134,6 +134,16 @@ def print_describe(state_log, label):
     print(f"   describe [{label}]: {record['chosen']} ({(record.get('evidence') or {}).get('chart_count')} charts)")
 
 
+def print_report_narrative(state_log, label):
+    """M1.4a: whose text became each analysis report, and whether each model attempt passed the guard."""
+    records = [e for e in state_log if e["decision_point"] == "report.narrative"]
+    if not records:
+        print(f"   report narrative [{label}]: none")
+    for e in records:
+        passed = [a["passed"] for a in (e.get("evidence") or {}).get("attempts", [])]
+        print(f"   report narrative [{label}]: {e['chosen']} (attempts passed: {passed})")
+
+
 def print_rounds(state, label):
     """M1.3b: the finished rounds of the run, one line."""
     rounds = state.get("rounds") or []
@@ -206,6 +216,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     print("   decision points:", points)
     print_stage_plan(log, label)
     print_describe(log, label)
+    print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
     if label == "messy":

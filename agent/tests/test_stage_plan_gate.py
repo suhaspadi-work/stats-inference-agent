@@ -419,6 +419,6 @@ def test_graph_edges(tmp_path):
 
 
 def test_registry():
-    assert len(registered_points()) == 28 and len(DECISION_NODES) == 14  # M1.3b: stage_gate and start_round
+    assert len(registered_points()) == 29 and len(DECISION_NODES) == 15  # M1.4a: report.narrative
     assert DECISION_NODES["stage_plan_gate"] == (STAGE_PLAN_APPROVAL_POINT,)
     assert NODE_STAGES["stage_plan_gate"] == "intake"

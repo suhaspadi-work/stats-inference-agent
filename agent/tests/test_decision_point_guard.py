@@ -24,6 +24,7 @@ import core.describe_records as describe_records
 import core.draft_plan_records as draft_plan_records
 import core.execution_records as execution_records
 import core.freeze_records as freeze_records
+import core.report_records as report_records
 import core.round_records as round_records
 import core.routing_records as routing_records
 import core.selection_records as selection_records
@@ -40,8 +41,9 @@ from core.ingestion import load_dataset
 from core.plan import CausalStatus, ClassificationDecision, OutcomeType, QuestionType
 
 RECORD_MODULES = (classification_records, cleaning_records, describe_records, draft_plan_records, execution_records,
-                  freeze_records, round_records, routing_records, selection_records, stage_plan_records)
-POINT_PREFIXES = ("intake.", "planner.", "stage1.", "stage2.", "stage3.")
+                  freeze_records, report_records, round_records, routing_records, selection_records,
+                  stage_plan_records)  # M1.4a: report_records
+POINT_PREFIXES = ("intake.", "planner.", "stage1.", "stage2.", "stage3.", "report.")  # M1.4a: report.narrative
 
 
 # ------------------------------------------------------------------ check helpers

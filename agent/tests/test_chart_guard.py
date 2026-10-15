@@ -282,7 +282,7 @@ class _Recorder:
     def __init__(self, text):
         self.text, self.calls = text, []
 
-    def __call__(self, plan, result):
+    def __call__(self, plan, result, **kwargs):  # M1.4a: tolerates the retry's feedback keyword
         self.calls.append((plan, result))
         return self.text
 

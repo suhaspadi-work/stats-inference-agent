@@ -28,7 +28,7 @@ def test_the_groq_tpd_message_is_quota():
 
 
 @pytest.mark.parametrize("exc", [ValueError("429 items"), ConnectionError("Connection error."),
-                                 CausalLanguageViolation("Report uses causal language ('causes')")],
+                                 CausalLanguageViolation("causes", "Region causes spend.")],  # M1.4a: matched, sentence
                          ids=["value_error_429", "connection", "causal_language"])
 def test_other_errors_are_code(exc):
     assert classify_error(exc) == "code"

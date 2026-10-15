@@ -38,10 +38,12 @@ def test_guard_allows_association_language():
     # No exception -- this is the success case
 
 
-def test_report_node_blocks_a_report_that_violates_the_guard():
+def test_report_node_replaces_a_report_that_violates_the_guard():
+    # M1.4a (G52): a violating report no longer fails the run; after one retry it is replaced by a report
+    # written from the computed facts, and the violating text never reaches the report
     plan = make_observational_plan()
 
-    def violating_report_fn(plan, test_result):
+    def violating_report_fn(plan, test_result, **kwargs):
         return "Living in the West region drives higher customer spending."
 
     graph = StateGraph(AgentState)
@@ -50,8 +52,9 @@ def test_report_node_blocks_a_report_that_violates_the_guard():
     graph.add_edge("report", END)
     app = graph.compile()
 
-    with pytest.raises(CausalLanguageViolation):
-        app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    result = app.invoke({"plan": plan, "test_result": fake_test_result(), "request_text": "x", "session_id": "s"})
+    assert result["report"].startswith("Summary of the computed results") and "drives" not in result["report"]
+    assert result["decision_log"][-1]["chosen"] == "facts_fallback"
 
 
 def test_report_node_passes_through_a_compliant_report():

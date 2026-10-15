@@ -24,6 +24,7 @@ from core.describe_records import DESCRIBE_EXECUTION_POINT
 from core.draft_plan_records import OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
+from core.report_records import REPORT_NARRATIVE_POINT
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
@@ -46,6 +47,7 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
     "execute": (POST_HOC_POINT,),
     "stage_gate": (STAGE_GATE_POINT,),
     "start_round": (ROUND_START_POINT,),
+    "report": (REPORT_NARRATIVE_POINT,),  # M1.4a: whose text became the report (analysis reports only)
 }
 
 # Graph nodes that choose nothing, and why.
@@ -53,7 +55,6 @@ NON_CHOOSING_NODES: dict[str, str] = {
     "profile": "computes the model-safe profile; no option is chosen",
     "eda": ("runs the descriptive statistics; the one choice around it, skipping method selection "
             "and freeze, is recorded by planner.route"),
-    "report": "restates facts computed by code; the model writes prose but no option is chosen",
 }
 
 # The stage of every graph node (M1.2). The stage is a tag on a node, not a LangGraph subgraph;

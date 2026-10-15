@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable
+from typing import Callable, Optional
 from langgraph.graph import END
 from langgraph.types import interrupt
 
@@ -27,6 +27,9 @@ from core.wrangling import (
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
+from core.report import CausalLanguageViolation, find_causal_violation, violation_feedback
+from core.report_fallback import MINIMAL_FALLBACK_TEXT, facts_fallback_report
+from core.report_records import report_narrative_record
 from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result
 from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
@@ -699,6 +702,40 @@ def make_eda_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         return {"plan": updated_plan, capability.result_key: result}
     return eda_node
 
+def _attempt(n: int, violation: Optional[CausalLanguageViolation]) -> dict:
+    return {"attempt": n, "passed": violation is None,
+            "violation": None if violation is None else {"matched": violation.matched, "sentence": violation.sentence}}
+
+
+def _guarded_narrative(generate, plan, safe_plan, safe_result, capability_name: str):
+    """
+    M1.4a (G52): the model's text, checked against the causal-language guard; on a violation ONE retry with the
+    violation fed back; then a report written by code from the computed facts (and, if even that trips the
+    guard, a minimal text). A report can no longer fail the run. Errors other than a violation propagate.
+    Returns (text, attempts, chosen).
+    """
+    attempts = []
+    try:
+        text = generate(safe_plan, safe_result)
+        check_for_causal_language(text, plan)
+        attempts.append(_attempt(1, None))
+        return text, attempts, "model"
+    except CausalLanguageViolation as first:
+        attempts.append(_attempt(1, first))
+        feedback = violation_feedback(first)
+    try:
+        text = generate(safe_plan, safe_result, feedback=feedback)
+        check_for_causal_language(text, plan)
+        attempts.append(_attempt(2, None))
+        return text, attempts, "model_retry"
+    except CausalLanguageViolation as second:
+        attempts.append(_attempt(2, second))
+    text = facts_fallback_report(plan, safe_result, capability_name)
+    if plan.allowed_claims == "associations only" and find_causal_violation(text) is not None:
+        return MINIMAL_FALLBACK_TEXT, attempts, "minimal_fallback"
+    return text, attempts, "facts_fallback"
+
+
 def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
     """
     Injectable report_fn, same testing pattern as classify_node and
@@ -722,11 +759,9 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
             result = state["test_result"]
             analysis = analysis_for_result(result)
             safe_plan, safe_result = prepare_for_model(plan, result)  # no chart data reaches a prompt (M0.5)
-            if analysis.result_type == "two_group":
-                report_text = report_fn(safe_plan, safe_result)  # the injectable stub applies here only, as before
-            else:
-                report_text = analysis.report(safe_plan, safe_result)
-            check_for_causal_language(report_text, plan)
+            # the injectable stub applies to two-group results only, as before
+            generate = report_fn if analysis.result_type == "two_group" else analysis.report
+            report_text, attempts, chosen = _guarded_narrative(generate, plan, safe_plan, safe_result, capability.name)
             original_result = result
 
         # M1.3b: one entry per finished round, holding the original result (charts included), not the
@@ -734,9 +769,12 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
         exploratory = bool(state.get("exploratory_round"))
         if exploratory:
             report_text = with_exploratory_note(report_text)
-        entry = make_round_entry(len(state.get("rounds") or ()) + 1, plan, capability.name, original_result,
-                                 report_text, exploratory)
-        return {"report": report_text, "rounds": [entry]}
+        round_index = len(state.get("rounds") or ()) + 1
+        entry = make_round_entry(round_index, plan, capability.name, original_result, report_text, exploratory)
+        if capability.kind == "diagnostic":
+            return {"report": report_text, "rounds": [entry]}  # the descriptive report is not guarded: no record
+        record = report_narrative_record(round_index, capability.name, exploratory, attempts, chosen)
+        return {"report": report_text, "rounds": [entry], **log_update(record)}
     return report_node
 
 

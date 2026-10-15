@@ -23,7 +23,6 @@ from core.graph import build_agent_graph
 from core.ingestion import profile_dataset
 from core.nodes import make_plan_stages_node, route_after_report, route_after_stage_gate
 from core.plan import AnalysisPlan, PlanStatus, QuestionType, UnaddressedIssue
-from core.report import CausalLanguageViolation
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT, round_start_record, stage_gate_record
 from core.round_two import (
     MAX_OTHER_PREDICTORS, OFFER_NOTE, build_exploratory_plan, exploratory_offer, propose_exploratory_predictors,
@@ -266,7 +265,7 @@ def test_graph_edges(tmp_path):
 
 
 def test_registry():
-    assert len(registered_points()) == 28 and len(DECISION_NODES) == 14
+    assert len(registered_points()) == 29 and len(DECISION_NODES) == 15  # M1.4a: report.narrative
     assert DECISION_NODES["stage_gate"] == (STAGE_GATE_POINT,)
     assert DECISION_NODES["start_round"] == (ROUND_START_POINT,)
     assert NODE_STAGES["stage_gate"] == NODE_STAGES["start_round"] == "analysis"
@@ -431,9 +430,13 @@ class _ChatByPrompt:
 
 
 def test_causal_check_runs_on_round_two(monkeypatch, tmp_path, store):
+    # M1.4a (G52): the guard still runs on round two's model text, but a violation no longer fails the run:
+    # after one retry round two's report is written from the computed facts
     monkeypatch.setattr(report_module, "init_chat_model", lambda *a, **k: _ChatByPrompt())
-    with pytest.raises(CausalLanguageViolation, match="causes"):
-        _run(store, tmp_path, _frame(), [APPROVE, APPROVE], stage_gate={"action": "run"})
+    _, values, _, next_nodes = _run(store, tmp_path, _frame(), [APPROVE, APPROVE], stage_gate={"action": "run"})
+    assert next_nodes == () and len(values["rounds"]) == 2
+    assert [r["chosen"] for r in _records(values, "report.narrative")] == ["model", "facts_fallback"]
+    assert "causes" not in values["rounds"][1]["report"]
 
 
 # --- the live script's LIVE_ONLY filter --------------------------------------------------------------------------------

@@ -22,11 +22,49 @@ _CAUSAL_RE = re.compile("|".join(_CAUSAL_PATTERNS), re.IGNORECASE)
 class CausalLanguageViolation(ValueError):
     """Raised when a report uses causal language on data that only supports associations."""
 
+    def __init__(self, matched: str, sentence: str):
+        self.matched, self.sentence = matched, sentence
+        super().__init__(
+            f"Report uses causal language ('{matched}') on data where allowed_claims is 'associations only'. "
+            f"Rewrite using association language (e.g. 'is associated with') instead. Sentence: \"{sentence}\""
+        )
 
-_NEGATION_MARKERS = (
-    "not", "n't", "cannot", "can't", "no evidence", "does not", "doesn't", "isn't", "wasn't",
-    "rather than", "as opposed to", "instead of",
+
+# M1.4a (G52): whole-word negation markers (so 'another' no longer counts as 'not'), plus never, without,
+# neither and nor; a word ending in n't counts too.
+_NEGATION_RE = re.compile(
+    r"(?<!\w)(?:not|no|never|cannot|without|neither|nor|no evidence|rather than|as opposed to|instead of)(?!\w)"
+    r"|\b\w+n't\b",
+    re.IGNORECASE,
 )
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_NEGATION_WINDOW = 40
+
+
+def find_causal_violation(report_text: str):
+    """
+    The first causal word that is not disclaimed, as {"matched", "sentence"}, or None. A causal word is
+    excused when a negation marker appears in the up to 40 characters before it in the SAME sentence.
+    """
+    for sentence in _SENTENCE_SPLIT_RE.split(report_text or ""):
+        # Curly apostrophes count as straight ones for the negation markers ("doesn’t"); one character for
+        # one, so the positions match. The returned sentence and matched text stay the original.
+        straight = sentence.replace("\u2019", "'").replace("\u2018", "'")
+        for match in _CAUSAL_RE.finditer(sentence):
+            before = straight[max(0, match.start() - _NEGATION_WINDOW):match.start()]
+            if _NEGATION_RE.search(before):
+                continue  # correctly disclaiming causation, not asserting it
+            return {"matched": match.group(), "sentence": sentence.strip()}
+    return None
+
+
+def violation_feedback(violation) -> str:
+    """The correction appended to the prompt for the one retry (violation is the exception or its dict)."""
+    matched = getattr(violation, "matched", None) or violation["matched"]
+    sentence = getattr(violation, "sentence", None) or violation["sentence"]
+    return (f"Correction needed: your previous text used causal language ('{matched}') in this sentence: "
+            f"\"{sentence}\". Rewrite the whole summary using association language only, such as 'is associated "
+            "with'. Do not use the words cause, drive, lead to or result in.")
 
 
 def check_for_causal_language(report_text: str, plan: AnalysisPlan) -> None:
@@ -37,29 +75,20 @@ def check_for_causal_language(report_text: str, plan: AnalysisPlan) -> None:
     since free text generation is a second place the rule could be violated
     even when the plan itself is correctly configured.
 
-    A causal-sounding word preceded closely by a negation ("not that it
-    causes", "does not cause") is EXCLUDED from the violation -- that
-    phrasing correctly disclaims causation rather than asserting it. This
-    keyword check is deliberately narrow: it catches the common unsafe
-    pattern, not every possible phrasing, and false negatives here are more
-    acceptable than blocking a report that is actually safe and correct.
+    A causal-sounding word preceded closely by a negation in the same sentence ("not that it causes",
+    "does not cause", "never causes") is EXCLUDED from the violation -- that phrasing correctly disclaims
+    causation rather than asserting it (see find_causal_violation). This keyword check is deliberately
+    narrow: it catches the common unsafe pattern, not every possible phrasing.
     """
     if plan.allowed_claims != "associations only":
         return
-
-    for match in _CAUSAL_RE.finditer(report_text):
-        window_start = max(0, match.start() - 40)
-        preceding_text = report_text[window_start:match.start()].lower()
-        if any(marker in preceding_text for marker in _NEGATION_MARKERS):
-            continue  # correctly disclaiming causation, not asserting it
-        raise CausalLanguageViolation(
-            f"Report uses causal language ('{match.group()}') on data where "
-            f"allowed_claims is 'associations only'. Rewrite using association "
-            f"language (e.g. 'is associated with') instead."
-        )
+    violation = find_causal_violation(report_text)
+    if violation is not None:
+        raise CausalLanguageViolation(violation["matched"], violation["sentence"])
 
 
-def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b",
+                    feedback: str = "") -> str:
     """
     Generate the plain-language report. The model writes the prose, but
     every number in the prompt comes from real computation (test_result),
@@ -109,6 +138,8 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
         f"Original question: {plan.request_text}\n\n"
         f"Facts computed from the data:\n{two_group_facts(test_result, plan.outcome_name, predictor)}"
     )
+    if feedback:
+        human_prompt += "\n\n" + feedback  # M1.4a: the one retry after a causal-language violation
 
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     report_text = response.content
@@ -169,7 +200,8 @@ def generate_descriptive_report(plan: AnalysisPlan, descriptive_result: dict, mo
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     return response.content
 
-def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b",
+                                feedback: str = "") -> str:
     """
     Plain-language report for a multi-group comparison. Groups, their order, and
     the direction and size of every listed difference come from code
@@ -212,11 +244,14 @@ def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_nam
         f"Original question: {plan.request_text}\n\n"
         f"Facts computed from the data:\n{multi_group_facts(test_result, plan.outcome_name, predictor)}"
     )
+    if feedback:
+        human_prompt += "\n\n" + feedback  # M1.4a: the one retry after a causal-language violation
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     return response.content
 
 
-def generate_regression_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b") -> str:
+def generate_regression_report(plan: AnalysisPlan, test_result: dict, model_name: str = "openai/gpt-oss-120b",
+                               feedback: str = "") -> str:
     """
     Plain-language regression report. The direction and size of every association,
     and what each categorical coefficient is compared against, come from code
@@ -258,5 +293,7 @@ def generate_regression_report(plan: AnalysisPlan, test_result: dict, model_name
         f"Original question: {plan.request_text}\n\n"
         f"Facts computed from the data:\n{regression_facts(test_result, plan.outcome_name)}"
     )
+    if feedback:
+        human_prompt += "\n\n" + feedback  # M1.4a: the one retry after a causal-language violation
     response = model.invoke([("system", system_prompt), ("human", human_prompt)])
     return response.content

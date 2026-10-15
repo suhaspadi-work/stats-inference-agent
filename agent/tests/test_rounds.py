@@ -15,7 +15,6 @@ from core.graph import build_agent_graph
 from core.ingestion import load_dataset
 from core.nodes import make_report_node
 from core.plan import AnalysisPlan, QuestionType
-from core.report import CausalLanguageViolation
 from core.rounds import EXPLORATORY_NOTE, make_round_entry, with_exploratory_note
 from tests.test_chart_guard import BOX, _Recorder, _assert_received_safe, _plan, _state, real, store  # noqa: F401
 from tests.test_prompt_canaries import REPORT_TEXT, _base_df, _clean, _drive as _drive_to_end, fake_model  # noqa: F401
@@ -55,7 +54,11 @@ def test_make_round_entry_without_a_method():
 # --- report_node -----------------------------------------------------------------------------------
 
 def _check_entry(update, recorder, state, capability, result_key, round_index=1, exploratory=False):
-    assert set(update) == {"report", "rounds"}
+    # M1.4a: an analysis report also returns its report.narrative record; the diagnostic path does not
+    analysis = capability != "descriptive"
+    assert set(update) == {"report", "rounds"} | ({"decision_log"} if analysis else set())
+    if analysis:
+        assert [e["decision_point"] for e in update["decision_log"]] == ["report.narrative"]
     (entry,) = update["rounds"]
     plan = state["plan"]
     assert set(entry) == ENTRY_KEYS
@@ -120,9 +123,13 @@ def test_exploratory_round_gets_the_note(real):
 
 
 def test_causal_check_runs_on_the_model_text_before_the_note(real):
+    # M1.4a: a violation no longer raises; the check still runs on the model's own text (both attempts record
+    # 'causes'), and the note goes in front of the fact-based fallback that replaces it
     assert real.two_group_plan.allowed_claims == "associations only"
-    with pytest.raises(CausalLanguageViolation, match="causes"):
-        make_report_node(report_fn=_Recorder("Region causes spend."))(_two_group_state(real, exploratory_round=True))
+    update = make_report_node(report_fn=_Recorder("Region causes spend."))(_two_group_state(real, exploratory_round=True))
+    (record,) = update["decision_log"]
+    assert [a["violation"]["matched"] for a in record["evidence"]["attempts"]] == ["causes", "causes"]
+    assert update["report"].startswith(EXPLORATORY_NOTE + "\n\nSummary of the computed results")
 
 
 @pytest.mark.parametrize("extra", [{}, {"exploratory_round": False}], ids=["absent", "false"])
