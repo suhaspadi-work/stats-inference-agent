@@ -11,6 +11,7 @@ The check logic lives in small helpers so the negative tests can prove each
 check fails when it should.
 """
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,11 +20,13 @@ from langgraph.types import Command
 
 import core.classification_records as classification_records
 import core.cleaning_records as cleaning_records
+import core.describe_records as describe_records
 import core.draft_plan_records as draft_plan_records
 import core.execution_records as execution_records
 import core.freeze_records as freeze_records
 import core.routing_records as routing_records
 import core.selection_records as selection_records
+import core.stage_plan_records as stage_plan_records
 from core.capabilities import ANALYSES
 from core.classifier import _DraftPlanOut, _ProposedOperationOut
 from core.dataset import LocalDiskStore
@@ -35,8 +38,8 @@ from core.graph import build_agent_graph
 from core.ingestion import load_dataset
 from core.plan import CausalStatus, ClassificationDecision, OutcomeType, QuestionType
 
-RECORD_MODULES = (classification_records, cleaning_records, draft_plan_records, execution_records,
-                  freeze_records, routing_records, selection_records)
+RECORD_MODULES = (classification_records, cleaning_records, describe_records, draft_plan_records, execution_records,
+                  freeze_records, routing_records, selection_records, stage_plan_records)
 POINT_PREFIXES = ("intake.", "planner.", "stage1.", "stage2.", "stage3.")
 
 
@@ -55,8 +58,15 @@ def undeclared_nodes(graph_node_names) -> list[str]:
 
 
 def module_points(modules=RECORD_MODULES) -> set[str]:
-    return {value for module in modules for name, value in vars(module).items()
-            if name.endswith("_POINT") and isinstance(value, str)}
+    """Every *_POINT string and every value of a *_POINTS dict (such as STEP_POINTS) in the record modules."""
+    points = set()
+    for module in modules:
+        for name, value in vars(module).items():
+            if name.endswith("_POINT") and isinstance(value, str):
+                points.add(value)
+            elif name.endswith("_POINTS") and isinstance(value, dict):
+                points.update(v for v in value.values() if isinstance(v, str))
+    return points
 
 
 def unregistered_constants(points, registered) -> set[str]:
@@ -136,6 +146,12 @@ def test_made_up_point_constant_is_reported():
     assert unregistered_constants(module_points() | {"stage2.made_up"}, registered_points()) == {"stage2.made_up"}
 
 
+def test_made_up_point_in_a_points_dict_is_reported():
+    assert set(stage_plan_records.STEP_POINTS.values()) <= module_points()
+    fake = SimpleNamespace(STEP_POINTS={**stage_plan_records.STEP_POINTS, "forecast": "planner.step.forecast"})
+    assert unregistered_constants(module_points((fake,)), registered_points()) == {"planner.step.forecast"}
+
+
 def test_every_analysis_has_its_record_builders():
     names = {a.name for a in ANALYSES}
     for analysis in ANALYSES:
@@ -154,9 +170,9 @@ def test_every_point_uses_a_known_prefix():
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    # M1.1: plan_stages added between profile and wrangle_propose
+    # M1.1: plan_stages added between profile and wrangle_propose; M1.2: describe added after cleaning
     assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "wrangle_propose", "wrangle_review",
-                     "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
+                     "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
 
 
 # ------------------------------------------------------------------ negative tests
@@ -497,5 +513,8 @@ def test_scenario_specifics(scenario_logs):
     assert "stage3.encoding" in points("S6")
     assert "planner.draft_plan" in points("S7") and "stage2.test_selection" not in points("S7")
     assert points("S8")[-1] == "planner.stage_plan" and "planner.route" not in points("S8")
+    # M1.2: the describe step runs after cleaning (S1) and when there is nothing to clean (S2), not for S7
+    assert "stage1.describe.execution" in points("S1") and "stage1.describe.execution" in points("S2")
+    assert "stage1.describe.execution" not in points("S7")
     s10_route = scenario_logs["S10"][0]["decision_log"][-1]
     assert (s10_route["decision_point"], s10_route["chosen"]) == ("planner.route", "unsupported")

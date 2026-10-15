@@ -235,7 +235,7 @@ def test_full_graph_wrangle_edges(tmp_path):
     assert edges[("profile", "plan_stages")] is False and edges[("plan_stages", "wrangle_propose")] is True  # M1.1
     assert edges[("wrangle_propose", "wrangle_review")] is True
     assert edges[("wrangle_propose", "draft_plan")] is True
-    assert edges[("wrangle_review", "draft_plan")] is False
+    assert edges[("wrangle_review", "draft_plan")] is True  # M1.2: conditional, through route_after_cleaning
     assert "wrangle" not in {node for pair in edges for node in pair}
 
 

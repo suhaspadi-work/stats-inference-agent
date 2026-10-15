@@ -26,7 +26,7 @@ from core.wrangling import (
 from dataclasses import replace
 from core.descriptive import compute_descriptive_stats
 from core.report import generate_report, check_for_causal_language, generate_descriptive_report, generate_multi_group_report, generate_regression_report
-from core.capabilities import capability_for_plan, capability_named, analysis_for_result
+from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result
 from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
 from core.classification_records import (
@@ -39,8 +39,9 @@ from core.cleaning_records import scan_record, fix_record, approval_record, exec
 from core.freeze_records import plan_approval_record, edited_predictors_record
 from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
-from core.stage_plan import build_stage_plan
+from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_records import stage_plan_record, step_records
+from core.describe_records import describe_execution_record
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -253,8 +254,34 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
     return wrangle_propose_node
 
 
+def route_after_cleaning(state: AgentState) -> str:
+    """
+    After cleaning (or when there was nothing to clean): the describe step when the stage plan says run
+    and the question is not descriptive (a descriptive question is described by eda), otherwise
+    draft_plan. A state without a stage plan goes to draft_plan, as before M1.2.
+    """
+    plan = state.get("stage_plan")
+    if plan is not None and plan["question_type"] != "descriptive":
+        describe = next(s for s in plan_steps(plan) if s["step"] == "describe")
+        if describe["run"]:
+            return "describe"
+    return "draft_plan"
+
+
 def route_after_wrangle_propose(state: AgentState) -> str:
-    return "wrangle_review" if state.get("pending_wrangling") is not None else "draft_plan"
+    return "wrangle_review" if state.get("pending_wrangling") is not None else route_after_cleaning(state)
+
+
+def make_describe_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M1.2: describe the finished dataset as the last step of stage 1 (deterministic, no model call, no
+    report yet: M1.4). Stores descriptive_result; the dataset, plan, profile and classification are untouched.
+    """
+    def describe_node(state: AgentState) -> dict:
+        result = DESCRIPTIVE.compute(state["dataset"], store)
+        step = next(s for s in plan_steps(state["stage_plan"]) if s["step"] == "describe")
+        return {"descriptive_result": result, **log_update(describe_execution_record(result, step))}
+    return describe_node
 
 
 def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict]:

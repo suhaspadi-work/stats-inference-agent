@@ -20,6 +20,7 @@ from core.cleaning_records import (
     EXECUTION_POINT as CLEAN_EXECUTION_POINT,
     FIX_POINT, SCAN_POINT,
 )
+from core.describe_records import DESCRIBE_EXECUTION_POINT
 from core.draft_plan_records import OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
@@ -36,6 +37,7 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
                     STEP_POINTS["modeling"]),
     "wrangle_propose": (SCAN_POINT, FIX_POINT),
     "wrangle_review": (CLEAN_APPROVAL_POINT, CLEAN_EXECUTION_POINT),
+    "describe": (DESCRIBE_EXECUTION_POINT,),
     "draft_plan": (DRAFT_PLAN_POINT, OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT, ROUTE_POINT),
     "select_method": (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT, ENCODING_POINT),
     "freeze": (PLAN_APPROVAL_POINT, PREDICTORS_POINT),
@@ -48,6 +50,16 @@ NON_CHOOSING_NODES: dict[str, str] = {
     "eda": ("runs the descriptive statistics; the one choice around it, skipping method selection "
             "and freeze, is recorded by planner.route"),
     "report": "restates facts computed by code; the model writes prose but no option is chosen",
+}
+
+# The stage of every graph node (M1.2). The stage is a tag on a node, not a LangGraph subgraph;
+# "analysis" is stage 2 or 3 by the route. M1.3 places gates and M1.4 groups records by it.
+STAGES: tuple[str, ...] = ("intake", "stage1", "analysis", "report")
+NODE_STAGES: dict[str, str] = {
+    "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
+    "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
+    "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
+    "report": "report",
 }
 
 # Analyses that write no record at run time, and why.

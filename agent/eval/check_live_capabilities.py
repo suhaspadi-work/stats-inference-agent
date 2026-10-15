@@ -113,6 +113,15 @@ def print_stage_plan(log, label):
     print(f"   stage plan [{label}]: chosen={record['chosen']} status={(record.get('evidence') or {}).get('status')}")
 
 
+def print_describe(state_log, label):
+    """M1.2: the stage1.describe.execution record of the run, one line."""
+    record = next((e for e in state_log if e["decision_point"] == "stage1.describe.execution"), None)
+    if record is None:
+        print(f"   describe [{label}]: not run")
+        return
+    print(f"   describe [{label}]: {record['chosen']} ({(record.get('evidence') or {}).get('chart_count')} charts)")
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
@@ -140,6 +149,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     points = [e["decision_point"] for e in log]
     print("   decision points:", points)
     print_stage_plan(log, label)
+    print_describe(log, label)
     all_points.update(points)
     if label == "messy":
         print_cleaning_lines(log)
