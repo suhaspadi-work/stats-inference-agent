@@ -4,10 +4,15 @@ real model, auto-approving every interrupt. Run from the agent folder with:
     python -m eval.check_live_capabilities
 Set LIVE_ONLY to a comma-separated list of run labels (for example LIVE_ONLY=exploratory) to run only those;
 the final decision-point lines then cover the executed runs only.
+
+The exit code is 0 when every run passed, 3 when the only failures are an exhausted Groq quota (not a code
+failure; retry after the reset), and 1 otherwise (G54). A summary is printed at the end.
 """
 import json
 import math
 import os
+import re
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -84,12 +89,16 @@ def print_lineage(state, log):
     applied = [e for e in log if e["decision_point"] == "stage1.clean.execution" and e["chosen"] == "applied"]
     if not applied:
         print("   lineage: no applied operations")
-        return
+        return None
     last_op = applied[-1]["evidence"].get("operation_id")
     dataset = state.get("dataset")
     made_by = getattr(dataset, "created_from_operation", None)
-    print("   lineage: " + ("PASS" if last_op == made_by and last_op is not None
-                            else f"FAIL (last applied operation {last_op}, dataset created_from_operation {made_by})"))
+    if last_op == made_by and last_op is not None:
+        print("   lineage: PASS")
+        return None
+    problem = f"lineage: FAIL (last applied operation {last_op}, dataset created_from_operation {made_by})"
+    print("   " + problem)
+    return problem
 
 
 def print_route(state, label):
@@ -147,12 +156,24 @@ def print_exploratory(state_log, label):
     print(f"   refusals [{label}]: {len(refused)} ({rules})")
 
 
+def print_edit(state_log, label):
+    """G54: the answers of the "edit" run at the stage-plan gate and at plan approval, and the re-selection."""
+    stage = [e["chosen"] for e in state_log if e["decision_point"] == "planner.stage_plan_approval"]
+    plan = [e["chosen"] for e in state_log if e["decision_point"] == "planner.plan_approval"]
+    selections = [e for e in state_log if e["decision_point"] == "stage3.regression_method"]
+    supersedes = len(selections) >= 2 and selections[1].get("supersedes") == selections[0]["id"]
+    print(f"   edit [{label}]: stage plan answers={', '.join(stage)}; plan approval answers={', '.join(plan)}; "
+          f"selections={len(selections)} (second supersedes first: {supersedes})")
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
     decision points and (for the messy run) the cleaning lines and lineage. Used after successful and
-    failed runs alike; a failed run's points still count toward the final union.
+    failed runs alike; a failed run's points still count toward the final union. Returns the problems
+    found (every FAIL line printed), for the summary (G54).
     """
+    problems = []
     thread_id = cfg["configurable"]["thread_id"]
     try:
         state = app.get_state(cfg).values or {}
@@ -162,14 +183,24 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     state_log = state.get("decision_log") or []
     path = events_path(events, thread_id)
     file_log = read_decision_log(path)
-    diff = first_difference(state_log, file_log)
-    print(f"   event log [{label}]: {len(state_log)} records in state, {len(file_log)} in file: "
-          + ("PASS" if diff is None else f"FAIL ({diff})"))
-    if path.exists():
-        problem = strict_json_problem(path)
-        print("   strict JSON: " + ("PASS" if problem is None else f"FAIL ({problem})"))
+    if failed and not state_log and not file_log:
+        # The failure itself is already reported; there is nothing to compare.
+        print(f"   event log [{label}]: not checked (the run failed before any node ran)")
+        print("   strict JSON: not checked")
     else:
-        print("   strict JSON: FAIL (no event log file was written)")
+        diff = first_difference(state_log, file_log)
+        print(f"   event log [{label}]: {len(state_log)} records in state, {len(file_log)} in file: "
+              + ("PASS" if diff is None else f"FAIL ({diff})"))
+        if diff is not None:
+            problems.append(f"event log: FAIL ({diff})")
+        if path.exists():
+            problem = strict_json_problem(path)
+            print("   strict JSON: " + ("PASS" if problem is None else f"FAIL ({problem})"))
+            if problem is not None:
+                problems.append(f"strict JSON: FAIL ({problem})")
+        else:
+            print("   strict JSON: FAIL (no event log file was written)")
+            problems.append("strict JSON: FAIL (no event log file was written)")
     log = file_log if failed else state_log
     points = [e["decision_point"] for e in log]
     print("   decision points:", points)
@@ -179,11 +210,16 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     all_points.update(points)
     if label == "messy":
         print_cleaning_lines(log)
-        print_lineage(state, state_log)
+        lineage = print_lineage(state, state_log)
+        if lineage is not None:
+            problems.append(lineage)
     if label in ("mismatch", "unsupported"):
         print_route(state, label)
     if label == "exploratory":
         print_exploratory(log, label)
+    if label == "edit":
+        print_edit(log, label)
+    return problems
 
 
 def filter_runs(runs, only):
@@ -194,6 +230,71 @@ def filter_runs(runs, only):
     if unknown:
         raise ValueError(f"LIVE_ONLY names unknown run(s) {unknown}; known: {[label for label, _, _ in runs]}")
     return [r for r in runs if r[0] in only]
+
+
+def classify_error(exc) -> str:
+    """G54: "quota" for an exhausted Groq rate limit (not a code failure), "code" for anything else."""
+    if "RateLimit" in type(exc).__name__:
+        return "quota"
+    message = str(exc)
+    if "429" in message and "rate limit" in message.lower() and ("tokens per day" in message or "TPD" in message):
+        return "quota"
+    return "code"
+
+
+def quota_reset_hint(message: str):
+    """The wait Groq names after "Please try again in" (for example "1h2m3.5s"), or None."""
+    match = re.search(r"Please try again in (.+?)(?:\.(?:\s|$)|['\"]|$)", message)
+    return match.group(1).strip() if match else None
+
+
+def summarize(outcomes) -> dict:
+    """
+    G54: outcomes is a list of {"label", "error_kind": None, "quota" or "code", "problems": [...], "hint"}.
+    exit_code 0 when every run passed, 3 when every failure is an exhausted quota with no problem, else 1.
+    """
+    passed, code, quota, lines = 0, 0, 0, []
+    for o in outcomes:
+        if o.get("error_kind") is None and not o.get("problems"):
+            passed += 1
+        elif o.get("error_kind") == "quota" and not o.get("problems"):
+            quota += 1
+            hint = o.get("hint")
+            lines.append(f"  {o['label']}: BLOCKED (quota): not a code failure; retry after the reset"
+                         + (f" {hint}" if hint else ""))
+        else:
+            code += 1
+            first = (o.get("problems") or [o.get("error") or "unknown error"])[0]
+            lines.append(f"  {o['label']}: FAILED (code): {first}")
+    exit_code = 0 if code == 0 and quota == 0 else (3 if code == 0 else 1)
+    header = f"SUMMARY: {len(outcomes)} runs, {passed} passed, {code} code failures, {quota} quota-blocked"
+    return {"exit_code": exit_code, "lines": [header, *lines]}
+
+
+def _resume_for(label, p, counts, question):
+    """The answer to one pause. Every run answers as before; the "edit" run tries refusals first (G54)."""
+    kind = p.get("type")
+    counts[kind] = counts.get(kind, 0) + 1
+    if label == "edit" and kind == "stage_plan_approval" and counts[kind] == 1:
+        return {"action": "approve", "run": {"clean": False}}  # clean is not applicable here: refused
+    if label == "edit" and kind == "plan_approval":
+        if counts[kind] == 1:
+            return {"action": "edit", "candidate_predictors": ["customer_id"]}  # an identifier: refused
+        if counts[kind] == 2:
+            predictors = list(p.get("candidate_predictors") or [])
+            return {"action": "edit", "candidate_predictors": predictors[1:] or predictors}
+        return {"action": "approve"}
+    if kind in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
+        return {"action": "approve"}
+    if kind == "stage_gate":  # M1.3b: run the exploratory round only in its own run
+        if label != "exploratory":
+            return {"action": "skip"}
+        if p.get("refused") is None:  # step 2b: first try an identifier-like column, which is refused
+            return {"action": "run", "predictors": ["region", "customer_id"]}
+        return {"action": "run"}
+    if kind == "wrangling_approval":
+        return {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
+    return question
 
 
 def main():
@@ -234,39 +335,31 @@ def main():
         ("mismatch", df3, "Did West customers spend more than East customers?"),
         # M1.3b: the boundary gate is answered "run", so an exploratory regression follows the comparison
         ("exploratory", df2, "Did customers in the West region spend more than the East region?"),
+        # G54: a refused stage-plan choice, a refused edit, then an edit that goes back through method selection
+        ("edit", df3, "What factors drive total spend? Consider region, tenure and visits."),
         # M0.3: the request that crashed select_method before M0.3 (expected to stop before method selection)
         ("unsupported", df_messy, "Is there a relationship between region, tenure and spend?"),
     ]
     runs = filter_runs(runs, [s.strip() for s in os.environ.get("LIVE_ONLY", "").split(",") if s.strip()])
+    outcomes = []
     for i, (label, df, question) in enumerate(runs):
         cfg = {"configurable": {"thread_id": f"live-{label}"}}
+        outcome = {"label": label, "error_kind": None, "problems": [], "hint": None}
+        outcomes.append(outcome)
         try:
             path = Path(f"/tmp/live_{label}.csv")
             df.to_csv(path, index=False)
             ds = load_dataset(path, session_id=f"s-live-{label}", name=f"live_{label}", store=store)
             result = app.invoke({"request_text": question, "session_id": f"s-live-{label}", "dataset": ds}, cfg)
-            seen = []
+            seen, counts = [], {}
             while "__interrupt__" in result:
                 p = result["__interrupt__"][0].value
                 seen.append(p.get("type"))
-                if p.get("type") in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
-                    resume = {"action": "approve"}
-                elif p.get("type") == "stage_gate":  # M1.3b: run the exploratory round only in its own run
-                    if label != "exploratory":
-                        resume = {"action": "skip"}
-                    elif p.get("refused") is None:  # step 2b: first try an identifier-like column, which is refused
-                        resume = {"action": "run", "predictors": ["region", "customer_id"]}
-                    else:
-                        resume = {"action": "run"}
-                elif p.get("type") == "wrangling_approval":
-                    resume = {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
-                else:
-                    resume = question
-                result = app.invoke(Command(resume=resume), cfg)
+                result = app.invoke(Command(resume=_resume_for(label, p, counts, question)), cfg)
             if result.get("clarification_needed") and not result.get("report"):
                 print(f"[{label}] ended before method selection: {result['clarification_needed']}")
                 print(f"   interrupts={seen}")
-                report_event_log(app, cfg, label, events, all_points, failed=False)
+                outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=False)
                 if i < len(runs) - 1:
                     time.sleep(20)  # stay under the per-minute token limit
                 continue
@@ -277,10 +370,19 @@ def main():
                   f"status={plan.status.value} result_type={kind} method={tr.get('method')}")
             print("   report:", (result.get("report") or "")[:160].replace("\n", " "))
 
-            report_event_log(app, cfg, label, events, all_points, failed=False)
+            outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=False)
         except Exception as e:
-            print(f"[{label}] FAILED: {type(e).__name__}: {str(e)[:200]}")
-            report_event_log(app, cfg, label, events, all_points, failed=True)
+            message = str(e)
+            print(f"[{label}] FAILED: {type(e).__name__}: {message[:500]}")
+            outcome["error_kind"] = classify_error(e)
+            if outcome["error_kind"] == "quota":
+                print("   quota exhausted: not a code failure")
+                outcome["hint"] = quota_reset_hint(message)
+                if outcome["hint"]:
+                    print(f"   retry after the reset: {outcome['hint']}")
+            else:
+                outcome["problems"].append(f"{type(e).__name__}: {message[:500]}")
+            outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=True)
         if i < len(runs) - 1:
             time.sleep(20)  # stay under the per-minute token limit
 
@@ -288,6 +390,12 @@ def main():
     print("Registered points not reached in these runs (information only):",
           sorted(registered_points() - all_points))
     print("Event log folder:", events)
+
+    summary = summarize(outcomes)
+    print()
+    for line in summary["lines"]:
+        print(line)
+    sys.exit(summary["exit_code"])
 
 
 if __name__ == "__main__":
