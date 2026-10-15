@@ -176,7 +176,8 @@ def test_default_graph_has_the_same_nodes(tmp_path):
     # M1.1: plan_stages; M1.2: describe; M1.3a: stage_plan_gate; M1.3b: stage_gate and start_round after report
     assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "stage_plan_gate", "wrangle_propose",
                      "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report",
-                     "stage_gate", "start_round"}
+                     "stage_gate", "start_round",
+                     "stage1_report"}  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
 
 
 # ------------------------------------------------------------------ negative tests

@@ -55,6 +55,7 @@ NON_CHOOSING_NODES: dict[str, str] = {
     "profile": "computes the model-safe profile; no option is chosen",
     "eda": ("runs the descriptive statistics; the one choice around it, skipping method selection "
             "and freeze, is recorded by planner.route"),
+    "stage1_report": "composes the Stage 1 report from the decision records of this question; no option is chosen",
 }
 
 # The stage of every graph node (M1.2). The stage is a tag on a node, not a LangGraph subgraph;
@@ -64,6 +65,7 @@ NODE_STAGES: dict[str, str] = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
     "stage_plan_gate": "intake",
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
+    "stage1_report": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "stage_gate": "analysis", "start_round": "analysis",
     "report": "report",

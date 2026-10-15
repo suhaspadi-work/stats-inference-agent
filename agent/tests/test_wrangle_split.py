@@ -37,7 +37,7 @@ def build_graph(store, propose_fn):
     graph.add_node("draft_plan", lambda state: {})
     graph.add_edge(START, "wrangle_propose")
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
-                                {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
+                                {"wrangle_review": "wrangle_review", "stage1_report": "draft_plan"})  # M1.4b: router key
     graph.add_edge("wrangle_review", "draft_plan")
     graph.add_edge("draft_plan", END)
     return graph.compile(checkpointer=InMemorySaver())
@@ -234,8 +234,8 @@ def test_full_graph_wrangle_edges(tmp_path):
     edges = {(e.source, e.target): e.conditional for e in app.get_graph().edges}
     assert edges[("profile", "plan_stages")] is False and edges[("plan_stages", "wrangle_propose")] is True  # M1.1
     assert edges[("wrangle_propose", "wrangle_review")] is True
-    assert edges[("wrangle_propose", "draft_plan")] is True
-    assert edges[("wrangle_review", "draft_plan")] is True  # M1.2: conditional, through route_after_cleaning
+    assert edges[("wrangle_propose", "stage1_report")] is True  # M1.4b: it was draft_plan
+    assert edges[("wrangle_review", "stage1_report")] is True  # M1.2: conditional, through route_after_cleaning; M1.4b
     assert "wrangle" not in {node for pair in edges for node in pair}
 
 

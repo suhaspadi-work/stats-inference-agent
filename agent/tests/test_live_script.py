@@ -5,7 +5,9 @@ it is the only failure, 1 when any run failed for another reason, and 0 when eve
 import pytest
 
 from core.report import CausalLanguageViolation
-from eval.check_live_capabilities import _resume_for, classify_error, filter_runs, quota_reset_hint, summarize
+from eval.check_live_capabilities import (
+    _resume_for, classify_error, filter_runs, print_stage1_report, quota_reset_hint, summarize,
+)
 
 GROQ_TPD = ("Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in "
             "organization `org_x` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199990, "
@@ -123,3 +125,26 @@ def test_other_runs_answer_as_before():
 def test_filter_runs_unchanged():
     runs = [("a", None, "q1"), ("b", None, "q2")]
     assert filter_runs(runs, []) == runs and filter_runs(runs, ["b"]) == [runs[1]]
+
+
+# --- print_stage1_report (M1.4b) ------------------------------------------------------------------------------------
+
+def test_print_stage1_report(capsys):
+    entry = {"stage": "stage1", "text": "Stage 1: prepare and describe\n\nChecked\nNo issues.",
+             "sections": [{"heading": "Checked", "text": "No issues."}, {"heading": "Changed", "text": "None."}],
+             "source_records": ["a", "b", "c"]}
+    other = {**entry, "stage": "stage2"}
+    print_stage1_report({}, "two_group")
+    print_stage1_report({"stage_reports": [other]}, "two_group")
+    print_stage1_report({"stage_reports": [other, entry]}, "two_group")
+    print_stage1_report({"stage_reports": [entry]}, "messy")
+    assert capsys.readouterr().out.splitlines() == [
+        "   stage 1 report [two_group]: none",
+        "   stage 1 report [two_group]: none",
+        "   stage 1 report [two_group]: Checked, Changed (3 records)",
+        "   stage 1 report [messy]: Checked, Changed (3 records)",
+        "      | Stage 1: prepare and describe",
+        "      | ",
+        "      | Checked",
+        "      | No issues.",
+    ]

@@ -33,6 +33,7 @@ EXPECTED_STAGES = {
     "stage_plan_gate": "intake",  # M1.3a
     "stage_gate": "analysis", "start_round": "analysis",  # M1.3b
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
+    "stage1_report": "stage1",  # M1.4b
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",
 }
@@ -146,23 +147,23 @@ def test_route_after_cleaning_goes_to_describe(question_type):
     {},
 ], ids=["run_false", "driver_run_false", "descriptive", "no_stage_plan"])
 def test_route_after_cleaning_goes_to_draft_plan(state):
-    assert route_after_cleaning(state) == "draft_plan"
+    assert route_after_cleaning(state) == "stage1_report"  # M1.4b: the Stage 1 report runs before draft_plan
 
 
 def test_route_after_wrangle_propose():
     assert route_after_wrangle_propose(_state(QuestionType.TWO_GROUP_COMPARISON, pending={"x": 1})) == "wrangle_review"
     assert route_after_wrangle_propose(_state(QuestionType.TWO_GROUP_COMPARISON)) == "describe"
-    assert route_after_wrangle_propose(_state(QuestionType.DESCRIPTIVE)) == "draft_plan"
+    assert route_after_wrangle_propose(_state(QuestionType.DESCRIPTIVE)) == "stage1_report"  # M1.4b: was draft_plan
 
 
 def test_graph_edges(tmp_path):
     edges = {(e.source, e.target): e.conditional
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
-    for target in ("wrangle_review", "describe", "draft_plan"):
+    for target in ("wrangle_review", "describe", "stage1_report"):  # M1.4b: stage1_report replaces draft_plan
         assert edges[("wrangle_propose", target)] is True, target
     assert edges[("wrangle_review", "describe")] is True
-    assert edges[("wrangle_review", "draft_plan")] is True
-    assert edges[("describe", "draft_plan")] is False
+    assert edges[("wrangle_review", "stage1_report")] is True  # M1.4b
+    assert edges[("describe", "stage1_report")] is False  # M1.4b: describe -> stage1_report -> draft_plan
 
 
 # --- full runs through the real graph -----------------------------------------------------------------

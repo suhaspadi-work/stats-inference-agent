@@ -57,6 +57,7 @@ from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
 from core.stage_plan_gate import apply_gate_decision, changed_steps, check_run_overrides, gate_needed, gate_payload
 from core.describe_records import describe_execution_record
+from core.stage_reports import STAGE1_TITLE, current_question_records, make_stage_report_entry, stage1_report
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -342,15 +343,15 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
 def route_after_cleaning(state: AgentState) -> str:
     """
     After cleaning (or when there was nothing to clean): the describe step when the stage plan says run
-    and the question is not descriptive (a descriptive question is described by eda), otherwise
-    draft_plan. A state without a stage plan goes to draft_plan, as before M1.2.
+    and the question is not descriptive (a descriptive question is described by eda), otherwise the
+    Stage 1 report (M1.4b; it used to be draft_plan). A state without a stage plan goes to the Stage 1 report.
     """
     plan = state.get("stage_plan")
     if plan is not None and plan["question_type"] != "descriptive":
         describe = next(s for s in plan_steps(plan) if s["step"] == "describe")
         if describe["run"]:
             return "describe"
-    return "draft_plan"
+    return "stage1_report"
 
 
 def route_after_wrangle_propose(state: AgentState) -> str:
@@ -367,6 +368,18 @@ def make_describe_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         step = next(s for s in plan_steps(state["stage_plan"]) if s["step"] == "describe")
         return {"descriptive_result": result, **log_update(describe_execution_record(result, step))}
     return describe_node
+
+
+def make_stage1_report_node() -> Callable[[AgentState], dict]:
+    """
+    M1.4b: compose the Stage 1 report by code from the decision records of this question (no model call, no
+    data access). It chooses nothing, so it writes no decision record; the plan-approval pause shows it.
+    """
+    def stage1_report_node(state: AgentState) -> dict:
+        records = current_question_records(state.get("decision_log") or [])
+        composed = stage1_report(records, state.get("stage_plan") or {})
+        return {"stage_reports": [make_stage_report_entry("stage1", None, STAGE1_TITLE, composed)]}
+    return stage1_report_node
 
 
 def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -587,6 +600,7 @@ def make_freeze_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         plan = state["plan"]
         selection = next((e for e in reversed(state.get("decision_log") or [])
                           if e.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)), None)
+        stage1 = next((e for e in reversed(state.get("stage_reports") or []) if e.get("stage") == "stage1"), None)
 
         decision = interrupt({
             "type": "plan_approval",
@@ -603,6 +617,8 @@ def make_freeze_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             "method": plan.primary_method,
             # True when the method shown was selected again after an accepted edit (its record supersedes one)
             "reselected": bool(selection and selection.get("supersedes")),
+            # M1.4b: the Stage 1 report, composed by code from the records; None when none was built
+            "stage1_report": ({k: stage1[k] for k in ("title", "text", "sections")} if stage1 is not None else None),
         })
 
         action = decision.get("action")

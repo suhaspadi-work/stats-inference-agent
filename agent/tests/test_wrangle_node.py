@@ -30,7 +30,7 @@ def build_wrangle_graph(store):
     graph.add_node("draft_plan", lambda state: {})
     graph.add_edge(START, "wrangle_propose")
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
-                                {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
+                                {"wrangle_review": "wrangle_review", "stage1_report": "draft_plan"})  # M1.4b: router key
     graph.add_edge("wrangle_review", "draft_plan")
     graph.add_edge("draft_plan", END)
     return graph.compile(checkpointer=InMemorySaver())

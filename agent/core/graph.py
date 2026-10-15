@@ -8,7 +8,7 @@ from core.event_sink import with_event_log
 from core.nodes import (
     classify_node, clarify_node, reclassify_node, route_after_classify,
     make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
-    make_describe_node, route_after_cleaning,
+    make_describe_node, make_stage1_report_node, route_after_cleaning,
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
     route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node,
     make_draft_plan_node,
@@ -66,6 +66,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> wrangle_propose (detect issues, one model call for fixes)
          -> if any issues: wrangle_review (checklist interrupt, then execute)
       -> describe (M1.2: when the stage plan says run and the question is not descriptive; no model call)
+      -> stage1_report (M1.4b: the Stage 1 report, composed by code from the records; shown at plan approval)
       -> draft_plan
       -> freeze (approval interrupt; routes to execute or END)
          (M1.3c: a refused edit re-opens the pause: freeze -> freeze; an accepted edit re-selects the method:
@@ -105,6 +106,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
         add_node("wrangle_propose", make_wrangle_propose_node(store, propose_fn=propose_fn))
     add_node("wrangle_review", make_wrangle_review_node(store))
     add_node("describe", make_describe_node(store))
+    add_node("stage1_report", make_stage1_report_node())
     if draft_fn is None:
         add_node("draft_plan", make_draft_plan_node())
     else:
@@ -127,9 +129,11 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("stage_plan_gate", route_after_stage_plan_gate,
                                 {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "wrangle_propose", END: END})
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
-                                {"wrangle_review": "wrangle_review", "describe": "describe", "draft_plan": "draft_plan"})
-    graph.add_conditional_edges("wrangle_review", route_after_cleaning, {"describe": "describe", "draft_plan": "draft_plan"})
-    graph.add_edge("describe", "draft_plan")
+                                {"wrangle_review": "wrangle_review", "describe": "describe", "stage1_report": "stage1_report"})
+    graph.add_conditional_edges("wrangle_review", route_after_cleaning,
+                                {"describe": "describe", "stage1_report": "stage1_report"})
+    graph.add_edge("describe", "stage1_report")
+    graph.add_edge("stage1_report", "draft_plan")
     graph.add_conditional_edges("draft_plan", route_after_draft_plan,
                                 {"eda": "eda", "select_method": "select_method", END: END})
     graph.add_edge("select_method", "freeze")

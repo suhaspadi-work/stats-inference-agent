@@ -134,6 +134,19 @@ def print_describe(state_log, label):
     print(f"   describe [{label}]: {record['chosen']} ({(record.get('evidence') or {}).get('chart_count')} charts)")
 
 
+def print_stage1_report(state, label):
+    """M1.4b: the Stage 1 report of the run, its sections and record count; for the messy run, also its text."""
+    entries = [e for e in state.get("stage_reports") or [] if e.get("stage") == "stage1"]
+    if not entries:
+        print(f"   stage 1 report [{label}]: none")
+    for e in entries:
+        headings = ", ".join(s["heading"] for s in e["sections"])
+        print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
+        if label == "messy":
+            for line in e["text"].split("\n"):
+                print(f"      | {line}")
+
+
 def print_report_narrative(state_log, label):
     """M1.4a: whose text became each analysis report, and whether each model attempt passed the guard."""
     records = [e for e in state_log if e["decision_point"] == "report.narrative"]
@@ -216,6 +229,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     print("   decision points:", points)
     print_stage_plan(log, label)
     print_describe(log, label)
+    print_stage1_report(state, label)
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)

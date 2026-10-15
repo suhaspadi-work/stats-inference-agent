@@ -66,6 +66,9 @@ class AgentState(TypedDict, total=False):
     # One entry per finished round (M1.3b), appended by report_node (core.rounds.make_round_entry);
     # plan, test_result and report are the latest round.
     rounds: Annotated[list[dict], operator.add]
+    # One entry per report built by code from the decision records (M1.4b), appended (core.stage_reports);
+    # state["report"] and each round's report stay the model narrative.
+    stage_reports: Annotated[list[dict], operator.add]
     exploratory_round: bool  # set by start_round in an exploratory round (M1.3b step 2); absent otherwise
     next_round: Optional[dict]  # set by stage_gate: {"run": bool, "predictors": [...]} (M1.3b)
     # set by stage_gate when the user's predictors break a rule: {"submitted", "refusals", "attempt"}; the gate
