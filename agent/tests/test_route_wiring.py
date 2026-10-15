@@ -244,27 +244,29 @@ def test_full_run_reconciled_to_multi_group(data, store):
     ds, _ = data
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["tier"]), propose_fn=must_not_propose)
-    state, pauses, next_nodes = _run(app, ds, "reconciled", [{"action": "approve"}])
-    assert [p["type"] for p in pauses] == ["plan_approval"]
-    assert pauses[0]["question_type"] == "multi_group_comparison"
+    state, pauses, next_nodes = _run(app, ds, "reconciled", [{"action": "approve"}] * 2)  # M1.3a: gate first
+    assert [p["type"] for p in pauses] == ["stage_plan_approval", "plan_approval"]
+    assert pauses[1]["question_type"] == "multi_group_comparison"
     assert state["test_result"]["result_type"] == "multi_group"
     points = [e["decision_point"] for e in state["decision_log"]]
     assert "stage2.post_hoc" in points
     assert next_nodes == ("report",)
 
 
-@pytest.mark.parametrize("question_type, draft_fn, text, last_point", [
+@pytest.mark.parametrize("question_type, draft_fn, text, last_point, gate_pauses", [
     # M1.1: association now ends at the stage plan, before cleaning and the draft plan
     (QuestionType.ASSOCIATION, fake_draft(["region", "tenure"]), "Association questions are not supported yet",
-     "planner.stage_plan"),
-    (QuestionType.TWO_GROUP_COMPARISON, _binary_draft, "(G3)", "planner.route"),
+     "planner.stage_plan", 0),
+    # M1.3a: the binary two-group question passes the stage-plan gate first
+    (QuestionType.TWO_GROUP_COMPARISON, _binary_draft, "(G3)", "planner.route", 1),
 ])
-def test_full_run_unsupported_ends_before_method_selection(data, store, question_type, draft_fn, text, last_point):
+def test_full_run_unsupported_ends_before_method_selection(data, store, question_type, draft_fn, text, last_point,
+                                                          gate_pauses):
     ds, _ = data
     app = build_agent_graph(store, classify_fn=confident(question_type), draft_fn=draft_fn,
                             propose_fn=must_not_propose)
-    state, pauses, next_nodes = _run(app, ds, f"unsupported-{question_type.value}", [])
-    assert pauses == [] and next_nodes == ()
+    state, pauses, next_nodes = _run(app, ds, f"unsupported-{question_type.value}", [{"action": "approve"}] * gate_pauses)
+    assert [p["type"] for p in pauses] == ["stage_plan_approval"] * gate_pauses and next_nodes == ()
     assert text in state["clarification_needed"]
     points = [e["decision_point"] for e in state["decision_log"]]
     assert points[-1] == last_point

@@ -22,6 +22,7 @@ from tests.test_decision_point_guard import (
 STOP = ["execute", "eda"]
 S1_RESUMES = [
     "I mean the two regions, East and West.",
+    {"action": "approve"},  # M1.3a: the stage-plan gate
     {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "approve"}]},
     {"action": "approve"},
 ]
@@ -146,7 +147,7 @@ def test_dunn_nan_intervals_round_trip_as_strict_json(tmp_path, store):
     events = tmp_path / "events"
     app = build_agent_graph(store, classify_fn=confident(QuestionType.MULTI_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose, event_log_dir=events)
-    state = _run(app, _start(_dataset(df, tmp_path, store, "kw")), "kw", [{"action": "approve"}])
+    state = _run(app, _start(_dataset(df, tmp_path, store, "kw")), "kw", [{"action": "approve"}, {"action": "approve"}])  # M1.3a: gate first
     path = events_path(events, "kw")
 
     in_state = next(e for e in state["decision_log"] if e["decision_point"] == "stage2.post_hoc")
@@ -176,6 +177,6 @@ def test_two_threads_write_two_files(tmp_path, store):
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    # M1.1: plan_stages added between profile and wrangle_propose; M1.2: describe added after cleaning
-    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "wrangle_propose", "wrangle_review",
-                     "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
+    # M1.1: plan_stages; M1.2: describe; M1.3a: stage_plan_gate after plan_stages
+    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "stage_plan_gate", "wrangle_propose",
+                     "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}

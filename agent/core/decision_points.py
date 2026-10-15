@@ -26,7 +26,7 @@ from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
-from core.stage_plan_records import STAGE_PLAN_POINT, STEP_POINTS
+from core.stage_plan_records import STAGE_PLAN_APPROVAL_POINT, STAGE_PLAN_POINT, STEP_POINTS
 
 # Each choosing graph node and the decision points it may emit.
 DECISION_NODES: dict[str, tuple[str, ...]] = {
@@ -35,6 +35,7 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
     "reclassify": (QUESTION_TYPE_POINT, CAUSAL_STATUS_POINT),
     "plan_stages": (STAGE_PLAN_POINT, STEP_POINTS["clean"], STEP_POINTS["describe"], STEP_POINTS["inference"],
                     STEP_POINTS["modeling"]),
+    "stage_plan_gate": (STAGE_PLAN_APPROVAL_POINT,),
     "wrangle_propose": (SCAN_POINT, FIX_POINT),
     "wrangle_review": (CLEAN_APPROVAL_POINT, CLEAN_EXECUTION_POINT),
     "describe": (DESCRIBE_EXECUTION_POINT,),
@@ -57,6 +58,7 @@ NON_CHOOSING_NODES: dict[str, str] = {
 STAGES: tuple[str, ...] = ("intake", "stage1", "analysis", "report")
 NODE_STAGES: dict[str, str] = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
+    "stage_plan_gate": "intake",
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",

@@ -4,11 +4,13 @@ core.nodes. The plan comes from core.stage_plan.build_stage_plan.
 
   planner.stage_plan        which steps the run takes, with every step as a candidate
   planner.step.<step>       run or skip, one record per step (none for an unsupported plan)
+  planner.stage_plan_approval  the human's answer at the stage-plan gate (M1.3a)
 """
 from __future__ import annotations
 
 from core.decision_record import Candidate, DecisionRecord
 from core.stage_plan import plan_steps
+from core.stage_plan_gate import adjustable_steps, changed_steps
 
 STAGE_PLAN_POINT = "planner.stage_plan"
 STEP_POINTS = {
@@ -71,3 +73,55 @@ def step_records(plan: dict) -> tuple[DecisionRecord, ...]:
                       "exploratory": s["exploratory"], **s["evidence"]},
         ))
     return tuple(records)
+
+
+STAGE_PLAN_APPROVAL_POINT = "planner.stage_plan_approval"
+
+_STATUS_CHOICE = {"approved": "approve", "approved_with_changes": "approve_with_changes", "rejected": "reject"}
+
+
+def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dict, status: str) -> DecisionRecord:
+    """The human's answer at the stage-plan gate (M1.3a). plan_before is the plan as shown."""
+    decision = decision or {}
+    action = decision.get("action")
+    steps = plan_steps(plan_before)
+    run_before = {s["step"]: s["run"] for s in steps}
+    run_after = {name: overrides.get(name, run) for name, run in run_before.items()}
+    changed = changed_steps(plan_before, overrides)
+    adjustable = adjustable_steps(plan_before)
+    overridden, original = False, None
+
+    if action not in ("approve", "reject"):
+        chosen, decided_by = "approve", "code_rule"
+        rationale = f"action '{action}' is not one of approve or reject; the node approves the plan as proposed (G36)"
+    elif status == "rejected":
+        chosen, decided_by = "reject", "human"
+        rationale = decision.get("reason") or "no reason given"
+    elif status == "approved_with_changes":
+        chosen, decided_by = "approve_with_changes", "human"
+        rationale = ", ".join(f"{name} switched {'on' if run_after[name] else 'off'}" for name in changed)
+        overridden = True
+        original = ("approve the plan as proposed: "
+                    + (", ".join(name for name, run in run_before.items() if run) or "no steps"))
+    else:
+        chosen, decided_by, rationale = _STATUS_CHOICE[status], "human", "approved as proposed"
+
+    return DecisionRecord(
+        decision_point=STAGE_PLAN_APPROVAL_POINT, chosen=chosen, decided_by=decided_by,
+        overridden_by_human=overridden, original_choice=original,
+        candidates=(
+            Candidate(option="approve", eligible=True, reason="run the steps as proposed"),
+            Candidate(option="approve_with_changes", eligible=bool(adjustable), reason="switch describe on or off"),
+            Candidate(option="reject", eligible=True, reason="stop before any cleaning; the run ends"),
+        ),
+        rationale=str(rationale),
+        evidence={
+            "question_type": plan_before["question_type"],
+            "run_before": run_before,
+            "run_after": run_after,
+            "overridden_steps": changed,
+            "adjustable_steps": adjustable,
+            "exploratory_offers": [s["step"] for s in steps if s["state"] == "offered" and s["exploratory"]],
+            "received_action": action,
+        },
+    )

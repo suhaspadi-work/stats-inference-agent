@@ -170,9 +170,9 @@ def test_every_point_uses_a_known_prefix():
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    # M1.1: plan_stages added between profile and wrangle_propose; M1.2: describe added after cleaning
-    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "wrangle_propose", "wrangle_review",
-                     "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
+    # M1.1: plan_stages; M1.2: describe; M1.3a: stage_plan_gate after plan_stages
+    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "stage_plan_gate", "wrangle_propose",
+                     "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
 
 
 # ------------------------------------------------------------------ negative tests
@@ -305,12 +305,14 @@ def _with_duplicate(df):
 
 # ------------------------------------------------------------------ driver
 
-def _drive(app, state, thread, resumes, emitted_by_node):
+def _drive(app, state, thread, resumes, emitted_by_node, gate=None):
     """
     Run to the end or to the stop after execute/eda, resuming each pause with the next value in order.
     Streams in "updates" mode so each node's own records are seen: an event {node: update} whose update
     holds "decision_log" is that node's records, merged into emitted_by_node. A dynamic pause arrives as a
     non-empty "__interrupt__" tuple; the static stop after execute/eda arrives as an empty one.
+    M1.3a: a stage_plan_approval pause is answered with gate (default {"action": "approve"}) without
+    using a value from resumes; it is still recorded in the returned pauses.
     """
     config = {"configurable": {"thread_id": thread}}
     stop = ["execute", "eda"]
@@ -326,10 +328,14 @@ def _drive(app, state, thread, resumes, emitted_by_node):
                     emitted_by_node.setdefault(node, set()).update(e["decision_point"] for e in update["decision_log"])
         return pause
 
+    gate = {"action": "approve"} if gate is None else gate
     queue, pauses = list(resumes), []
     pause = run(state)
     while pause is not None:
         pauses.append(pause)
+        if pause == "stage_plan_approval":
+            pause = run(Command(resume=gate))
+            continue
         assert queue, f"paused at {pause} with no resume value left"
         pause = run(Command(resume=queue.pop(0)))
     assert queue == [], f"unused resume values: {queue}"
@@ -443,10 +449,12 @@ def emitted_by_node(scenario_runs):
 
 # ------------------------------------------------------------------ scenario checks
 
+GATE = "stage_plan_approval"  # M1.3a: every comparison and driver run pauses at the stage-plan gate first
 EXPECTED_PAUSES = {
-    "S1": ["clarification_needed", "wrangling_approval", "plan_approval"],
-    "S2": ["plan_approval"], "S3": ["plan_approval"], "S4": ["plan_approval"],
-    "S5": ["plan_approval"], "S6": ["plan_approval"], "S7": [], "S8": [], "S9": ["plan_approval"], "S10": [],
+    "S1": ["clarification_needed", GATE, "wrangling_approval", "plan_approval"],
+    "S2": [GATE, "plan_approval"], "S3": [GATE, "plan_approval"], "S4": [GATE, "plan_approval"],
+    "S5": [GATE, "plan_approval"], "S6": [GATE, "plan_approval"], "S7": [], "S8": [], "S9": [GATE, "plan_approval"],
+    "S10": [GATE],
 }
 ENDS_WITHOUT_STOP = {"S3", "S8", "S10"}  # runs that end at END rather than at the stop before report
 

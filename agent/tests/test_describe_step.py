@@ -30,6 +30,7 @@ from tests.test_stage_plan import FOUR, classification
 
 EXPECTED_STAGES = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
+    "stage_plan_gate": "intake",  # M1.3a
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",
@@ -180,7 +181,7 @@ def test_two_group_without_cleaning(tmp_path, store):
     points = _points(values)
     i = points.index(DESCRIBE_EXECUTION_POINT)
     assert points.index("planner.step.modeling") < i < points.index("planner.outcome")
-    assert pauses == ["plan_approval"]
+    assert pauses == ["stage_plan_approval", "plan_approval"]  # M1.3a: gate first
     assert values["descriptive_result"]["chart_data"] and values["test_result"]
 
 
@@ -192,7 +193,7 @@ def test_two_group_with_cleaning_describes_the_cleaned_data(tmp_path, store):
     points = _points(values)
     i = points.index(DESCRIBE_EXECUTION_POINT)
     assert points.index("stage1.clean.execution") < i < points.index("planner.outcome")
-    assert pauses == ["wrangling_approval", "plan_approval"]
+    assert pauses == ["stage_plan_approval", "wrangling_approval", "plan_approval"]  # M1.3a: gate first
     assert values["descriptive_result"]["row_count"] == len(df) == len(_with_duplicate(df)) - 1
 
 

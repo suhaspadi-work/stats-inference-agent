@@ -208,7 +208,7 @@ def main():
             while "__interrupt__" in result:
                 p = result["__interrupt__"][0].value
                 seen.append(p.get("type"))
-                if p.get("type") == "plan_approval":
+                if p.get("type") in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
                     resume = {"action": "approve"}
                 elif p.get("type") == "wrangling_approval":
                     resume = {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Callable
+from langgraph.graph import END
 from langgraph.types import interrupt
 
 from core.agent_state import AgentState
@@ -40,7 +41,8 @@ from core.freeze_records import plan_approval_record, edited_predictors_record
 from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
 from core.stage_plan import build_stage_plan, plan_steps
-from core.stage_plan_records import stage_plan_record, step_records
+from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
+from core.stage_plan_gate import apply_gate_decision, changed_steps, gate_needed, gate_payload, validate_run_overrides
 from core.describe_records import describe_execution_record
 
 CONFIDENCE_THRESHOLD = 0.6
@@ -160,6 +162,47 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             update["clarification_needed"] = plan["message"]
         return update
     return plan_stages_node
+
+
+def route_after_plan_stages(state: AgentState) -> str:
+    """An unsupported question ends the run after the stage plan, before any cleaning (M1.1); a plan with
+    an offered step goes to the stage-plan gate (M1.3a); otherwise straight to cleaning."""
+    plan = state["stage_plan"]
+    if plan["status"] == "unsupported":
+        return END
+    if gate_needed(plan):
+        return "stage_plan_gate"
+    return "wrangle_propose"
+
+
+def stage_plan_gate_node(state: AgentState) -> dict:
+    """
+    M1.3a: the user reviews the stage plan before anything is changed. interrupt() comes first, so the
+    resumed re-run has no side effect before it. Describe can be switched on or off; any other change is
+    refused with a ValueError before anything is recorded. Rejecting ends the run with the reason. The
+    approved run flags are written back into the stage plan, so route_after_cleaning acts on them.
+    """
+    decision = interrupt(gate_payload(state["stage_plan"], state["request_text"])) or {}
+    plan = state["stage_plan"]
+    action = decision.get("action")
+
+    if action == "reject":
+        reason = decision.get("reason")
+        record = stage_plan_approval_record(plan, decision, {}, "rejected")
+        return {"stage_plan": apply_gate_decision(plan, {}, "rejected", reason),
+                "clarification_needed": f"Stage plan rejected: {reason or 'no reason given'}", **log_update(record)}
+
+    # An unrecognised action approves the plan as proposed (G36), so its run choices are not applied.
+    overrides = validate_run_overrides(plan, decision.get("run")) if action == "approve" else {}
+    status = "approved_with_changes" if changed_steps(plan, overrides) else "approved"
+    record = stage_plan_approval_record(plan, decision, overrides, status)
+    return {"stage_plan": apply_gate_decision(plan, overrides, status), **log_update(record)}
+
+
+def route_after_stage_plan_gate(state: AgentState) -> str:
+    if state["stage_plan"]["approval"]["status"] == "rejected":
+        return END
+    return "wrangle_propose"
 
 _EXECUTE_FNS = {"cast": execute_cast, "rename": execute_rename, "filter": execute_filter, "dedupe": execute_dedupe}
 

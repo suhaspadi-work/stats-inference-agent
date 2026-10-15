@@ -337,10 +337,11 @@ def test_full_run_two_group_with_cleaning(tmp_path, store):
         {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "approve"}]},
         {"action": "approve"},
     ], {})
-    assert pauses == ["wrangling_approval", "plan_approval"]
+    assert pauses == ["stage_plan_approval", "wrangling_approval", "plan_approval"]  # M1.3a: gate first
     points = [e["decision_point"] for e in values["decision_log"]]
     start = points.index("planner.stage_plan")
     assert points[start:start + 5] == ["planner.stage_plan", "planner.step.clean", "planner.step.describe",
                                        "planner.step.inference", "planner.step.modeling"]
-    assert start + 5 == points.index("stage1.clean.scan")
+    assert start + 6 == points.index("stage1.clean.scan")  # M1.3a: the gate's record comes between
+    assert points[start + 5] == "planner.stage_plan_approval"
     assert values["stage_plan"]["status"] == "ok"

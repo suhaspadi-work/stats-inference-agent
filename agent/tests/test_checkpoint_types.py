@@ -273,13 +273,14 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     app = build_agent_graph(store, classify_fn=fake_classify(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
     results["a"] = _drive(app, _start(_dataset(_messy(rng), tmp_path, store, "a")), "a", [
-        "the regions", {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "approve"}]},
-        {"action": "approve"}])
+        "the regions", {"action": "approve"},  # M1.3a: the stage-plan gate after the clarification
+        {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "approve"}]}, {"action": "approve"}])
 
     # (b) the cleaning filter rejected, so an UnaddressedIssue reaches the plan
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
     results["b"] = _drive(app, _start(_dataset(_messy(rng), tmp_path, store, "b")), "b", [
+        {"action": "approve"},  # M1.3a: the stage-plan gate
         {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "reject", "reason": "keep them"}]},
         {"action": "approve"}])
 
@@ -288,7 +289,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
                        "total_spend": np.concatenate([rng.normal(m, 5, 60) for m in (50, 55, 65)])})
     app = build_agent_graph(store, classify_fn=confident(QuestionType.MULTI_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
-    results["c"] = _drive(app, _start(_dataset(mg, tmp_path, store, "c")), "c", [{"action": "approve"}])
+    results["c"] = _drive(app, _start(_dataset(mg, tmp_path, store, "c")), "c", [{"action": "approve"}] * 2)  # M1.3a: gate first
 
     # (d) regression with a text predictor
     n = 200
@@ -299,7 +300,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
                         + rng.normal(0, 5, n)})
     app = build_agent_graph(store, classify_fn=confident(QuestionType.DRIVER_ANALYSIS),
                             draft_fn=fake_draft(["tenure", "tier"]), propose_fn=must_not_propose)
-    results["d"] = _drive(app, _start(_dataset(reg, tmp_path, store, "d")), "d", [{"action": "approve"}])
+    results["d"] = _drive(app, _start(_dataset(reg, tmp_path, store, "d")), "d", [{"action": "approve"}] * 2)  # M1.3a: gate first
 
     # (e) unsupported association
     app = build_agent_graph(store, classify_fn=confident(QuestionType.ASSOCIATION),
@@ -312,9 +313,10 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     results["f"] = _drive(app, _start(_dataset(_two_group_df(rng), tmp_path, store, "f")), "f", [])
 
     pauses = {k: v[1] for k, v in results.items()}
-    assert pauses == {"a": ["clarification_needed", "wrangling_approval", "plan_approval"],
-                      "b": ["wrangling_approval", "plan_approval"], "c": ["plan_approval"],
-                      "d": ["plan_approval"], "e": [], "f": []}
+    gate = "stage_plan_approval"  # M1.3a
+    assert pauses == {"a": ["clarification_needed", gate, "wrangling_approval", "plan_approval"],
+                      "b": [gate, "wrangling_approval", "plan_approval"], "c": [gate, "plan_approval"],
+                      "d": [gate, "plan_approval"], "e": [], "f": []}
     assert {k: v[2] for k, v in results.items()} == {
         "a": ("report",), "b": ("report",), "c": ("report",), "d": ("report",), "e": (), "f": ("report",)}
     for k in ("a", "b", "c", "d"):
