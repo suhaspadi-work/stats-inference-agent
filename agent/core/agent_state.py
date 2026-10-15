@@ -62,3 +62,8 @@ class AgentState(TypedDict, total=False):
     # LangGraph (operator.add): a node returns only its new records via
     # core.decision_log.log_update and can never overwrite earlier ones.
     decision_log: Annotated[list[dict], operator.add]
+
+    # One entry per finished round (M1.3b), appended by report_node (core.rounds.make_round_entry);
+    # plan, test_result and report are the latest round.
+    rounds: Annotated[list[dict], operator.add]
+    exploratory_round: bool  # set by start_round in an exploratory round (M1.3b step 2); absent otherwise

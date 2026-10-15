@@ -322,7 +322,8 @@ def test_report_node_non_two_group_path(real, monkeypatch):
 def test_report_node_diagnostic_path(real, monkeypatch):
     stub = _Recorder("descriptive report")
     monkeypatch.setattr(nodes_module, "_capability_for_state",
-                        lambda state: SimpleNamespace(kind="diagnostic", result_key="descriptive_result", report=stub))
+                        lambda state: SimpleNamespace(kind="diagnostic", result_key="descriptive_result", report=stub,
+                                                      name="descriptive"))  # M1.3b: the round entry reads the name
     update = make_report_node()(_state(real.two_group_plan, descriptive_result=real.descriptive))
     assert update["report"] == "descriptive report"
     _assert_received_safe(stub)

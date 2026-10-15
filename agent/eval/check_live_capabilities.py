@@ -122,6 +122,16 @@ def print_describe(state_log, label):
     print(f"   describe [{label}]: {record['chosen']} ({(record.get('evidence') or {}).get('chart_count')} charts)")
 
 
+def print_rounds(state, label):
+    """M1.3b: the finished rounds of the run, one line."""
+    rounds = state.get("rounds") or []
+    if not rounds:
+        print(f"   rounds [{label}]: none")
+        return
+    print(f"   rounds [{label}]: " + "; ".join(
+        f"{r['round']} ({r['capability']}, exploratory={r['exploratory']})" for r in rounds))
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
@@ -150,6 +160,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     print("   decision points:", points)
     print_stage_plan(log, label)
     print_describe(log, label)
+    print_rounds(state, label)
     all_points.update(points)
     if label == "messy":
         print_cleaning_lines(log)

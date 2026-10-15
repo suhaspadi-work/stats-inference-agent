@@ -119,7 +119,8 @@ def test_report_node_dispatches_to_the_report_matching_the_result_tag(dataset, m
 
 
 def test_report_node_reads_a_diagnostic_result_from_its_declared_key(dataset, monkeypatch):
-    fake = SimpleNamespace(kind="diagnostic", result_key="descriptive_result", report=lambda p, r: f"described {r['row_count']} rows")
+    fake = SimpleNamespace(kind="diagnostic", result_key="descriptive_result", name="descriptive",  # M1.3b: the round entry reads the name
+                           report=lambda p, r: f"described {r['row_count']} rows")
     monkeypatch.setattr(nodes_module, "capability_for_plan", lambda plan: fake)
     plan = make_plan(dataset, QuestionType.DESCRIPTIVE, predictors=())
     result = run_node(make_report_node(), plan, dataset, descriptive_result={"row_count": 180})

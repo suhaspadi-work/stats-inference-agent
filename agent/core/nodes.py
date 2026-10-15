@@ -30,6 +30,7 @@ from core.report import generate_report, check_for_causal_language, generate_des
 from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result
 from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
+from core.rounds import make_round_entry, with_exploratory_note
 from core.classification_records import (
     CAUSAL_STATUS_POINT, QUESTION_TYPE_POINT, causal_status_record,
     clarification_gate_record, clarification_record, question_type_record,
@@ -663,6 +664,7 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
             report_text = capability.report(safe_plan, safe_result)
             # No check_for_causal_language call here: a pure description makes
             # no inferential claim for that guard to meaningfully check.
+            original_result = state[capability.result_key]
         else:
             result = state["test_result"]
             analysis = analysis_for_result(result)
@@ -672,5 +674,14 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
             else:
                 report_text = analysis.report(safe_plan, safe_result)
             check_for_causal_language(report_text, plan)
-        return {"report": report_text}
+            original_result = result
+
+        # M1.3b: one entry per finished round, holding the original result (charts included), not the
+        # chart-free copy the model saw. The exploratory note is added after the causal check.
+        exploratory = bool(state.get("exploratory_round"))
+        if exploratory:
+            report_text = with_exploratory_note(report_text)
+        entry = make_round_entry(len(state.get("rounds") or ()) + 1, plan, capability.name, original_result,
+                                 report_text, exploratory)
+        return {"report": report_text, "rounds": [entry]}
     return report_node

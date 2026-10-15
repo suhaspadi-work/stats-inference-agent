@@ -33,6 +33,7 @@ from core.plan import (
     AlternativeConsidered, AnalysisPlan, CausalStatus, ClassificationDecision, MethodDecision, OutcomeType,
     QuestionType, UnaddressedIssue,
 )
+from tests.test_prompt_canaries import fake_model  # noqa: F401 (fixture)
 from tests.test_decision_point_guard import (
     _dataset, _two_group_df, _with_duplicate, confident, fake_classify, fake_draft, fake_propose, must_not_propose,
 )
@@ -237,6 +238,9 @@ def _assert_real_types(values, where):
         assert type(plan.question_type) is QuestionType, where
         assert all(type(d) is MethodDecision for d in plan.method_decisions), where
         assert all(type(i) is UnaddressedIssue for i in plan.unaddressed_issues), where
+    # M1.3b: a dataclass inside a plain dict value, which the static coverage test cannot see
+    for entry in values.get("rounds") or ():
+        assert type(entry["plan"]) is AnalysisPlan, where
 
 
 def _drive(app, state, thread, resumes):
@@ -265,13 +269,14 @@ def _start(ds, **extra):
     return {"request_text": "x", "session_id": "session-abc", "dataset": ds, **extra}
 
 
-def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
+def test_scenario_runs_keep_real_types(tmp_path, store, serde_log, fake_model):
     rng = np.random.default_rng(7)
-    results = {}
+    results, apps = {}, {}
 
     # (a) clarification, both cleaning operations approved, plan approved
     app = build_agent_graph(store, classify_fn=fake_classify(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
+    apps["a"] = app
     results["a"] = _drive(app, _start(_dataset(_messy(rng), tmp_path, store, "a")), "a", [
         "the regions", {"action": "approve"},  # M1.3a: the stage-plan gate after the clarification
         {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "approve"}]}, {"action": "approve"}])
@@ -279,6 +284,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     # (b) the cleaning filter rejected, so an UnaddressedIssue reaches the plan
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
+    apps["b"] = app
     results["b"] = _drive(app, _start(_dataset(_messy(rng), tmp_path, store, "b")), "b", [
         {"action": "approve"},  # M1.3a: the stage-plan gate
         {"decisions": [{"index": 0, "action": "approve"}, {"index": 1, "action": "reject", "reason": "keep them"}]},
@@ -289,6 +295,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
                        "total_spend": np.concatenate([rng.normal(m, 5, 60) for m in (50, 55, 65)])})
     app = build_agent_graph(store, classify_fn=confident(QuestionType.MULTI_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
+    apps["c"] = app
     results["c"] = _drive(app, _start(_dataset(mg, tmp_path, store, "c")), "c", [{"action": "approve"}] * 2)  # M1.3a: gate first
 
     # (d) regression with a text predictor
@@ -300,6 +307,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
                         + rng.normal(0, 5, n)})
     app = build_agent_graph(store, classify_fn=confident(QuestionType.DRIVER_ANALYSIS),
                             draft_fn=fake_draft(["tenure", "tier"]), propose_fn=must_not_propose)
+    apps["d"] = app
     results["d"] = _drive(app, _start(_dataset(reg, tmp_path, store, "d")), "d", [{"action": "approve"}] * 2)  # M1.3a: gate first
 
     # (e) unsupported association
@@ -310,6 +318,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     # (f) descriptive
     app = build_agent_graph(store, classify_fn=confident(QuestionType.DESCRIPTIVE), draft_fn=fake_draft([]),
                             propose_fn=must_not_propose)
+    apps["f"] = app
     results["f"] = _drive(app, _start(_dataset(_two_group_df(rng), tmp_path, store, "f")), "f", [])
 
     pauses = {k: v[1] for k, v in results.items()}
@@ -327,6 +336,15 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     assert results["e"][0]["stage_plan"]["status"] == "unsupported"  # M1.1: association ends at plan_stages, so no route
     b_issues = results["b"][0]["plan"].unaddressed_issues
     assert len(b_issues) == 1 and type(b_issues[0]) is UnaddressedIssue
+    assert all(not v[0].get("rounds") for v in results.values())  # every run stopped before report
+
+    # M1.3b: run the report of every run that stopped before it (fake chat model): one round each, real types
+    for k, app in apps.items():
+        config = {"configurable": {"thread_id": k}}
+        app.invoke(None, config)
+        values = app.get_state(config).values
+        _assert_real_types(values, f"{k} after report")
+        assert len(values["rounds"]) == 1 and values["rounds"][0]["report"] == values["report"], k
     assert serde_log.bad() == []
 
 
