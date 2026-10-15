@@ -1,5 +1,4 @@
 import copy
-import inspect
 import json
 
 import numpy as np
@@ -7,6 +6,7 @@ import pandas as pd
 import pytest
 
 import core.multi_group as multi_group_module
+import core.thresholds as thresholds
 from core.capabilities import MULTI_GROUP, REGRESSION, TWO_GROUP
 from core.dataset import LocalDiskStore
 from core.decision_log import log_update
@@ -171,10 +171,8 @@ def test_passes_log_update_and_does_not_mutate():
     assert result == before
 
 
-def test_alpha_matches_the_executor_threshold():
-    source = inspect.getsource(multi_group_module.execute_multi_group_test)
-    assert ALPHA == 0.05
-    assert "p_value < 0.05" in source
+def test_alpha_matches_the_executor_threshold():  # M1.4b 2a: replaces a source-text check; the selectors read named constants (test_thresholds.py proves the wiring)
+    assert ALPHA == thresholds.OMNIBUS_ALPHA == multi_group_module.OMNIBUS_ALPHA
 
 
 def test_execution_records_wiring():

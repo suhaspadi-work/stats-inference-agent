@@ -175,8 +175,9 @@ def test_approved_dedupe_with_its_effect():
     op = _op("dedupe", DEDUPE, rationale="duplicates inflate the counts")
     records = _cleaning(_dup_issue(), op, APPROVE, ran=_ran(op, 300, 296))
     assert _section(stage1_report(_dicts(*records), COMPARISON), "Changed") == (
-        "1. Removed duplicate rows. Why: duplicates inflate the counts. Alternative the model suggested: "
-        "leave the data as is (it would bias the result). Your decision: approved. Effect: 300 to 296 rows.")
+        "1. Removed duplicate rows. Why (the model's reason): duplicates inflate the counts. Alternative the model "
+        "suggested: leave the data as is (it would bias the result). Your decision: approved. Effect: 300 to 296 rows.")
+    # M1.4b 2a: the model's reason is labelled
 
 
 def test_dedupe_with_a_subset_names_the_columns():
@@ -186,11 +187,36 @@ def test_dedupe_with_a_subset_names_the_columns():
         stage1_report(_dicts(*records), COMPARISON), "Changed")
 
 
+def _dedupe_line(subset, columns_scanned=4, scan=True):
+    op = _op("dedupe", {"subset": subset})
+    records = [scan_record(_profile(300, columns_scanned), [_dup_issue()])] if scan else []
+    records += _cleaning(_dup_issue(), op, APPROVE, ran=_ran(op))
+    return _section(stage1_report(_dicts(*records), COMPARISON), "Changed").split(". Why")[0]
+
+
+def test_dedupe_of_every_scanned_column_says_all_columns():
+    assert _dedupe_line(["customer_id", "region", "tenure", "total_spend"]) == (
+        "1. Removed duplicate rows (comparing all columns)")
+
+
+def test_dedupe_of_fewer_columns_keeps_the_list():
+    assert _dedupe_line(["region", "tenure"]) == "1. Removed duplicate rows (comparing region, tenure)"
+
+
+def test_dedupe_without_a_scan_keeps_the_list():
+    assert _dedupe_line(["a", "b", "c", "d"], scan=False) == "1. Removed duplicate rows (comparing a, b, c, d)"
+
+
+@pytest.mark.parametrize("subset", [[], None], ids=["empty", "none"])
+def test_dedupe_without_a_subset_is_plain(subset):
+    assert _dedupe_line(subset) == "1. Removed duplicate rows"
+
+
 def test_approved_filter():
     op = _op("filter", NOT_NULL)
     records = _cleaning(_miss_issue(), op, APPROVE, ran=_ran(op, 296, 260))
     text = _section(stage1_report(_dicts(*records), COMPARISON), "Changed")
-    assert text.startswith("1. Kept rows where tenure has a value. Why: fix it.")
+    assert text.startswith("1. Kept rows where tenure has a value. Why (the model's reason): fix it.")  # M1.4b 2a: the model's reason is labelled
     assert text.endswith("Your decision: approved. Effect: 296 to 260 rows.")
     assert "not_null" not in text
 
@@ -267,7 +293,8 @@ def test_a_fix_with_no_approval_record():
 def test_a_fix_without_a_model_alternative():
     op = _op("dedupe", DEDUPE, alternative=None)
     text = _section(stage1_report(_dicts(*_cleaning(_dup_issue(), op, APPROVE, ran=_ran(op))), COMPARISON), "Changed")
-    assert text == "1. Removed duplicate rows. Why: fix it. Your decision: approved. Effect: 300 to 296 rows."
+    assert text == ("1. Removed duplicate rows. Why (the model's reason): fix it. Your decision: approved. "
+                    "Effect: 300 to 296 rows.")  # M1.4b 2a: the model's reason is labelled
     assert "Alternative" not in text
 
 
@@ -280,7 +307,8 @@ def test_rationales_that_end_in_a_period_give_no_double_period():
                _describe()]
     entry = make_stage_report_entry("stage1", None, STAGE1_TITLE, stage1_report(_dicts(*records), COMPARISON))
     assert ".." not in entry["text"]
-    assert "Why: Duplicates inflate counts. Alternative the model suggested: keep them (they bias it)." in entry["text"]
+    assert ("Why (the model's reason): Duplicates inflate counts. Alternative the model suggested: keep them "
+            "(they bias it).") in entry["text"]  # M1.4b 2a: the model's reason is labelled
     assert "Your decision: rejected: keep them." in entry["text"]
 
 
@@ -312,7 +340,7 @@ def test_no_fix_records():
 def test_filter_conditions_in_words(condition, value, words):
     op = _op("filter", {"column": "tenure", "condition": condition, "value": value})
     text = _section(stage1_report(_dicts(*_cleaning(_miss_issue(), op, APPROVE, ran=_ran(op))), COMPARISON), "Changed")
-    assert text.startswith(f"1. {words}. Why:")
+    assert text.startswith(f"1. {words}. Why (the model's reason):")  # M1.4b 2a: the model's reason is labelled
 
 
 def test_every_supported_filter_condition_is_mapped():

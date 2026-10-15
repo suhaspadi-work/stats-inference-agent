@@ -32,6 +32,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from core.dataset import Dataset, DatasetStore
 from core.plan import MethodDecision, AlternativeConsidered
 import core.visualization as viz
+from core.thresholds import HETEROSKEDASTICITY_ALPHA, NORMALITY_ALPHA
 
 MAX_CATEGORICAL_LEVELS = 10
 MIN_LEVEL_COUNT = 5
@@ -317,7 +318,7 @@ def select_regression_method(
     }
     rare_levels = {c: lv for c, lv in rare_levels.items() if lv}
 
-    robust = bp_p <= 0.05
+    robust = bp_p <= HETEROSKEDASTICITY_ALPHA
     if robust:
         method = "ols_hc3_robust"
         rationale = (
@@ -361,7 +362,7 @@ def select_regression_method(
             f" Level(s) with very few observations (under {MIN_LEVEL_COUNT}) in {col_rare} give unstable "
             f"coefficients and may need grouping."
         )
-    if shapiro_p <= 0.05:
+    if shapiro_p <= NORMALITY_ALPHA:
         rationale += (
             f" Residuals depart from normality (Shapiro-Wilk p={shapiro_p:.4f}); coefficient estimates "
             f"remain valid, but p-values and intervals are less reliable with small samples."

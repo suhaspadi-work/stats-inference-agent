@@ -13,12 +13,12 @@ from typing import Any, Optional
 
 from core.decision_record import Candidate, DecisionRecord
 from core.selection_records import _p
+from core.thresholds import OMNIBUS_ALPHA
 
 POST_HOC_POINT = "stage2.post_hoc"
 
-# Mirrors the p_value < 0.05 test in multi_group.execute_multi_group_test;
-# a test in tests/test_execution_records.py guards that they agree.
-ALPHA = 0.05
+# The omnibus cut-off of multi_group.execute_multi_group_test, by reference (core.thresholds, M1.4b step 2a).
+ALPHA = OMNIBUS_ALPHA
 
 OMNIBUS_METHODS = ("one_way_anova", "kruskal_wallis")
 POST_HOC_OPTIONS = ("tukey_hsd", "dunn", "none")

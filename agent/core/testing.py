@@ -6,6 +6,7 @@ import pandas as pd
 
 from core.dataset import Dataset, DatasetStore
 from core.plan import MethodDecision, AlternativeConsidered
+from core.thresholds import EQUAL_VARIANCE_ALPHA, NORMALITY_ALPHA
 import core.visualization as viz
 
 
@@ -66,7 +67,7 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
     _, shapiro_p_b = stats.shapiro(b) if len(b) >= 3 else (None, 1.0)
     _, levene_p = stats.levene(a, b)
 
-    normal_enough = shapiro_p_a > 0.05 and shapiro_p_b > 0.05
+    normal_enough = shapiro_p_a > NORMALITY_ALPHA and shapiro_p_b > NORMALITY_ALPHA
     evidence = {
         "shapiro_p_group_a": round(float(shapiro_p_a), 4),
         "shapiro_p_group_b": round(float(shapiro_p_b), 4),
@@ -76,19 +77,19 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
         "group_a_label": str(group_a_label),
         "group_b_label": str(group_b_label),
         # Pass/fail from the UNROUNDED values, the same comparisons the rule below makes (G30)
-        "group_a_passes_normality": bool(shapiro_p_a > 0.05),
-        "group_b_passes_normality": bool(shapiro_p_b > 0.05),
-        "variances_equal": bool(levene_p > 0.05),
+        "group_a_passes_normality": bool(shapiro_p_a > NORMALITY_ALPHA),
+        "group_b_passes_normality": bool(shapiro_p_b > NORMALITY_ALPHA),
+        "variances_equal": bool(levene_p > EQUAL_VARIANCE_ALPHA),
     }
 
     if normal_enough:
-        equal_var = levene_p > 0.05
+        equal_var = levene_p > EQUAL_VARIANCE_ALPHA
         method = "student_t_test" if equal_var else "welch_t_test"
         test_name = "standard" if equal_var else "Welch's"
         rationale = (
-            f"Both groups pass a normality check (Shapiro-Wilk p > 0.05) and "
+            f"Both groups pass a normality check (Shapiro-Wilk p > {NORMALITY_ALPHA:g}) and "
             f"{'have' if equal_var else 'do not have'} equal variances (Levene's p "
-            f"{'>' if equal_var else '<='} 0.05), so a {test_name} t-test is appropriate."
+            f"{'>' if equal_var else '<='} {EQUAL_VARIANCE_ALPHA:g}), so a {test_name} t-test is appropriate."
         )
         alternatives = (AlternativeConsidered(
             method="mann_whitney_u",
@@ -97,7 +98,7 @@ def select_two_group_method(dataset: Dataset, store: DatasetStore, outcome_col: 
     else:
         method = "mann_whitney_u"
         rationale = (
-            f"At least one group fails a normality check (Shapiro-Wilk p <= 0.05: "
+            f"At least one group fails a normality check (Shapiro-Wilk p <= {NORMALITY_ALPHA:g}: "
             f"group A={evidence['shapiro_p_group_a']}, group B={evidence['shapiro_p_group_b']}), "
             f"so Mann-Whitney U is used instead of a t-test, which assumes normality."
         )

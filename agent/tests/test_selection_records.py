@@ -1,4 +1,3 @@
-import inspect
 import json
 
 import numpy as np
@@ -7,6 +6,7 @@ import pytest
 from langgraph.graph import StateGraph, START, END
 
 import core.testing as testing_module
+import core.thresholds as thresholds
 from core.agent_state import AgentState
 from core.capabilities import TWO_GROUP, capability_for_question_type
 from core.dataset import LocalDiskStore
@@ -220,10 +220,10 @@ def test_k_two_group_capability_carries_the_record_builder():
     assert capability_for_question_type("two_group_comparison").record is two_group_selection_record
 
 
-def test_alpha_matches_the_selector_threshold():
-    source = inspect.getsource(testing_module.select_two_group_method)
-    assert ALPHA == 0.05
-    assert source.count(f"> {ALPHA}") >= 3  # both Shapiro checks and Levene's
+def test_alpha_matches_the_selector_threshold():  # M1.4b 2a: replaces a source-text check; the selectors read named constants (test_thresholds.py proves the wiring)
+    assert ALPHA == thresholds.NORMALITY_ALPHA == 0.05
+    assert testing_module.NORMALITY_ALPHA == thresholds.NORMALITY_ALPHA
+    assert testing_module.EQUAL_VARIANCE_ALPHA == thresholds.EQUAL_VARIANCE_ALPHA
 
 
 # --- consistency guard against the real selector -------------------------------

@@ -17,6 +17,8 @@ Judgement calls, easy to change:
 from __future__ import annotations
 import math
 
+from core.thresholds import POST_HOC_ALPHA
+
 MAX_LISTED = 8
 
 
@@ -165,7 +167,7 @@ def multi_group_facts(test_result: dict, outcome_name: str, predictor_name: str,
     non = [p for p in pairs if not p["significant"]]
     lines.append(
         f"Post-hoc test: {test_result['post_hoc_method']}; {len(sig)} of {len(pairs)} pairs differ significantly "
-        f"(p < 0.05, adjusted for multiple comparisons)"
+        f"(p < {POST_HOC_ALPHA:g}, adjusted for multiple comparisons)"
     )
     for p in sig[:max_listed]:
         lines.append("  - " + _pair_sentence(p, d))

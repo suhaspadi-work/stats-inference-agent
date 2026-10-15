@@ -71,9 +71,11 @@ _FILTER_WORDS = {
 }
 
 
-def _what(op_type: str, params: dict) -> str:
+def _what(op_type: str, params: dict, columns_scanned=None) -> str:
     if op_type == "dedupe":
         subset = params.get("subset")
+        if subset and columns_scanned is not None and len(subset) == columns_scanned:
+            return "Removed duplicate rows (comparing all columns)"
         return "Removed duplicate rows" + (f" (comparing {', '.join(str(c) for c in subset)})" if subset else "")
     if op_type == "filter":
         column, condition, value = params.get("column"), params.get("condition"), params.get("value")
@@ -109,8 +111,8 @@ def _decision_text(approval) -> str:
     return text
 
 
-def _changed(records: list, used: set) -> tuple[str, list]:
-    """The Changed section text and the Left as is lines."""
+def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]:
+    """The Changed section text and the Left as is lines; columns_scanned (from the scan) names a full-row dedupe."""
     fixes = [r for r in records if r.get("decision_point") == FIX_POINT]
     if not fixes:
         return "No changes were proposed.", []
@@ -128,7 +130,8 @@ def _changed(records: list, used: set) -> tuple[str, list]:
             used.add(execution["id"])
         # the params that ran (after an edit) when the operation ran, otherwise the proposed ones
         params = (execution or fix)["evidence"].get("params") or {}
-        parts = [f"{k}. {_what(fix['chosen'], params)}.", f"Why: {_bare(fix['rationale'])}."]
+        parts = [f"{k}. {_what(fix['chosen'], params, columns_scanned)}.",
+                 f"Why (the model's reason): {_bare(fix['rationale'])}."]
         alt = _alternative(fix)
         if alt is not None:
             parts.append(f"Alternative the model suggested: {alt['option']} ({_bare(alt['reason'])}).")
@@ -161,7 +164,8 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if scan is not None:
         used.add(scan["id"])
     sections = [{"heading": "Checked", "text": _checked(scan)}]
-    changed, left = _changed(records, used)
+    columns_scanned = scan["evidence"].get("columns_scanned") if scan is not None else None
+    changed, left = _changed(records, used, columns_scanned)
     sections.append({"heading": "Changed", "text": changed})
     if left:
         sections.append({"heading": "Left as is", "text": "\n".join(left)})

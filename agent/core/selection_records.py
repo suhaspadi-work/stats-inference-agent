@@ -12,12 +12,13 @@ import copy
 
 from core.decision_record import Candidate, DecisionRecord
 from core.plan import MethodDecision
+from core.thresholds import EQUAL_VARIANCE_ALPHA, HETEROSKEDASTICITY_ALPHA, NORMALITY_ALPHA
 
 TEST_SELECTION_POINT = "stage2.test_selection"
 
-# Mirrors the 0.05 threshold used in the selectors; used only for the words in
-# the reasons. Source-text guards in the tests check that the selectors agree.
-ALPHA = 0.05
+# The selectors' normality cut-off, by reference (core.thresholds, M1.4b step 2a); used only for the words in the
+# reasons. The equal-variance and Breusch-Pagan reasons use their own named cut-offs.
+ALPHA = NORMALITY_ALPHA
 
 # Below this many observations the selectors skip Shapiro-Wilk and assign p = 1.0.
 _MIN_SHAPIRO_N = 3
@@ -78,7 +79,7 @@ class _Group:
 
 
 def _levene_text(levene_p: float, equal: bool) -> str:
-    return f"Levene's {_p(levene_p)} is {'above' if equal else 'at or below'} {ALPHA}"
+    return f"Levene's {_p(levene_p)} is {'above' if equal else 'at or below'} {EQUAL_VARIANCE_ALPHA}"
 
 
 def _record(decision: MethodDecision, candidates, family: str, groups, extra_evidence=None) -> DecisionRecord:
@@ -251,20 +252,20 @@ def _regression_method_record(decision: MethodDecision) -> DecisionRecord:
     chosen = decision.chosen_method
 
     if hetero:
-        ols = (False, f"not eligible: Breusch-Pagan {_p(bp)} is at or below {ALPHA}, so the residual variance "
+        ols = (False, f"not eligible: Breusch-Pagan {_p(bp)} is at or below {HETEROSKEDASTICITY_ALPHA}, so the residual variance "
                       f"is not constant and classical standard errors would be unreliable")
     elif chosen == "ols":
-        ols = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is above {ALPHA}, so classical standard errors "
+        ols = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is above {HETEROSKEDASTICITY_ALPHA}, so classical standard errors "
                      f"are valid and more efficient")
     else:
         ols = (True, "eligible; not chosen by the selection rule")
 
     if chosen == "ols_hc3_robust" and hetero:
-        robust = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is at or below {ALPHA}, so the residual variance "
+        robust = (True, f"chosen: Breusch-Pagan {_p(bp)} (n={n}) is at or below {HETEROSKEDASTICITY_ALPHA}, so the residual variance "
                         f"is not constant and heteroscedasticity-robust (HC3) standard errors are used")
     elif chosen == "ols" and not hetero:
         robust = (True, f"eligible, and also valid when variance is constant, but Breusch-Pagan {_p(bp)} is above "
-                        f"{ALPHA}, so classical standard errors are used, which are more efficient")
+                        f"{HETEROSKEDASTICITY_ALPHA}, so classical standard errors are used, which are more efficient")
     else:
         robust = (True, "eligible; not chosen by the selection rule")
 

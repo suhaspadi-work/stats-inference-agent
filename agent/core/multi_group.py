@@ -17,6 +17,7 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 from core.dataset import Dataset, DatasetStore
 from core.plan import MethodDecision, AlternativeConsidered
+from core.thresholds import EQUAL_VARIANCE_ALPHA, NORMALITY_ALPHA, OMNIBUS_ALPHA, POST_HOC_ALPHA
 import core.visualization as viz
 
 
@@ -78,8 +79,8 @@ def select_multi_group_method(dataset: Dataset, store: DatasetStore, outcome_col
         shapiro_ps[label] = float(stats.shapiro(arr)[1]) if len(arr) >= 3 else 1.0
     levene_p = float(stats.levene(*group_arrays.values())[1])
 
-    normal_enough = all(p > 0.05 for p in shapiro_ps.values())
-    equal_var = levene_p > 0.05
+    normal_enough = all(p > NORMALITY_ALPHA for p in shapiro_ps.values())
+    equal_var = levene_p > EQUAL_VARIANCE_ALPHA
 
     evidence = {
         **{f"shapiro_p_{label}": round(p, 4) for label, p in shapiro_ps.items()},
@@ -89,15 +90,15 @@ def select_multi_group_method(dataset: Dataset, store: DatasetStore, outcome_col
         "group_labels": list(group_arrays),
         "n_by_group": {label: int(len(arr)) for label, arr in group_arrays.items()},
         "normality_p_by_group": {label: round(p, 4) for label, p in shapiro_ps.items()},
-        "passes_normality_by_group": {label: bool(p > 0.05) for label, p in shapiro_ps.items()},
+        "passes_normality_by_group": {label: bool(p > NORMALITY_ALPHA) for label, p in shapiro_ps.items()},
         "variances_equal": bool(equal_var),
     }
 
     if normal_enough and equal_var:
         method = "one_way_anova"
         rationale = (
-            f"All {len(groups)} groups pass a normality check (Shapiro-Wilk p > 0.05) and "
-            f"have equal variances (Levene's p > 0.05), so one-way ANOVA is appropriate."
+            f"All {len(groups)} groups pass a normality check (Shapiro-Wilk p > {NORMALITY_ALPHA:g}) and "
+            f"have equal variances (Levene's p > {EQUAL_VARIANCE_ALPHA:g}), so one-way ANOVA is appropriate."
         )
         alternatives = (AlternativeConsidered(
             method="kruskal_wallis",
@@ -105,7 +106,7 @@ def select_multi_group_method(dataset: Dataset, store: DatasetStore, outcome_col
         ),)
     else:
         method = "kruskal_wallis"
-        failing = [label for label, p in shapiro_ps.items() if p <= 0.05]
+        failing = [label for label, p in shapiro_ps.items() if p <= NORMALITY_ALPHA]
         reason = (
             f"group(s) {failing} fail a normality check" if failing
             else f"groups have unequal variances (Levene's p={evidence['levene_p']})"
@@ -147,12 +148,12 @@ def execute_multi_group_test(
 
     pairwise = ()
     post_hoc_method = "none"
-    if p_value < 0.05:
+    if p_value < OMNIBUS_ALPHA:
         if method == "one_way_anova":
             post_hoc_method = "tukey_hsd"
             flat_values = np.concatenate(list(group_arrays.values()))
             flat_labels = np.concatenate([[label] * len(arr) for label, arr in group_arrays.items()])
-            tukey_result = pairwise_tukeyhsd(flat_values, flat_labels)
+            tukey_result = pairwise_tukeyhsd(flat_values, flat_labels, alpha=POST_HOC_ALPHA)
             pairwise = tuple(
                 PairwiseComparison(
                     group_a=str(row[0]), group_b=str(row[1]), mean_diff=float(row[2]),
@@ -178,7 +179,7 @@ def execute_multi_group_test(
                         group_a=a, group_b=b,
                         mean_diff=group_means[b] - group_means[a],
                         ci_lower=float("nan"), ci_upper=float("nan"),  # Dunn's test doesn't natively produce a CI
-                        p_value=p, significant=p < 0.05,
+                        p_value=p, significant=p < POST_HOC_ALPHA,
                     ))
             pairwise = tuple(pairwise_list)
 

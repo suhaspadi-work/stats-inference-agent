@@ -1,5 +1,4 @@
 import copy
-import inspect
 import json
 
 import numpy as np
@@ -8,6 +7,7 @@ import pytest
 from langgraph.graph import StateGraph, START, END
 
 import core.multi_group as multi_group_module
+import core.thresholds as thresholds
 from core.agent_state import AgentState
 from core.capabilities import MULTI_GROUP, REGRESSION, capability_for_question_type
 from core.dataset import LocalDiskStore
@@ -217,9 +217,9 @@ def test_m_capability_wiring():
     assert REGRESSION.record is regression_selection_records
 
 
-def test_n_selector_threshold_guard():
-    source = inspect.getsource(multi_group_module.select_multi_group_method)
-    assert source.count("> 0.05") >= 2  # Shapiro per group and Levene's
+def test_n_selector_threshold_guard():  # M1.4b 2a: replaces a source-text check; the selectors read named constants (test_thresholds.py proves the wiring)
+    assert multi_group_module.NORMALITY_ALPHA == thresholds.NORMALITY_ALPHA
+    assert multi_group_module.EQUAL_VARIANCE_ALPHA == thresholds.EQUAL_VARIANCE_ALPHA
 
 
 # --- consistency guard against the real selector -------------------------------
