@@ -67,6 +67,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> execute
       -> report
          -> M1.3b: after a comparison whose stage plan offered modeling: stage_gate (run or skip the exploratory round)
+            (a predictor choice that breaks a rule is refused and the gate re-opens: stage_gate -> stage_gate)
          -> if run: start_round (an exploratory regression plan) -> select_method -> freeze -> execute -> report
       -> END (after the exploratory round's report, or when nothing is offered)
 
@@ -130,7 +131,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("freeze", route_after_freeze, {"execute": "execute", END: END})
     graph.add_edge("execute", "report")
     graph.add_conditional_edges("report", route_after_report, {"stage_gate": "stage_gate", END: END})
-    graph.add_conditional_edges("stage_gate", route_after_stage_gate, {"start_round": "start_round", END: END})
+    graph.add_conditional_edges("stage_gate", route_after_stage_gate,
+                                {"start_round": "start_round", "stage_gate": "stage_gate", END: END})
     graph.add_edge("start_round", "select_method")
 
     return graph.compile(checkpointer=checkpointer if checkpointer is not None else make_checkpointer())

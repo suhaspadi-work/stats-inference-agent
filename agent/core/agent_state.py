@@ -68,3 +68,6 @@ class AgentState(TypedDict, total=False):
     rounds: Annotated[list[dict], operator.add]
     exploratory_round: bool  # set by start_round in an exploratory round (M1.3b step 2); absent otherwise
     next_round: Optional[dict]  # set by stage_gate: {"run": bool, "predictors": [...]} (M1.3b)
+    # set by stage_gate when the user's predictors break a rule: {"submitted", "refusals", "attempt"}; the gate
+    # re-opens and shows it. None otherwise (M1.3b step 2b).
+    stage_gate_refusal: Optional[dict]

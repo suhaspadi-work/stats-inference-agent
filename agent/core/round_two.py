@@ -9,7 +9,7 @@ from __future__ import annotations
 from core.capabilities import is_numeric_dtype_name
 from core.model_safe_view import ModelSafeView
 from core.plan import AnalysisPlan, QuestionType
-from core.regression import MAX_CATEGORICAL_LEVELS
+from core.predictor_rules import check_predictor
 from core.routing import COMPARISON_TYPES
 from core.stage_plan import plan_steps
 
@@ -17,38 +17,38 @@ MAX_OTHER_PREDICTORS = 5
 OFFER_NOTE = "labelled exploratory; its results are not corrected for multiple testing"
 
 
-def _is_float(dtype: str) -> bool:
-    return str(dtype).startswith("float")
-
-
 def propose_exploratory_predictors(profile: ModelSafeView, group_column: str, outcome_name: str) -> dict:
-    """{"predictors": [group_column, *others], "reasons": {every column: reason}, "included", "excluded"}."""
-    reasons, included, excluded, others = {}, [group_column], [], []
+    """
+    {"predictors": [group_column, *others], "reasons": {every column: reason}, "included", "excluded",
+     "verdicts": {excluded column: verdict}, "selectable": [columns that fit the rules]}. The per-column rules are
+    core.predictor_rules.check_predictor, the same check every user choice at the boundary gate goes through;
+    the limit of MAX_OTHER_PREDICTORS is a separate cap.
+    """
+    reasons, included, excluded, others, verdicts, selectable = {}, [group_column], [], [], {}, []
     reasons[group_column] = "the grouping column of the main analysis"
     for col in profile.columns:
         name = col.name
         if name == group_column:
             continue
-        numeric = is_numeric_dtype_name(col.dtype)
-        if name == outcome_name:
-            reason, ok = "the outcome cannot also be a predictor", False
-        elif col.distinct_count < 2:
-            reason, ok = "constant or empty", False
-        elif not _is_float(col.dtype) and col.distinct_count == profile.row_count - col.missing_count:
-            reason, ok = "identifier-like: every value is distinct", False
-        elif not numeric and col.distinct_count > MAX_CATEGORICAL_LEVELS:
-            reason, ok = f"text column with more than {MAX_CATEGORICAL_LEVELS} distinct values", False
-        elif len(others) >= MAX_OTHER_PREDICTORS:
-            reason, ok = f"beyond the limit of {MAX_OTHER_PREDICTORS} other predictors", False
-        else:
-            reason, ok = ("numeric column" if numeric else f"text column with {col.distinct_count} levels"), True
-        reasons[name] = reason
-        if ok:
+        verdict = check_predictor(profile, name, outcome_name)
+        if verdict is None:
+            selectable.append(name)
+            if len(others) >= MAX_OTHER_PREDICTORS:
+                verdict = {"column": name, "rule": "cap",
+                           "reason": f"beyond the limit of {MAX_OTHER_PREDICTORS} other predictors",
+                           "explanation": f"it was left out only because the proposal is limited to "
+                                          f"{MAX_OTHER_PREDICTORS} other predictors; you can swap it in for another"}
+        if verdict is None:
+            numeric = is_numeric_dtype_name(col.dtype)
+            reasons[name] = "numeric column" if numeric else f"text column with {col.distinct_count} levels"
             others.append(name)
             included.append(name)
         else:
+            reasons[name] = verdict["reason"]
+            verdicts[name] = verdict
             excluded.append(name)
-    return {"predictors": [group_column, *others], "reasons": reasons, "included": included, "excluded": excluded}
+    return {"predictors": [group_column, *others], "reasons": reasons, "included": included, "excluded": excluded,
+            "verdicts": verdicts, "selectable": selectable}
 
 
 def _modeling_step(stage_plan: dict) -> dict:
@@ -64,7 +64,12 @@ def exploratory_offer(stage_plan: dict, plan: AnalysisPlan, proposal: dict) -> b
 
 
 def stage_gate_payload(plan: AnalysisPlan, result: dict, last_capability: str, round_index: int,
-                       stage_plan: dict, proposal: dict) -> dict:
+                       stage_plan: dict, proposal: dict, refused=None) -> dict:
+    """
+    The boundary gate's pause. The answer is {"action": "run"} (the proposal), {"action": "run",
+    "predictors": [...]} (the user's choice, checked against the same rules) or {"action": "skip"}. refused
+    is the previous refusal ({"submitted", "refusals", "attempt"}), shown when the gate re-opens.
+    """
     return {
         "type": "stage_gate",
         "question": "The main analysis is finished. Run an exploratory follow-up?",
@@ -87,8 +92,13 @@ def stage_gate_payload(plan: AnalysisPlan, result: dict, last_capability: str, r
             "proposed_predictors": list(proposal["predictors"]),
             "excluded": {name: proposal["reasons"][name] for name in proposal["excluded"]},
             "note": OFFER_NOTE,
+            "selectable": [{"column": name, "proposed": name in proposal["included"],
+                            "reason": proposal["reasons"][name]} for name in proposal["selectable"]],
+            "unsuitable": {name: {"reason": v["reason"], "explanation": v["explanation"]}
+                           for name, v in proposal["verdicts"].items() if v["rule"] != "cap"},
         },
         "allowed_decisions": ["run", "skip"],
+        "refused": refused,
     }
 
 

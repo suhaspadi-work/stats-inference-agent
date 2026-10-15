@@ -32,8 +32,10 @@ from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
 from core.rounds import make_round_entry, with_exploratory_note
 from core.round_two import (
-    build_exploratory_plan, exploratory_offer, propose_exploratory_predictors, stage_gate_payload,
+    MAX_OTHER_PREDICTORS, build_exploratory_plan, exploratory_offer, propose_exploratory_predictors,
+    stage_gate_payload,
 )
+from core.predictor_rules import validate_predictor_choice
 from core.round_records import round_start_record, stage_gate_record
 from core.routing import COMPARISON_TYPES
 from core.classification_records import (
@@ -164,7 +166,8 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         plan = build_stage_plan(state["classification"], state["profile"], issues)
         records = (stage_plan_record(plan, state["classification"], issues), *step_records(plan))
         # M1.3b: a new question on the same thread starts outside any exploratory round.
-        update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, **log_update(*records)}
+        update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, "stage_gate_refusal": None,
+                  **log_update(*records)}
         if plan["status"] == "unsupported":
             update["clarification_needed"] = plan["message"]
         return update
@@ -715,33 +718,65 @@ def route_after_report(state: AgentState) -> str:
     return "stage_gate" if modeling["state"] == "offered" else END
 
 
+def _refused_attempts(state: AgentState) -> int:
+    """Refused stage-gate answers since the last stage plan (the current question on this thread)."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
+    return sum(1 for e in log[start + 1:]
+               if e.get("decision_point") == "planner.stage_gate" and e.get("chosen") == "refused")
+
+
 def make_stage_gate_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     M1.3b: after the main report, offer the exploratory regression when the stage plan offered it and the data
     has a usable extra predictor; otherwise record that it was not offered and end. The proposal is computed
     before interrupt() from a read-only re-profile, so the resumed re-run repeats it harmlessly.
+
+    Step 2b: the user may choose the predictors ({"action": "run", "predictors": [...]}). The choice goes
+    through the same rules as the proposal (core.predictor_rules). A choice that breaks a rule is refused: the
+    node returns normally with a refused record (so the refusal is saved), and route_after_stage_gate re-opens
+    the gate, whose payload then shows the refusal.
     """
     def stage_gate_node(state: AgentState) -> dict:
         plan = state["plan"]
         rounds = state.get("rounds") or []
         capability = rounds[-1]["capability"] if rounds else None
-        _, proposal = _round_two_proposal(state, store)
+        profile, proposal = _round_two_proposal(state, store)
         offered = exploratory_offer(state.get("stage_plan"), plan, proposal)
         if not offered:
             record = stage_gate_record(plan, proposal, None, "not_offered", False, capability)
-            return {"next_round": {"run": False, "predictors": []}, **log_update(record)}
+            return {"next_round": {"run": False, "predictors": []}, "stage_gate_refusal": None, **log_update(record)}
 
         decision = interrupt(stage_gate_payload(plan, state.get("test_result"), capability, len(rounds),
-                                                state["stage_plan"], proposal)) or {}
+                                                state["stage_plan"], proposal,
+                                                refused=state.get("stage_gate_refusal"))) or {}
+        attempts = _refused_attempts(state)
         if decision.get("action") == "run":
-            record = stage_gate_record(plan, proposal, decision, "run", True, capability)
-            return {"next_round": {"run": True, "predictors": list(proposal["predictors"])}, **log_update(record)}
-        record = stage_gate_record(plan, proposal, decision, "skip", True, capability)
-        return {"next_round": {"run": False, "predictors": []}, **log_update(record)}
+            predictors = list(proposal["predictors"])
+            if "predictors" in decision:
+                submitted = decision["predictors"]
+                checked = validate_predictor_choice(profile, submitted, plan.outcome_name, proposal["predictors"][0],
+                                                    MAX_OTHER_PREDICTORS)
+                if not checked["ok"]:
+                    refusal = {"submitted": list(submitted) if isinstance(submitted, list) else [],
+                               "refusals": checked["refusals"], "attempt": attempts + 1}
+                    record = stage_gate_record(plan, proposal, decision, "refused", True, capability,
+                                               refused_attempts=attempts, refusal=refusal)
+                    return {"stage_gate_refusal": refusal, "next_round": None, **log_update(record)}
+                predictors = checked["predictors"]
+            record = stage_gate_record(plan, proposal, decision, "run", True, capability,
+                                       chosen_predictors=predictors, refused_attempts=attempts)
+            return {"next_round": {"run": True, "predictors": predictors}, "stage_gate_refusal": None,
+                    **log_update(record)}
+        record = stage_gate_record(plan, proposal, decision, "skip", True, capability, refused_attempts=attempts)
+        return {"next_round": {"run": False, "predictors": []}, "stage_gate_refusal": None, **log_update(record)}
     return stage_gate_node
 
 
 def route_after_stage_gate(state: AgentState) -> str:
+    """A refused choice re-opens the gate; run starts the exploratory round; skip ends the run."""
+    if state.get("stage_gate_refusal") is not None:
+        return "stage_gate"
     return "start_round" if (state.get("next_round") or {}).get("run") else END
 
 

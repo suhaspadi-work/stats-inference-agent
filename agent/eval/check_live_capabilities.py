@@ -136,10 +136,15 @@ def print_rounds(state, label):
 
 
 def print_exploratory(state_log, label):
-    """M1.3b: the boundary gate's and the round start's chosen values, one line each."""
-    for point, name in (("planner.stage_gate", "stage gate"), ("planner.round_start", "round start")):
-        record = next((e for e in state_log if e["decision_point"] == point), None)
-        print(f"   {name} [{label}]: " + (f"chosen={record['chosen']}" if record else f"no {point} record"))
+    """M1.3b: every boundary-gate answer in order, the round start, and the refusals (step 2b)."""
+    gates = [e for e in state_log if e["decision_point"] == "planner.stage_gate"]
+    print(f"   stage gate [{label}]: " + (f"chosen={', '.join(e['chosen'] for e in gates)}" if gates
+                                          else "no planner.stage_gate record"))
+    record = next((e for e in state_log if e["decision_point"] == "planner.round_start"), None)
+    print(f"   round start [{label}]: " + (f"chosen={record['chosen']}" if record else "no planner.round_start record"))
+    refused = [e for e in gates if e["chosen"] == "refused"]
+    rules = ", ".join(v["rule"] for v in (refused[0]["evidence"].get("refusals") or [])) if refused else "none"
+    print(f"   refusals [{label}]: {len(refused)} ({rules})")
 
 
 def report_event_log(app, cfg, label, events, all_points, failed):
@@ -247,7 +252,12 @@ def main():
                 if p.get("type") in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
                     resume = {"action": "approve"}
                 elif p.get("type") == "stage_gate":  # M1.3b: run the exploratory round only in its own run
-                    resume = {"action": "run" if label == "exploratory" else "skip"}
+                    if label != "exploratory":
+                        resume = {"action": "skip"}
+                    elif p.get("refused") is None:  # step 2b: first try an identifier-like column, which is refused
+                        resume = {"action": "run", "predictors": ["region", "customer_id"]}
+                    else:
+                        resume = {"action": "run"}
                 elif p.get("type") == "wrangling_approval":
                     resume = {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
                 else:

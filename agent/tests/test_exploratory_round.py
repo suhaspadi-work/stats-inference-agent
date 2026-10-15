@@ -11,12 +11,14 @@ import numpy as np
 import pandas as pd
 import pytest
 from langgraph.graph import END
+from langgraph.types import Command
 
 import core.report as report_module
 from core.dataset import LocalDiskStore
 from core.decision_log import log_update
 from core.decision_points import DECISION_NODES, NODE_STAGES, registered_points
 from core.detection import CandidateIssue
+from core.event_log import events_path, read_decision_log
 from core.graph import build_agent_graph
 from core.ingestion import profile_dataset
 from core.nodes import make_plan_stages_node, route_after_report, route_after_stage_gate
@@ -150,7 +152,8 @@ def test_build_exploratory_plan():
 
 PROPOSAL = propose_exploratory_predictors(PROFILE, "region", "total_spend")
 EVIDENCE_KEYS = {"finished_round", "capability", "question_type", "method", "outcome", "group_column",
-                 "proposed_predictors", "excluded_columns", "exploratory", "received_action"}
+                 "proposed_predictors", "excluded_columns", "exploratory", "received_action",
+                 "chosen_predictors", "refused_attempts"}  # M1.3b step 2b: two new evidence keys
 
 
 @pytest.mark.parametrize("decision, choice, offered, decided_by, rationale", [
@@ -191,7 +194,7 @@ def test_round_start_record():
     assert r.evidence == {"round": 2, "from_round": 1, "exploratory": True, "capability": "regression",
                           "question_type": "driver_analysis", "outcome": "total_spend", "group_column": "region",
                           "max_other_predictors": 5, "predictors": ["region", "tier", "tenure"],
-                          "excluded": ["total_spend"]}
+                          "excluded": ["total_spend"], "chosen_by": "code_rule"}  # M1.3b step 2b: chosen_by
 
 
 def test_records_serialize_and_are_registered():
@@ -209,7 +212,8 @@ def test_records_serialize_and_are_registered():
 def test_stage_gate_payload():
     plan, stage_plan = _plan(), _stage_plan(QuestionType.TWO_GROUP_COMPARISON)
     payload = stage_gate_payload(plan, {"p_value": 0.03}, "two_group", 1, stage_plan, PROPOSAL)
-    assert set(payload) == {"type", "question", "request_text", "finished", "offer", "allowed_decisions"}
+    assert set(payload) == {"type", "question", "request_text", "finished", "offer", "allowed_decisions",
+                            "refused"}  # M1.3b step 2b: the previous refusal, None here
     assert (payload["type"], payload["question"], payload["request_text"]) == (
         "stage_gate", "The main analysis is finished. Run an exploratory follow-up?", "x")
     assert payload["finished"] == {"round": 1, "capability": "two_group", "question_type": "two_group_comparison",
@@ -219,7 +223,14 @@ def test_stage_gate_payload():
                                 "reason": step(stage_plan, "modeling")["reason"], "outcome": "total_spend",
                                 "proposed_predictors": ["region", "tier", "tenure"],
                                 "excluded": {"total_spend": "the outcome cannot also be a predictor"},
-                                "note": OFFER_NOTE}
+                                "note": OFFER_NOTE,
+                                # M1.3b step 2b: the columns you can choose, and the unsuitable ones with why
+                                "selectable": [{"column": "tier", "proposed": True, "reason": "text column with 3 levels"},
+                                               {"column": "tenure", "proposed": True, "reason": "numeric column"}],
+                                "unsuitable": {"total_spend": {
+                                    "reason": "the outcome cannot also be a predictor",
+                                    "explanation": "it is the outcome being explained, so it cannot also be used to "
+                                                   "explain itself"}}}
     assert OFFER_NOTE == "labelled exploratory; its results are not corrected for multiple testing"
     assert payload["allowed_decisions"] == ["run", "skip"]
     json.dumps(payload)
@@ -251,6 +262,7 @@ def test_graph_edges(tmp_path):
     assert edges[("report", "stage_gate")] is True and edges[("report", "__end__")] is True
     assert edges[("stage_gate", "start_round")] is True and edges[("stage_gate", "__end__")] is True
     assert edges[("start_round", "select_method")] is False
+    assert edges[("stage_gate", "stage_gate")] is True  # M1.3b step 2b: a refused choice re-opens the gate
 
 
 def test_registry():
@@ -430,3 +442,248 @@ def test_filter_runs():
     assert filter_runs(runs, ["c", "a"]) == [runs[0], runs[2]]
     with pytest.raises(ValueError, match=r"unknown run\(s\) \['zz'\]"):
         filter_runs(runs, ["a", "zz"])
+
+
+# === M1.3b step 2b: choosing the predictors at the boundary gate ========================================================
+
+
+def test_payload_new_keys():
+    stage_plan = _stage_plan(QuestionType.TWO_GROUP_COMPARISON)
+    profile = make_profile({"region": ("object", 2), "tier": ("object", 3), "customer_id": ("int64", 100),
+                            "total_spend": ("float64", 100),
+                            **{f"x{i}": ("float64", 50) for i in range(5)}})
+    proposal = propose_exploratory_predictors(profile, "region", "total_spend")
+    payload = stage_gate_payload(_plan(), {}, "two_group", 1, stage_plan, proposal)
+    assert payload["refused"] is None
+    assert payload["offer"]["selectable"] == (
+        [{"column": "tier", "proposed": True, "reason": "text column with 3 levels"}]
+        + [{"column": f"x{i}", "proposed": i < 4, "reason": "numeric column" if i < 4 else
+            "beyond the limit of 5 other predictors"} for i in range(5)])
+    assert set(payload["offer"]["unsuitable"]) == {"customer_id", "total_spend"}  # x4 is out only by the cap
+    refusal = {"submitted": ["region", "customer_id"], "refusals": [{"column": "customer_id"}], "attempt": 1}
+    assert stage_gate_payload(_plan(), {}, "two_group", 1, stage_plan, proposal, refused=refusal)["refused"] == refusal
+
+
+REFUSAL = {"submitted": ["region", "customer_id"], "attempt": 2, "refusals": [
+    {"column": "customer_id", "rule": "identifier_like", "reason": "identifier-like: every value is distinct",
+     "explanation": "x"},
+    {"column": None, "rule": "none_chosen", "reason": "no other predictor", "explanation": "y"}]}
+
+
+def test_refused_record():
+    r = stage_gate_record(_plan(), PROPOSAL, {"action": "run", "predictors": ["region", "customer_id"]}, "refused",
+                          True, "two_group", refused_attempts=1, refusal=REFUSAL)
+    assert (r.chosen, r.decided_by, r.overridden_by_human) == ("refused", "human", False)
+    text = "customer_id: identifier-like: every value is distinct; none_chosen: no other predictor"
+    assert r.rationale == "the chosen predictors do not fit the rules: " + text
+    assert [(c.option, c.eligible) for c in r.candidates] == [("run", True), ("run with your predictors", False),
+                                                              ("skip", True)]
+    assert r.candidates[1].reason == text
+    assert set(r.evidence) == EVIDENCE_KEYS | {"submitted_predictors", "refusals", "attempt"}
+    assert (r.evidence["submitted_predictors"], r.evidence["attempt"], r.evidence["refused_attempts"]) == (
+        ["region", "customer_id"], 2, 1)
+    assert r.evidence["refusals"] == REFUSAL["refusals"] and r.evidence["chosen_predictors"] == []
+
+
+def test_accepted_override_record():
+    r = stage_gate_record(_plan(), PROPOSAL, {"action": "run", "predictors": ["region", "tenure"]}, "run", True,
+                          "two_group", chosen_predictors=["region", "tenure"], refused_attempts=1)
+    assert (r.chosen, r.decided_by, r.overridden_by_human) == ("run", "human", True)
+    assert r.original_choice == "run with the proposed predictors: region, tier, tenure"
+    assert r.rationale == "the user chose their own predictors (they fit the rules)"
+    assert (r.evidence["chosen_predictors"], r.evidence["refused_attempts"]) == (["region", "tenure"], 1)
+
+
+def test_proposal_record_is_unchanged_apart_from_the_new_keys():
+    r = stage_gate_record(_plan(), PROPOSAL, {"action": "run"}, "run", True, "two_group",
+                          chosen_predictors=PROPOSAL["predictors"])
+    assert (r.overridden_by_human, r.original_choice) == (False, None)
+    assert r.rationale == "the user chose to run the exploratory regression"
+    assert (r.evidence["chosen_predictors"], r.evidence["refused_attempts"]) == (["region", "tier", "tenure"], 0)
+    skip = stage_gate_record(_plan(), PROPOSAL, {"action": "skip"}, "skip", True, "two_group")
+    assert skip.evidence["chosen_predictors"] == [] and skip.evidence["refused_attempts"] == 0
+
+
+def test_round_start_record_with_a_user_choice():
+    profile = make_profile({"region": ("object", 2), "tier": ("object", 3), "tenure": ("float64", 80),
+                            "total_spend": ("float64", 100), **{f"x{i}": ("float64", 50) for i in range(5)}})
+    proposal = propose_exploratory_predictors(profile, "region", "total_spend")
+    assert "x3" in proposal["excluded"]  # beyond the cap in the proposal
+    plan2 = build_exploratory_plan(_plan(), "x@v1", ["region", "tenure", "x3"])
+    r = round_start_record(plan2, profile, proposal, from_round=1)
+    reasons = {c.option: (c.eligible, c.reason) for c in r.candidates}
+    assert reasons["x3"] == (True, "chosen by you; it fits the rules")
+    assert reasons["tenure"] == (True, "numeric column")
+    assert reasons["tier"] == (False, "text column with 3 levels")
+    assert r.chosen == "region, tenure, x3" and r.evidence["chosen_by"] == "user"
+    assert "x3" not in r.evidence["excluded"] and r.evidence["predictors"] == ["region", "tenure", "x3"]
+    default = round_start_record(build_exploratory_plan(_plan(), "x@v1", proposal["predictors"]), profile, proposal, 1)
+    assert default.evidence["chosen_by"] == "code_rule"
+    json.dumps(log_update(r, default))
+
+
+# --- through the real graph ----------------------------------------------------------------------------------------
+
+def _gate_frame(seed=61, n=120):
+    df = _frame(seed=seed, n=n)
+    df["customer_id"] = range(1, n + 1)
+    return df
+
+
+def _drive_all(app, state, thread, resumes):
+    """Answer every pause, in order, with the next value; stop (with the pause still open) when none are left."""
+    config = {"configurable": {"thread_id": thread}}
+    queue, payloads = list(resumes), []
+    app.invoke(state, config)
+    snapshot = app.get_state(config)
+    while snapshot.interrupts:
+        payloads.append(snapshot.interrupts[0].value)
+        if not queue:
+            break
+        app.invoke(Command(resume=queue.pop(0)), config)
+        snapshot = app.get_state(config)
+    return snapshot.values, payloads, snapshot.next
+
+
+def _gate_app(store, event_log_dir=None):
+    return build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose, event_log_dir=event_log_dir)
+
+
+def _start_state(tmp_path, store, df, name):
+    return {"request_text": "Did West spend more?", "session_id": "session-abc",
+            "dataset": _dataset(df, tmp_path, store, name)}
+
+
+def _types(payloads):
+    return [p["type"] for p in payloads]
+
+
+def _gate_records(values):
+    return _records(values, STAGE_GATE_POINT)
+
+
+def test_run_with_chosen_predictors(fake_model, tmp_path, store):
+    run = {"action": "run", "predictors": ["region", "tenure"]}
+    values, payloads, nxt = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), "a"), "a",
+                                       [APPROVE, APPROVE, run, APPROVE])
+    assert nxt == () and _types(payloads) == [GATE, "plan_approval", "stage_gate", "plan_approval"]
+    assert list(values["plan"].candidate_predictors) == ["region", "tenure"]
+    (gate,) = _gate_records(values)
+    assert (gate["chosen"], gate["overridden_by_human"]) == ("run", True)
+    assert _records(values, ROUND_START_POINT)[0]["evidence"]["chosen_by"] == "user"
+    assert values["test_result"]["result_type"] == "regression" and len(values["rounds"]) == 2
+
+
+def test_refusal_then_success(fake_model, tmp_path, store):
+    app = _gate_app(store)
+    config = {"configurable": {"thread_id": "b"}}
+    bad = {"action": "run", "predictors": ["region", "customer_id", "total_spend"]}
+    values, payloads, nxt = _drive_all(app, _start_state(tmp_path, store, _gate_frame(), "b"), "b",
+                                       [APPROVE, APPROVE, bad])
+    assert nxt == ("stage_gate",) and _types(payloads) == [GATE, "plan_approval", "stage_gate", "stage_gate"]
+    (refused,) = _gate_records(values)  # saved before the second answer
+    assert (refused["chosen"], refused["evidence"]["attempt"]) == ("refused", 1)
+    assert [(v["column"], v["rule"]) for v in refused["evidence"]["refusals"]] == [
+        ("customer_id", "identifier_like"), ("total_spend", "outcome")]
+    assert payloads[-1]["refused"]["refusals"] == refused["evidence"]["refusals"]
+    assert payloads[-1]["refused"]["attempt"] == 1
+
+    app.invoke(Command(resume={"action": "run", "predictors": ["region", "tier"]}), config)
+    app.invoke(Command(resume=APPROVE), config)
+    values = app.get_state(config).values
+    assert app.get_state(config).next == ()
+    refused_again, accepted = _gate_records(values)
+    assert refused_again["chosen"] == "refused"
+    assert (accepted["chosen"], accepted["evidence"]["refused_attempts"]) == ("run", 1)
+    assert values["stage_gate_refusal"] is None and list(values["plan"].candidate_predictors) == ["region", "tier"]
+
+
+def test_pause_list_for_a_refusal_then_success(fake_model, tmp_path, store):
+    bad = {"action": "run", "predictors": ["region", "customer_id"]}
+    good = {"action": "run", "predictors": ["region", "tier"]}
+    _, payloads, nxt = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), "p"), "p",
+                                  [APPROVE, APPROVE, bad, good, APPROVE])
+    assert nxt == () and _types(payloads) == [GATE, "plan_approval", "stage_gate", "stage_gate", "plan_approval"]
+
+
+def test_two_refusals_count_their_attempts(fake_model, tmp_path, store):
+    bad = {"action": "run", "predictors": ["region", "customer_id"]}
+    values, payloads, _ = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), "c"), "c",
+                                     [APPROVE, APPROVE, bad, bad])
+    assert [r["evidence"]["attempt"] for r in _gate_records(values)] == [1, 2]
+    assert payloads[-1]["refused"]["attempt"] == 2
+
+
+def test_refusal_then_skip(fake_model, tmp_path, store):
+    bad = {"action": "run", "predictors": ["region", "total_spend"]}
+    values, _, nxt = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), "d"), "d",
+                                [APPROVE, APPROVE, bad, {"action": "skip"}])
+    assert nxt == () and len(values["rounds"]) == 1
+    assert [r["chosen"] for r in _gate_records(values)] == ["refused", "skip"]
+    assert ROUND_START_POINT not in _points(values) and values["plan"].question_type == QuestionType.TWO_GROUP_COMPARISON
+
+
+def test_a_refusal_is_saved_even_if_no_answer_follows(fake_model, tmp_path, store):
+    events = tmp_path / "events"
+    bad = {"action": "run", "predictors": ["region", "customer_id"]}
+    values, _, nxt = _drive_all(_gate_app(store, event_log_dir=events), _start_state(tmp_path, store, _gate_frame(), "e"),
+                                "e", [APPROVE, APPROVE, bad])
+    assert nxt == ("stage_gate",)
+    assert [r["chosen"] for r in _gate_records(values)] == ["refused"]
+    in_file = [e for e in read_decision_log(events_path(events, "e")) if e["decision_point"] == STAGE_GATE_POINT]
+    assert [e["chosen"] for e in in_file] == ["refused"]
+
+
+def test_omitted_predictors_run_the_proposal(fake_model, tmp_path, store):
+    values, _, _ = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), "f"), "f",
+                              [APPROVE, APPROVE, {"action": "run"}, APPROVE])
+    (gate,) = _gate_records(values)
+    assert (gate["chosen"], gate["overridden_by_human"]) == ("run", False)
+    assert list(values["plan"].candidate_predictors) == ["region", "tier", "tenure"]
+    assert _records(values, ROUND_START_POINT)[0]["evidence"]["chosen_by"] == "code_rule"
+
+
+@pytest.mark.parametrize("predictors, rule", [("region", "not_a_list"), (["tier", "tenure"], "group_missing")])
+def test_invalid_shapes_are_refused(predictors, rule, fake_model, tmp_path, store):
+    values, _, nxt = _drive_all(_gate_app(store), _start_state(tmp_path, store, _gate_frame(), rule), rule,
+                                [APPROVE, APPROVE, {"action": "run", "predictors": predictors}])
+    assert nxt == ("stage_gate",)
+    (refused,) = _gate_records(values)
+    assert [v["rule"] for v in refused["evidence"]["refusals"]] == [rule]
+
+
+def _wide_frame(seed=62, n=120):
+    df = _frame(seed=seed, n=n, extra=False)
+    rng = np.random.default_rng(seed)
+    for i in range(8):
+        df[f"x{i}"] = rng.normal(0, 1, n)
+    return df
+
+
+def test_the_cap(fake_model, tmp_path, store):
+    seven = {"action": "run", "predictors": ["region", *[f"x{i}" for i in range(7)]]}
+    values, _, _ = _drive_all(_gate_app(store), _start_state(tmp_path, store, _wide_frame(), "cap"), "cap",
+                              [APPROVE, APPROVE, seven])
+    (refused,) = _gate_records(values)
+    assert refused["evidence"]["refusals"] == [{"column": None, "rule": "cap",
+                                                "reason": "beyond the limit of 5 other predictors",
+                                                "explanation": "you chose 7 other predictors; the limit is 5; remove 2"}]
+
+
+def test_a_column_left_out_by_the_cap_can_be_swapped_in(fake_model, tmp_path, store):
+    swap = {"action": "run", "predictors": ["region", "x0", "x1", "x2", "x3", "x7"]}
+    values, _, nxt = _drive_all(_gate_app(store), _start_state(tmp_path, store, _wide_frame(), "swap"), "swap",
+                                [APPROVE, APPROVE, swap, APPROVE])
+    assert nxt == ()
+    (gate,) = _gate_records(values)
+    assert gate["evidence"]["proposed_predictors"] == ["region", "x0", "x1", "x2", "x3", "x4"]
+    assert (gate["chosen"], gate["overridden_by_human"]) == ("run", True)
+    assert list(values["plan"].candidate_predictors) == ["region", "x0", "x1", "x2", "x3", "x7"]
+
+
+def test_plan_stages_clears_a_stale_refusal(tmp_path, store):
+    ds = _dataset(_frame(), tmp_path, store, "stale_refusal")
+    state = {"dataset": ds, "profile": profile_dataset(ds, store=store), "request_text": "x", "session_id": "s",
+             "classification": classification(QuestionType.TWO_GROUP_COMPARISON), "stage_gate_refusal": REFUSAL}
+    assert make_plan_stages_node(store)(state)["stage_gate_refusal"] is None
