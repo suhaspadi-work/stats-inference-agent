@@ -154,7 +154,8 @@ def test_every_point_uses_a_known_prefix():
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    assert nodes == {"classify", "clarify", "reclassify", "profile", "wrangle_propose", "wrangle_review",
+    # M1.1: plan_stages added between profile and wrangle_propose
+    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "wrangle_propose", "wrangle_review",
                      "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
 
 
@@ -389,7 +390,7 @@ def scenario_runs(tmp_path_factory):
                             draft_fn=fake_draft([]), propose_fn=must_not_propose)
     runs["S7"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s7"), "Describe this data."), "s7", [])
 
-    # S8: association with two predictors is unsupported and ends after draft_plan (M0.3).
+    # S8: association with two predictors is unsupported and ends at the stage plan, before cleaning (M1.1).
     app = build_agent_graph(store, classify_fn=confident(QuestionType.ASSOCIATION),
                             draft_fn=fake_draft(["region", "channel"]), propose_fn=must_not_propose)
     runs["S8"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s8"), "Are region and channel related to spend?"), "s8", [])
@@ -398,6 +399,18 @@ def scenario_runs(tmp_path_factory):
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
     runs["S9"] = drive(app, start(_dataset(mg, tmp, store, "s9"), "Did regions differ?"), "s9", [{"action": "approve"}])
+
+    # S10: a two-group question with a 0/1 outcome passes the stage plan and ends at the draft_plan route
+    # (unsupported, G44), so planner.route's unsupported path stays covered now that S8 ends earlier (M1.1).
+    binary = _two_group_df(rng)
+    binary["converted"] = [i % 2 for i in range(len(binary))]
+
+    def binary_draft(request_text, profile):
+        return _DraftPlanOut(outcome_name="converted", outcome_type=OutcomeType.BINARY, unit_of_analysis="customer",
+                             candidate_predictors=["region"], rationale="fake draft")
+    app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                            draft_fn=binary_draft, propose_fn=must_not_propose)
+    runs["S10"] = drive(app, start(_dataset(binary, tmp, store, "s10"), "Did West convert more?"), "s10", [])
 
     return runs, emitted
 
@@ -417,9 +430,9 @@ def emitted_by_node(scenario_runs):
 EXPECTED_PAUSES = {
     "S1": ["clarification_needed", "wrangling_approval", "plan_approval"],
     "S2": ["plan_approval"], "S3": ["plan_approval"], "S4": ["plan_approval"],
-    "S5": ["plan_approval"], "S6": ["plan_approval"], "S7": [], "S8": [], "S9": ["plan_approval"],
+    "S5": ["plan_approval"], "S6": ["plan_approval"], "S7": [], "S8": [], "S9": ["plan_approval"], "S10": [],
 }
-ENDS_WITHOUT_STOP = {"S3", "S8"}  # runs that end at END rather than at the stop before report
+ENDS_WITHOUT_STOP = {"S3", "S8", "S10"}  # runs that end at END rather than at the stop before report
 
 
 def test_each_scenario_pauses_in_order_and_stops_where_expected(scenario_logs):
@@ -483,3 +496,6 @@ def test_scenario_specifics(scenario_logs):
     assert s5_post_hoc["chosen"] in ("tukey_hsd", "dunn")
     assert "stage3.encoding" in points("S6")
     assert "planner.draft_plan" in points("S7") and "stage2.test_selection" not in points("S7")
+    assert points("S8")[-1] == "planner.stage_plan" and "planner.route" not in points("S8")
+    s10_route = scenario_logs["S10"][0]["decision_log"][-1]
+    assert (s10_route["decision_point"], s10_route["chosen"]) == ("planner.route", "unsupported")

@@ -25,12 +25,15 @@ from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
+from core.stage_plan_records import STAGE_PLAN_POINT, STEP_POINTS
 
 # Each choosing graph node and the decision points it may emit.
 DECISION_NODES: dict[str, tuple[str, ...]] = {
     "classify": (QUESTION_TYPE_POINT, CAUSAL_STATUS_POINT, CLARIFICATION_GATE_POINT),
     "clarify": (CLARIFICATION_POINT,),
     "reclassify": (QUESTION_TYPE_POINT, CAUSAL_STATUS_POINT),
+    "plan_stages": (STAGE_PLAN_POINT, STEP_POINTS["clean"], STEP_POINTS["describe"], STEP_POINTS["inference"],
+                    STEP_POINTS["modeling"]),
     "wrangle_propose": (SCAN_POINT, FIX_POINT),
     "wrangle_review": (CLEAN_APPROVAL_POINT, CLEAN_EXECUTION_POINT),
     "draft_plan": (DRAFT_PLAN_POINT, OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT, ROUTE_POINT),

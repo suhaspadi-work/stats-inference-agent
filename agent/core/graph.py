@@ -7,7 +7,7 @@ from core.dataset import DatasetStore
 from core.event_sink import with_event_log
 from core.nodes import (
     classify_node, clarify_node, reclassify_node, route_after_classify,
-    make_profile_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
+    make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
     make_draft_plan_node,
     make_select_method_node, freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
@@ -24,6 +24,13 @@ def route_after_freeze(state: AgentState) -> str:
     if state["plan"].status.value == "frozen":
         return "execute"
     return END
+
+def route_after_plan_stages(state: AgentState) -> str:
+    """An unsupported question ends the run after the stage plan, before any cleaning (M1.1)."""
+    if state["stage_plan"]["status"] == "unsupported":
+        return END
+    return "wrangle_propose"
+
 
 def route_after_draft_plan(state: AgentState) -> str:
     """
@@ -54,6 +61,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> classify (first pass, records question type, causal status and the clarification gate)
          -> if confidence is low: clarify (clarification interrupt) -> reclassify (second pass)
       -> profile
+      -> plan_stages (M1.1: which steps of the three stages run, by code; an unsupported question ends here)
       -> wrangle_propose (detect issues, one model call for fixes)
          -> if any issues: wrangle_review (checklist interrupt, then execute)
       -> draft_plan
@@ -82,6 +90,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     else:
         add_node("reclassify", lambda state: reclassify_node(state, classify_fn=classify_fn))
     add_node("profile", make_profile_node(store))
+    add_node("plan_stages", make_plan_stages_node(store))
     if propose_fn is None:
         add_node("wrangle_propose", make_wrangle_propose_node(store))
     else:
@@ -101,7 +110,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("classify", route_after_classify, {"profile": "profile", "clarify": "clarify"})
     graph.add_edge("clarify", "reclassify")
     graph.add_edge("reclassify", "profile")
-    graph.add_edge("profile", "wrangle_propose")
+    graph.add_edge("profile", "plan_stages")
+    graph.add_conditional_edges("plan_stages", route_after_plan_stages, {"wrangle_propose": "wrangle_propose", END: END})
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
                                 {"wrangle_review": "wrangle_review", "draft_plan": "draft_plan"})
     graph.add_edge("wrangle_review", "draft_plan")

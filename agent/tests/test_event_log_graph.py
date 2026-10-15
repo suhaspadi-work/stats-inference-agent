@@ -176,5 +176,6 @@ def test_two_threads_write_two_files(tmp_path, store):
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    assert nodes == {"classify", "clarify", "reclassify", "profile", "wrangle_propose", "wrangle_review",
+    # M1.1: plan_stages added between profile and wrangle_propose
+    assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "wrangle_propose", "wrangle_review",
                      "draft_plan", "eda", "select_method", "freeze", "execute", "report"}

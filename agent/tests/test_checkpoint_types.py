@@ -322,7 +322,7 @@ def test_scenario_runs_keep_real_types(tmp_path, store, serde_log):
     assert results["f"][0]["plan"].status.value == "executed"
     assert results["c"][0]["test_result"]["result_type"] == "multi_group"
     assert results["d"][0]["test_result"]["result_type"] == "regression"
-    assert results["e"][0]["route"]["status"] == "unsupported"
+    assert results["e"][0]["stage_plan"]["status"] == "unsupported"  # M1.1: association ends at plan_stages, so no route
     b_issues = results["b"][0]["plan"].unaddressed_issues
     assert len(b_issues) == 1 and type(b_issues[0]) is UnaddressedIssue
     assert serde_log.bad() == []

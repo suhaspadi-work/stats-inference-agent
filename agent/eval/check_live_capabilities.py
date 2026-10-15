@@ -104,6 +104,15 @@ def print_route(state, label):
         print(f"   route [{label}]: message={ev.get('message')!r}")
 
 
+def print_stage_plan(log, label):
+    """M1.1: the planner.stage_plan record of the run, one line."""
+    record = next((e for e in log if e["decision_point"] == "planner.stage_plan"), None)
+    if record is None:
+        print(f"   stage plan [{label}]: no planner.stage_plan record")
+        return
+    print(f"   stage plan [{label}]: chosen={record['chosen']} status={(record.get('evidence') or {}).get('status')}")
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
@@ -130,6 +139,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     log = file_log if failed else state_log
     points = [e["decision_point"] for e in log]
     print("   decision points:", points)
+    print_stage_plan(log, label)
     all_points.update(points)
     if label == "messy":
         print_cleaning_lines(log)

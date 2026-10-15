@@ -29,6 +29,7 @@ class AgentState(TypedDict, total=False):
 
     dataset: Dataset               # set once, by intake -- before this node, it doesn't exist
     profile: ModelSafeView         # set by the profile node
+    stage_plan: dict               # set by plan_stages (M1.1): the steps of the three stages, core.stage_plan
 
     plan: AnalysisPlan             # set by classify, updated by draft_plan, updated again by freeze
 

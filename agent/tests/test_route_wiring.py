@@ -253,11 +253,13 @@ def test_full_run_reconciled_to_multi_group(data, store):
     assert next_nodes == ("report",)
 
 
-@pytest.mark.parametrize("question_type, draft_fn, text", [
-    (QuestionType.ASSOCIATION, fake_draft(["region", "tenure"]), "Association questions are not supported yet"),
-    (QuestionType.TWO_GROUP_COMPARISON, _binary_draft, "(G3)"),
+@pytest.mark.parametrize("question_type, draft_fn, text, last_point", [
+    # M1.1: association now ends at the stage plan, before cleaning and the draft plan
+    (QuestionType.ASSOCIATION, fake_draft(["region", "tenure"]), "Association questions are not supported yet",
+     "planner.stage_plan"),
+    (QuestionType.TWO_GROUP_COMPARISON, _binary_draft, "(G3)", "planner.route"),
 ])
-def test_full_run_unsupported_ends_before_method_selection(data, store, question_type, draft_fn, text):
+def test_full_run_unsupported_ends_before_method_selection(data, store, question_type, draft_fn, text, last_point):
     ds, _ = data
     app = build_agent_graph(store, classify_fn=confident(question_type), draft_fn=draft_fn,
                             propose_fn=must_not_propose)
@@ -265,5 +267,5 @@ def test_full_run_unsupported_ends_before_method_selection(data, store, question
     assert pauses == [] and next_nodes == ()
     assert text in state["clarification_needed"]
     points = [e["decision_point"] for e in state["decision_log"]]
-    assert points[-1] == "planner.route"
+    assert points[-1] == last_point
     assert not any(p in ("stage2.test_selection", "stage3.regression_method") for p in points)

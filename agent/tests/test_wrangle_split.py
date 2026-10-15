@@ -232,7 +232,7 @@ def test_failing_approved_operation_finishes_silently(tmp_path, store):
 def test_full_graph_wrangle_edges(tmp_path):
     app = build_agent_graph(LocalDiskStore(base_dir=tmp_path))
     edges = {(e.source, e.target): e.conditional for e in app.get_graph().edges}
-    assert edges[("profile", "wrangle_propose")] is False
+    assert edges[("profile", "plan_stages")] is False and edges[("plan_stages", "wrangle_propose")] is True  # M1.1
     assert edges[("wrangle_propose", "wrangle_review")] is True
     assert edges[("wrangle_propose", "draft_plan")] is True
     assert edges[("wrangle_review", "draft_plan")] is False

@@ -39,6 +39,8 @@ from core.cleaning_records import scan_record, fix_record, approval_record, exec
 from core.freeze_records import plan_approval_record, edited_predictors_record
 from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
+from core.stage_plan import build_stage_plan
+from core.stage_plan_records import stage_plan_record, step_records
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -140,6 +142,23 @@ def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         view = profile_dataset(state["dataset"], store=store)
         return {"profile": view}
     return profile_node
+
+
+def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M1.1: decide which steps of the three stages this run takes, by code from the classification, the
+    profile and the detected data-quality issues (no model call). Read-only: the classification, the
+    profile and the dataset are not changed. An unsupported question ends the run here (route_after_plan_stages).
+    """
+    def plan_stages_node(state: AgentState) -> dict:
+        issues = detect_all_issues(state["dataset"], state["profile"], store)
+        plan = build_stage_plan(state["classification"], state["profile"], issues)
+        records = (stage_plan_record(plan, state["classification"], issues), *step_records(plan))
+        update = {"stage_plan": plan, **log_update(*records)}
+        if plan["status"] == "unsupported":
+            update["clarification_needed"] = plan["message"]
+        return update
+    return plan_stages_node
 
 _EXECUTE_FNS = {"cast": execute_cast, "rename": execute_rename, "filter": execute_filter, "dedupe": execute_dedupe}
 
