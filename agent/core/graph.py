@@ -12,18 +12,21 @@ from core.nodes import (
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
     route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node,
     make_draft_plan_node,
-    make_select_method_node, freeze_node, make_execute_node, make_eda_node, make_report_node,
+    make_select_method_node, make_freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
 
 
 def route_after_freeze(state: AgentState) -> str:
     """
-    After freeze_node resumes, the plan is either FROZEN (approve/edit) or
-    still not frozen (reject -- freeze_node deliberately never calls
-    plan.freeze() on that path). Route accordingly rather than letting
-    execute_node's own status check be the only thing standing between a
-    rejected plan and an attempted execution.
+    After freeze_node resumes: a refused edit re-opens the plan-approval pause; an accepted edit goes back
+    through select_method (M1.3c); an approved plan is FROZEN and runs; a rejected plan is never frozen
+    (freeze_node deliberately never calls plan.freeze() on that path) and the run ends. Routing here means
+    execute_node's own status check is not the only thing standing between a rejected plan and execution.
     """
+    if state.get("plan_approval_refusal") is not None:
+        return "freeze"
+    if state.get("reselect_after_edit") is not None:
+        return "select_method"
     if state["plan"].status.value == "frozen":
         return "execute"
     return END
@@ -59,11 +62,14 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> profile
       -> plan_stages (M1.1: which steps of the three stages run, by code; an unsupported question ends here)
          -> if some step is offered: stage_plan_gate (M1.3a: approval interrupt; describe on or off, or reject)
+            (M1.3c: run choices that break a rule are refused and the gate re-opens: stage_plan_gate -> stage_plan_gate)
       -> wrangle_propose (detect issues, one model call for fixes)
          -> if any issues: wrangle_review (checklist interrupt, then execute)
       -> describe (M1.2: when the stage plan says run and the question is not descriptive; no model call)
       -> draft_plan
       -> freeze (approval interrupt; routes to execute or END)
+         (M1.3c: a refused edit re-opens the pause: freeze -> freeze; an accepted edit re-selects the method:
+          freeze -> select_method -> freeze)
       -> execute
       -> report
          -> M1.3b: after a comparison whose stage plan offered modeling: stage_gate (run or skip the exploratory round)
@@ -105,7 +111,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
         add_node("draft_plan", make_draft_plan_node(draft_fn=draft_fn))
     add_node("eda", make_eda_node(store))
     add_node("select_method", make_select_method_node(store))
-    add_node("freeze", freeze_node)
+    add_node("freeze", make_freeze_node(store))
     add_node("execute", make_execute_node(store))
     add_node("report", make_report_node())
     add_node("stage_gate", make_stage_gate_node(store))
@@ -119,7 +125,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("plan_stages", route_after_plan_stages,
                                 {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "wrangle_propose", END: END})
     graph.add_conditional_edges("stage_plan_gate", route_after_stage_plan_gate,
-                                {"wrangle_propose": "wrangle_propose", END: END})
+                                {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "wrangle_propose", END: END})
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
                                 {"wrangle_review": "wrangle_review", "describe": "describe", "draft_plan": "draft_plan"})
     graph.add_conditional_edges("wrangle_review", route_after_cleaning, {"describe": "describe", "draft_plan": "draft_plan"})
@@ -128,7 +134,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
                                 {"eda": "eda", "select_method": "select_method", END: END})
     graph.add_edge("select_method", "freeze")
     graph.add_edge("eda", "report")
-    graph.add_conditional_edges("freeze", route_after_freeze, {"execute": "execute", END: END})
+    graph.add_conditional_edges("freeze", route_after_freeze,
+                                {"freeze": "freeze", "select_method": "select_method", "execute": "execute", END: END})
     graph.add_edge("execute", "report")
     graph.add_conditional_edges("report", route_after_report, {"stage_gate": "stage_gate", END: END})
     graph.add_conditional_edges("stage_gate", route_after_stage_gate,

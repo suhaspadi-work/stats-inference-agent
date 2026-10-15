@@ -22,7 +22,7 @@ from core.nodes import route_after_plan_stages, route_after_stage_plan_gate
 from core.plan import QuestionType
 from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_gate import (
-    ADJUSTABLE_STEPS, adjustable_steps, apply_gate_decision, gate_needed, gate_payload, validate_run_overrides,
+    ADJUSTABLE_STEPS, adjustable_steps, apply_gate_decision, check_run_overrides, gate_needed, gate_payload,
 )
 from core.stage_plan_records import STAGE_PLAN_APPROVAL_POINT, stage_plan_approval_record
 from tests.test_decision_point_guard import (
@@ -45,10 +45,6 @@ def step(plan, name):
     return next(s for s in plan_steps(plan) if s["step"] == name)
 
 
-def cannot(bad, adjustable):
-    return re.escape(f"Cannot change step(s) {bad} here. Adjustable steps: {adjustable}.")
-
-
 # --- pure helpers ----------------------------------------------------------------------------------
 
 def test_adjustable_steps_constant():
@@ -69,23 +65,27 @@ def test_no_gate_for_descriptive_or_association(question_type):
     assert adjustable_steps(plan) == []
 
 
-def test_validate_run_overrides_accepts():
+# M1.3c: validate_run_overrides (which raised) is replaced by check_run_overrides, which returns verdicts
+def test_check_run_overrides_accepts():
     plan = plan_for(QuestionType.TWO_GROUP_COMPARISON)
-    assert validate_run_overrides(plan, None) == {}
-    assert validate_run_overrides(plan, {"describe": False}) == {"describe": False}
+    assert check_run_overrides(plan, None) == {"ok": True, "overrides": {}, "refusals": []}
+    assert check_run_overrides(plan, {"describe": False}) == {"ok": True, "overrides": {"describe": False},
+                                                               "refusals": []}
 
 
-@pytest.mark.parametrize("question_type, overrides, message", [
-    (QuestionType.TWO_GROUP_COMPARISON, {"clean": False}, cannot(["clean"], ["describe"])),          # planned
-    (QuestionType.DRIVER_ANALYSIS, {"inference": True}, cannot(["inference"], ["describe"])),        # unavailable
-    (QuestionType.TWO_GROUP_COMPARISON, {"modeling": True}, cannot(["modeling"], ["describe"])),     # exploratory
-    (QuestionType.TWO_GROUP_COMPARISON, {"forecast": True}, cannot(["forecast"], ["describe"])),     # unknown
-    (QuestionType.TWO_GROUP_COMPARISON, {"describe": "yes"}, re.escape("Run choices must be true or false.")),
-    (QuestionType.TWO_GROUP_COMPARISON, ["describe"], re.escape("Run choices must be true or false.")),
+@pytest.mark.parametrize("question_type, issues, overrides, step_name, rule", [
+    # planned: one cleaning issue makes the clean step planned (without it, clean is not_applicable)
+    (QuestionType.TWO_GROUP_COMPARISON, 1, {"clean": False}, "clean", "planned_step"),
+    (QuestionType.DRIVER_ANALYSIS, 0, {"inference": True}, "inference", "unavailable"),
+    (QuestionType.TWO_GROUP_COMPARISON, 0, {"modeling": True}, "modeling", "chosen_later"),
+    (QuestionType.TWO_GROUP_COMPARISON, 0, {"forecast": True}, "forecast", "unknown_step"),
+    (QuestionType.TWO_GROUP_COMPARISON, 0, {"describe": "yes"}, "describe", "not_boolean"),
+    (QuestionType.TWO_GROUP_COMPARISON, 0, ["describe"], None, "not_a_dict"),
 ], ids=["planned", "unavailable", "exploratory", "unknown", "not_bool", "not_dict"])
-def test_validate_run_overrides_refuses(question_type, overrides, message):
-    with pytest.raises(ValueError, match=message):
-        validate_run_overrides(plan_for(question_type), overrides)
+def test_check_run_overrides_refuses(question_type, issues, overrides, step_name, rule):
+    checked = check_run_overrides(plan_for(question_type, [_issue()] * issues), overrides)
+    assert checked["ok"] is False and checked["overrides"] == {}
+    assert [(v["step"], v["rule"]) for v in checked["refusals"]] == [(step_name, rule)]
 
 
 def _issue():
@@ -95,8 +95,8 @@ def _issue():
 def test_a_planned_step_cannot_be_switched_off():
     plan = plan_for(QuestionType.TWO_GROUP_COMPARISON, [_issue()])
     assert step(plan, "clean")["state"] == "planned"
-    with pytest.raises(ValueError, match=cannot(["clean"], ["describe"])):
-        validate_run_overrides(plan, {"clean": False})
+    (verdict,) = check_run_overrides(plan, {"clean": False})["refusals"]  # M1.3c: a verdict, not an exception
+    assert (verdict["rule"], verdict["reason"]) == ("planned_step", "needed by your question")
 
 
 def test_apply_gate_decision():
@@ -123,7 +123,8 @@ def test_gate_payload():
     plan = plan_for(QuestionType.TWO_GROUP_COMPARISON)
     payload = gate_payload(plan, "Did West spend more?")
     assert set(payload) == {"type", "question", "request_text", "question_type", "stages", "adjustable_steps",
-                            "allowed_decisions"}
+                            "allowed_decisions", "refused"}  # M1.3c: the previous refusal, None here
+    assert payload["refused"] is None
     assert (payload["type"], payload["question"], payload["request_text"], payload["question_type"]) == (
         GATE, "Review which steps this run will take before anything is changed.", "Did West spend more?",
         "two_group_comparison")
@@ -293,17 +294,20 @@ def test_keeping_describe_on(tmp_path, store):
     assert "stage1.describe.execution" in _points(values)
 
 
-def test_an_invalid_override_raises_and_records_nothing(tmp_path, store):
+def test_an_invalid_override_is_refused_and_the_gate_reopens(tmp_path, store):
+    # M1.3c: no exception; the refusal is a recorded human decision and the gate pauses again
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
     config = {"configurable": {"thread_id": "bad"}}
     ds = _dataset(_two_group_df(np.random.default_rng(43)), tmp_path, store, "bad")
     app.invoke({"request_text": "x", "session_id": "session-abc", "dataset": ds}, config, interrupt_after=STOP)
-    with pytest.raises(ValueError, match=re.escape("Cannot change step(s) ['clean'] here.")):
-        app.invoke(Command(resume={"action": "approve", "run": {"clean": False}}), config, interrupt_after=STOP)
+    result = app.invoke(Command(resume={"action": "approve", "run": {"clean": False}}), config, interrupt_after=STOP)
+    assert app.get_state(config).next == ("stage_plan_gate",)
     values = app.get_state(config).values
-    assert STAGE_PLAN_APPROVAL_POINT not in _points(values)
+    (record,) = [e for e in values["decision_log"] if e["decision_point"] == STAGE_PLAN_APPROVAL_POINT]
+    assert (record["chosen"], record["decided_by"]) == ("refused", "human")
     assert "approval" not in values["stage_plan"]
+    assert [v["rule"] for v in result["__interrupt__"][0].value["refused"]["refusals"]] == ["not_applicable"]
 
 
 def test_reject_ends_the_run(tmp_path, store):
@@ -411,6 +415,7 @@ def test_graph_edges(tmp_path):
         assert edges[("plan_stages", target)] is True, target
     assert edges[("stage_plan_gate", "wrangle_propose")] is True
     assert edges[("stage_plan_gate", "__end__")] is True
+    assert edges[("stage_plan_gate", "stage_plan_gate")] is True  # M1.3c: a refused choice re-opens the gate
 
 
 def test_registry():

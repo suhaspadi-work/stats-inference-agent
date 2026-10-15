@@ -80,8 +80,16 @@ STAGE_PLAN_APPROVAL_POINT = "planner.stage_plan_approval"
 _STATUS_CHOICE = {"approved": "approve", "approved_with_changes": "approve_with_changes", "rejected": "reject"}
 
 
-def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dict, status: str) -> DecisionRecord:
-    """The human's answer at the stage-plan gate (M1.3a). plan_before is the plan as shown."""
+def _verdict_reasons(refusals) -> str:
+    return "; ".join(f"{v.get('step') or v['rule']}: {v['reason']}" for v in refusals)
+
+
+def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dict, status: str,
+                               refusal: dict = None) -> DecisionRecord:
+    """
+    The human's answer at the stage-plan gate (M1.3a). plan_before is the plan as shown. status "refused"
+    (M1.3c) records run choices that break a rule; refusal is {"submitted", "refusals", "attempt"}.
+    """
     decision = decision or {}
     action = decision.get("action")
     steps = plan_steps(plan_before)
@@ -91,7 +99,16 @@ def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dic
     adjustable = adjustable_steps(plan_before)
     overridden, original = False, None
 
-    if action not in ("approve", "reject"):
+    extra_candidates, extra_evidence = (), {}
+    if status == "refused":
+        chosen, decided_by = "refused", "human"
+        reasons = _verdict_reasons(refusal["refusals"])
+        rationale = "the chosen run flags do not fit the rules: " + reasons
+        extra_candidates = (Candidate(option="approve with your choices", eligible=False, reason=reasons),)
+        submitted = decision.get("run")
+        extra_evidence = {"submitted": dict(submitted) if isinstance(submitted, dict) else {},
+                          "refusals": list(refusal["refusals"]), "attempt": refusal["attempt"]}
+    elif action not in ("approve", "reject"):
         chosen, decided_by = "approve", "code_rule"
         rationale = f"action '{action}' is not one of approve or reject; the node approves the plan as proposed (G36)"
     elif status == "rejected":
@@ -113,6 +130,7 @@ def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dic
             Candidate(option="approve", eligible=True, reason="run the steps as proposed"),
             Candidate(option="approve_with_changes", eligible=bool(adjustable), reason="switch describe on or off"),
             Candidate(option="reject", eligible=True, reason="stop before any cleaning; the run ends"),
+            *extra_candidates,
         ),
         rationale=str(rationale),
         evidence={
@@ -123,5 +141,6 @@ def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dic
             "adjustable_steps": adjustable,
             "exploratory_offers": [s["step"] for s in steps if s["state"] == "offered" and s["exploratory"]],
             "received_action": action,
+            **extra_evidence,
         },
     )

@@ -53,7 +53,7 @@ def test_approve():
         "plan_id": plan.id, "question_type": "two_group_comparison", "causal_status": "observational",
         "outcome_name": "total_spend", "outcome_type": "continuous", "predictors_before": ["region"],
         "method_at_approval": "welch_t_test", "selection_record_id": "sel-1",
-        "received_action": "approve", "frozen": True,
+        "received_action": "approve", "frozen": True, "reselects": False,  # M1.3c: reselects
     }
 
 
@@ -63,11 +63,11 @@ def test_edit():
     assert (r.chosen, r.decided_by) == ("edit", "human")
     assert r.overridden_by_human is True
     assert r.original_choice == "approve as drafted: predictors [region]"
-    assert r.rationale == "predictors edited before freezing"
+    assert r.rationale == "predictors edited before freezing; the method is selected again for the new predictors before the plan is frozen"  # M1.3c: the method is selected again
     assert r.evidence["predictors_before"] == ["region"]
     assert r.evidence["predictors_after"] == ["region", "plan_type"]
     assert r.evidence["predictors_record_id"] == "pred-2"
-    assert r.evidence["frozen"] is True
+    assert (r.evidence["frozen"], r.evidence["reselects"]) == (False, True)  # M1.3c: an edit re-selects, not freezes
 
 
 @pytest.mark.parametrize("decision, reason", [

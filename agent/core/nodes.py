@@ -35,7 +35,7 @@ from core.round_two import (
     MAX_OTHER_PREDICTORS, build_exploratory_plan, exploratory_offer, propose_exploratory_predictors,
     stage_gate_payload,
 )
-from core.predictor_rules import validate_predictor_choice
+from core.predictor_rules import validate_edit, validate_predictor_choice
 from core.round_records import round_start_record, stage_gate_record
 from core.routing import COMPARISON_TYPES
 from core.classification_records import (
@@ -45,12 +45,14 @@ from core.classification_records import (
 from core.decision_log import log_update
 from core.draft_plan_records import draft_plan_records, PREDICTORS_POINT
 from core.cleaning_records import scan_record, fix_record, approval_record, execution_record
-from core.freeze_records import plan_approval_record, edited_predictors_record
+from core.freeze_records import (
+    PLAN_APPROVAL_POINT, edited_predictors_record, plan_approval_record, refused_plan_approval_record,
+)
 from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
 from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
-from core.stage_plan_gate import apply_gate_decision, changed_steps, gate_needed, gate_payload, validate_run_overrides
+from core.stage_plan_gate import apply_gate_decision, changed_steps, check_run_overrides, gate_needed, gate_payload
 from core.describe_records import describe_execution_record
 
 CONFIDENCE_THRESHOLD = 0.6
@@ -167,11 +169,24 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         records = (stage_plan_record(plan, state["classification"], issues), *step_records(plan))
         # M1.3b: a new question on the same thread starts outside any exploratory round.
         update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, "stage_gate_refusal": None,
+                  "stage_plan_refusal": None, "plan_approval_refusal": None, "reselect_after_edit": None,
                   **log_update(*records)}
         if plan["status"] == "unsupported":
             update["clarification_needed"] = plan["message"]
         return update
     return plan_stages_node
+
+
+# Refusal loops (M1.3b step 2b, M1.3c). At the stage-plan gate, at the plan-approval edit and at the boundary
+# gate, a choice that breaks a rule is a recorded human decision ("refused") and the node returns normally; a
+# self-loop in the graph re-opens the same pause, which then shows the refusal. A node that raises loses the
+# records it would have returned (M0.2 step 13), so a refusal must never be an exception.
+
+def _refused_count(state: AgentState, point: str, after_points: tuple) -> int:
+    """Refused records of point since the last record of any of after_points (the current plan)."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") in after_points), default=-1)
+    return sum(1 for e in log[start + 1:] if e.get("decision_point") == point and e.get("chosen") == "refused")
 
 
 def route_after_plan_stages(state: AgentState) -> str:
@@ -188,28 +203,42 @@ def route_after_plan_stages(state: AgentState) -> str:
 def stage_plan_gate_node(state: AgentState) -> dict:
     """
     M1.3a: the user reviews the stage plan before anything is changed. interrupt() comes first, so the
-    resumed re-run has no side effect before it. Describe can be switched on or off; any other change is
-    refused with a ValueError before anything is recorded. Rejecting ends the run with the reason. The
-    approved run flags are written back into the stage plan, so route_after_cleaning acts on them.
+    resumed re-run has no side effect before it. Describe can be switched on or off; rejecting ends the run
+    with the reason. The approved run flags are written back into the stage plan, so route_after_cleaning
+    acts on them. M1.3c: run choices that break a rule are refused and recorded, and the gate re-opens.
     """
-    decision = interrupt(gate_payload(state["stage_plan"], state["request_text"])) or {}
+    decision = interrupt(gate_payload(state["stage_plan"], state["request_text"],
+                                      refused=state.get("stage_plan_refusal"))) or {}
     plan = state["stage_plan"]
     action = decision.get("action")
 
     if action == "reject":
         reason = decision.get("reason")
         record = stage_plan_approval_record(plan, decision, {}, "rejected")
-        return {"stage_plan": apply_gate_decision(plan, {}, "rejected", reason),
+        return {"stage_plan": apply_gate_decision(plan, {}, "rejected", reason), "stage_plan_refusal": None,
                 "clarification_needed": f"Stage plan rejected: {reason or 'no reason given'}", **log_update(record)}
 
     # An unrecognised action approves the plan as proposed (G36), so its run choices are not applied.
-    overrides = validate_run_overrides(plan, decision.get("run")) if action == "approve" else {}
+    overrides = {}
+    if action == "approve":
+        checked = check_run_overrides(plan, decision.get("run"))
+        if not checked["ok"]:
+            submitted = decision.get("run")
+            refusal = {"submitted": dict(submitted) if isinstance(submitted, dict) else {},
+                       "refusals": checked["refusals"],
+                       "attempt": 1 + _refused_count(state, "planner.stage_plan_approval", ("planner.stage_plan",))}
+            record = stage_plan_approval_record(plan, decision, {}, "refused", refusal=refusal)
+            return {"stage_plan_refusal": refusal, **log_update(record)}
+        overrides = checked["overrides"]
     status = "approved_with_changes" if changed_steps(plan, overrides) else "approved"
     record = stage_plan_approval_record(plan, decision, overrides, status)
-    return {"stage_plan": apply_gate_decision(plan, overrides, status), **log_update(record)}
+    return {"stage_plan": apply_gate_decision(plan, overrides, status), "stage_plan_refusal": None,
+            **log_update(record)}
 
 
 def route_after_stage_plan_gate(state: AgentState) -> str:
+    if state.get("stage_plan_refusal") is not None:
+        return "stage_plan_gate"
     if state["stage_plan"]["approval"]["status"] == "rejected":
         return END
     return "wrangle_propose"
@@ -532,69 +561,84 @@ def make_select_method_node(store: DatasetStore) -> Callable[[AgentState], dict]
                 ],
             })
         updated_plan = plan.record_method_decision(decision)
+        reselect = state.get("reselect_after_edit") is not None  # M1.3c: after an accepted edit at plan approval
+        extra = {"reselect_after_edit": None} if reselect else {}
         if capability.record is not None:
             result = capability.record(decision)
             records = result if isinstance(result, (tuple, list)) else (result,)
-            return {"plan": updated_plan, **log_update(*records)}
-        return {"plan": updated_plan}
+            if reselect:
+                records = tuple(replace(r, supersedes=_latest_record_id(state, r.decision_point)) for r in records)
+            return {"plan": updated_plan, **extra, **log_update(*records)}
+        return {"plan": updated_plan, **extra}
     return select_method_node
 
-def freeze_node(state: AgentState) -> dict:
+def make_freeze_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
-    The single most consequential interrupt in the system: nothing runs a
-    hypothesis test until a human has seen the actual plan and approved it.
-    This is freeze() from Phase 1 finally being gated by a real human
-    decision, not just a method call anyone could skip.
+    The single most consequential interrupt in the system: nothing runs a hypothesis test until a human has
+    seen the actual plan and approved it. M1.3c: an edit is checked against the predictor rules and re-routed
+    by code; a refused edit is recorded and the pause re-opens; an accepted edit is not frozen: the plan goes
+    back through select_method (new selection records supersede the old ones) and this pause shows the
+    recomputed method.
     """
-    plan = state["plan"]
+    def freeze_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        selection = next((e for e in reversed(state.get("decision_log") or [])
+                          if e.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)), None)
 
-    decision = interrupt({
-        "type": "plan_approval",
-        "question": "Review this analysis plan before it is frozen and executed.",
-        "request_text": plan.request_text,
-        "question_type": plan.question_type.value,
-        "causal_status": plan.causal_status.value,
-        "outcome_name": plan.outcome_name,
-        "outcome_type": plan.outcome_type.value,
-        "candidate_predictors": list(plan.candidate_predictors or ()),
-        "classification_rationale": plan.classification_decision.rationale if plan.classification_decision else None,
-        "allowed_decisions": ["approve", "edit", "reject"],
-    })
+        decision = interrupt({
+            "type": "plan_approval",
+            "question": "Review this analysis plan before it is frozen and executed.",
+            "request_text": plan.request_text,
+            "question_type": plan.question_type.value,
+            "causal_status": plan.causal_status.value,
+            "outcome_name": plan.outcome_name,
+            "outcome_type": plan.outcome_type.value,
+            "candidate_predictors": list(plan.candidate_predictors or ()),
+            "classification_rationale": plan.classification_decision.rationale if plan.classification_decision else None,
+            "allowed_decisions": ["approve", "edit", "reject"],
+            "refused": state.get("plan_approval_refusal"),
+            "method": plan.primary_method,
+            # True when the method shown was selected again after an accepted edit (its record supersedes one)
+            "reselected": bool(selection and selection.get("supersedes")),
+        })
 
-    action = decision.get("action")
-    selection_record_id = next(
-        (e.get("id") for e in reversed(state.get("decision_log") or [])
-         if e.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)),
-        None,
-    )
+        action = decision.get("action")
+        selection_record_id = selection.get("id") if selection else None
+        cleared = {"plan_approval_refusal": None, "reselect_after_edit": None}
 
-    if action == "reject":
-        # A rejected plan is never frozen -- the graph should route to a
-        # clean stop, not silently proceed. We signal this the same way
-        # classify_node signals "needs clarification": a distinct state key.
-        approval = plan_approval_record(plan, decision, selection_record_id)
-        return {"plan": plan, "clarification_needed": f"Plan rejected: {decision.get('reason', 'no reason given')}",
-                **log_update(approval)}
+        if action == "reject":
+            # A rejected plan is never frozen -- the graph should route to a
+            # clean stop, not silently proceed. We signal this the same way
+            # classify_node signals "needs clarification": a distinct state key.
+            approval = plan_approval_record(plan, decision, selection_record_id)
+            return {"plan": plan, "clarification_needed": f"Plan rejected: {decision.get('reason', 'no reason given')}",
+                    **cleared, **log_update(approval)}
 
-    if action == "edit":
-        new_predictors = tuple(decision.get("candidate_predictors", plan.candidate_predictors or ()))
-        valid_names = {c.name for c in state["profile"].columns}
-        invalid = [name for name in new_predictors if name not in valid_names]
-        if invalid:
-            raise ValueError(
-                f"Edited predictor(s) not present in the dataset: {invalid}. "
-                f"Available columns: {sorted(valid_names)}"
-            )
-        edited = edited_predictors_record(plan, new_predictors, state["profile"],
-                                          _latest_record_id(state, PREDICTORS_POINT), selection_record_id)
-        approval = plan_approval_record(plan, decision, selection_record_id, predictors_record_id=edited.id)
-        records = (edited, approval)
-        plan = plan.refine(candidate_predictors=new_predictors)
-    else:
+        if action == "edit":
+            # A fresh profile of the (cleaned) dataset, so the identifier and level rules see the data as it is.
+            profile = profile_dataset(state["dataset"], store=store)
+            checked = validate_edit(profile, plan, decision.get("candidate_predictors", plan.candidate_predictors or ()),
+                                    plan.outcome_name)
+            if not checked["ok"]:
+                submitted = decision.get("candidate_predictors")
+                attempt = 1 + _refused_count(state, PLAN_APPROVAL_POINT, ("planner.stage_plan", "planner.round_start"))
+                refusal = {"submitted": list(submitted) if isinstance(submitted, (list, tuple)) else [],
+                           "refusals": checked["refusals"], "attempt": attempt}
+                record = refused_plan_approval_record(plan, decision, refusal, selection_record_id)
+                return {"plan_approval_refusal": refusal, **log_update(record)}
+            new_predictors = tuple(checked["predictors"])
+            route = checked["route"]
+            edited = edited_predictors_record(plan, new_predictors, profile,
+                                              _latest_record_id(state, PREDICTORS_POINT), selection_record_id)
+            approval = plan_approval_record(plan, decision, selection_record_id, predictors_record_id=edited.id)
+            refined = plan.refine(candidate_predictors=new_predictors,
+                                  question_type=QuestionType(route["question_type"]), method_decisions=())
+            return {"plan": refined, "route": route, "plan_approval_refusal": None,
+                    "reselect_after_edit": {"supersedes": selection_record_id}, **log_update(edited, approval)}
+
         records = (plan_approval_record(plan, decision, selection_record_id),)
-
-    frozen_plan = plan.freeze()
-    return {"plan": frozen_plan, **log_update(*records)}
+        return {"plan": plan.freeze(), **cleared, **log_update(*records)}
+    return freeze_node
 
 
 def make_execute_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -720,10 +764,7 @@ def route_after_report(state: AgentState) -> str:
 
 def _refused_attempts(state: AgentState) -> int:
     """Refused stage-gate answers since the last stage plan (the current question on this thread)."""
-    log = state.get("decision_log") or []
-    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
-    return sum(1 for e in log[start + 1:]
-               if e.get("decision_point") == "planner.stage_gate" and e.get("chosen") == "refused")
+    return _refused_count(state, "planner.stage_gate", ("planner.stage_plan",))
 
 
 def make_stage_gate_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -793,5 +834,6 @@ def make_start_round_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         if route["status"] != "ok":
             raise ValueError(f"The exploratory round cannot run: {route['reason']}")
         record = round_start_record(plan2, profile, proposal, from_round=len(state.get("rounds") or []))
-        return {"plan": plan2, "route": route, "profile": profile, "exploratory_round": True, **log_update(record)}
+        return {"plan": plan2, "route": route, "profile": profile, "exploratory_round": True,
+                "plan_approval_refusal": None, "reselect_after_edit": None, **log_update(record)}
     return start_round_node

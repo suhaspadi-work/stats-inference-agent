@@ -379,6 +379,7 @@ def scenario_runs(tmp_path_factory):
                             draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
     runs["S2"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s2"), "Region or channel?"), "s2", [
         {"action": "edit", "candidate_predictors": ["channel"]},
+        {"action": "approve"},  # M1.3c: an accepted edit re-selects the method and pauses at plan approval again
     ])
 
     # S3: two-group, the plan is rejected and the run ends at the freeze.
@@ -471,7 +472,8 @@ def emitted_by_node(scenario_runs):
 GATE = "stage_plan_approval"  # M1.3a: every comparison and driver run pauses at the stage-plan gate first
 EXPECTED_PAUSES = {
     "S1": ["clarification_needed", GATE, "wrangling_approval", "plan_approval"],
-    "S2": [GATE, "plan_approval"], "S3": [GATE, "plan_approval"], "S4": [GATE, "plan_approval"],
+    "S2": [GATE, "plan_approval", "plan_approval"],  # M1.3c: the accepted edit re-selects and pauses again
+    "S3": [GATE, "plan_approval"], "S4": [GATE, "plan_approval"],
     "S5": [GATE, "plan_approval"], "S6": [GATE, "plan_approval"], "S7": [], "S8": [], "S9": [GATE, "plan_approval"],
     "S10": [GATE],
     "S11": [GATE, "plan_approval", "stage_gate", "plan_approval"],  # M1.3b: the exploratory round

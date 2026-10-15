@@ -373,21 +373,23 @@ def test_run_then_reject_round_two(fake_model, tmp_path, store):
 def test_run_then_edit_round_two_predictors(fake_model, tmp_path, store):
     """Edit that keeps the same text predictors (region and tier), so the selected encodings still match."""
     edit = {"action": "edit", "candidate_predictors": ["region", "tier"]}
-    _, values, _, _ = _run(store, tmp_path, _frame(), [APPROVE, edit], stage_gate={"action": "run"})
+    # M1.3c: the accepted edit re-selects the method, so round two pauses at plan approval a second time
+    _, values, pauses, _ = _run(store, tmp_path, _frame(), [APPROVE, edit, APPROVE], stage_gate={"action": "run"})
+    assert pauses == [GATE, "plan_approval", "stage_gate", "plan_approval", "plan_approval"]
     assert list(values["plan"].candidate_predictors) == ["region", "tier"]
     edits = [e for e in _records(values, "planner.predictors") if e["decided_by"] == "human"]
     assert len(edits) == 1 and edits[0]["chosen"] == "region, tier"
     assert len(values["rounds"]) == 2 and values["rounds"][1]["plan"].candidate_predictors[-1] == "tier"
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError,
-                   reason="pre-existing (G5): removing a text predictor at plan approval keeps the encodings chosen "
-                          "for the old predictors, and execute_regression refuses them; the same happens in a "
-                          "round-one driver run")
 def test_run_then_edit_round_two_predictors_removing_a_text_column(fake_model, tmp_path, store):
+    """G53 (fixed in M1.3c): the accepted edit re-selects the method, so the encodings match the new predictors."""
     edit = {"action": "edit", "candidate_predictors": ["region", "tenure"]}
-    _, values, _, _ = _run(store, tmp_path, _frame(), [APPROVE, edit], stage_gate={"action": "run"})
+    _, values, _, next_nodes = _run(store, tmp_path, _frame(), [APPROVE, edit, APPROVE], stage_gate={"action": "run"})
+    assert next_nodes == () and len(values["rounds"]) == 2
     assert list(values["plan"].candidate_predictors) == ["region", "tenure"]
+    round_two = _records(values, "stage3.regression_method")
+    assert len(round_two) == 2 and round_two[1]["supersedes"] == round_two[0]["id"]
 
 
 def test_not_offered_without_a_usable_extra_predictor(fake_model, tmp_path, store):
@@ -668,7 +670,8 @@ def test_the_cap(fake_model, tmp_path, store):
     (refused,) = _gate_records(values)
     assert refused["evidence"]["refusals"] == [{"column": None, "rule": "cap",
                                                 "reason": "beyond the limit of 5 other predictors",
-                                                "explanation": "you chose 7 other predictors; the limit is 5; remove 2"}]
+                                                "explanation": "you chose 7 other predictors; the limit is 5; remove 2",
+                                                "evidence": {"chosen": 7, "limit": 5}}]  # M1.3c: evidence
 
 
 def test_a_column_left_out_by_the_cap_can_be_swapped_in(fake_model, tmp_path, store):

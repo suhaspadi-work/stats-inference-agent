@@ -31,19 +31,22 @@ def test_unknown_column():
     v = check_predictor(PROFILE, "colour", "total_spend")
     names = sorted(c.name for c in PROFILE.columns)
     assert v == {"column": "colour", "rule": "unknown_column", "reason": "not a column in the dataset",
-                 "explanation": f"'colour' is not a column in this dataset. Available columns: {names}."}
+                 "explanation": f"'colour' is not a column in this dataset. Available columns: {names}.",
+                 "evidence": {"available_columns": names}}  # M1.3c: every verdict carries its evidence
 
 
 def test_outcome():
     assert check_predictor(PROFILE, "total_spend", "total_spend") == {
         "column": "total_spend", "rule": "outcome", "reason": "the outcome cannot also be a predictor",
-        "explanation": "it is the outcome being explained, so it cannot also be used to explain itself"}
+        "explanation": "it is the outcome being explained, so it cannot also be used to explain itself",
+        "evidence": {"dtype": "float64", "distinct_count": 100, "row_count": 100, "missing_count": 0}}  # M1.3c: every verdict carries its evidence
 
 
 def test_constant():
     assert check_predictor(PROFILE, "flag", "total_spend") == {
         "column": "flag", "rule": "constant", "reason": "constant or empty",
-        "explanation": "a column with a single value (or no values) cannot explain any difference in the outcome"}
+        "explanation": "a column with a single value (or no values) cannot explain any difference in the outcome",
+        "evidence": {"dtype": "float64", "distinct_count": 1, "row_count": 100, "missing_count": 0}}  # M1.3c: every verdict carries its evidence
 
 
 @pytest.mark.parametrize("name, dtype, distinct, missing", [("customer_id", "int64", 100, 0),
@@ -55,7 +58,8 @@ def test_identifier_like(name, dtype, distinct, missing):
     assert check_predictor(profile, name, "total_spend") == {
         "column": name, "rule": "identifier_like", "reason": "identifier-like: every value is distinct",
         "explanation": "every row has its own value in this column, so a model would fit each row exactly and tell "
-                       "you nothing that carries over to other data"}
+                       "you nothing that carries over to other data",
+        "evidence": {"dtype": dtype, "distinct_count": distinct, "row_count": 100, "missing_count": missing}}  # M1.3c: every verdict carries its evidence
 
 
 def test_an_all_distinct_float_column_fits():
@@ -66,7 +70,8 @@ def test_too_many_levels():
     assert check_predictor(PROFILE, "city", "total_spend") == {
         "column": "city", "rule": "too_many_levels", "reason": "text column with more than 10 distinct values",
         "explanation": "each of its 11 levels becomes its own coefficient; with more than 10 levels the model "
-                       "becomes hard to read and unstable"}
+                       "becomes hard to read and unstable",
+        "evidence": {"dtype": "object", "distinct_count": 11, "row_count": 100, "missing_count": 0}}  # M1.3c: every verdict carries its evidence
     assert check_predictor(PROFILE, "state", "total_spend") is None
 
 
@@ -106,13 +111,13 @@ def test_group_missing():
     (v,) = _validate(["tenure"])["refusals"]
     assert v == {"column": "region", "rule": "group_missing", "reason": "the grouping column must stay",
                  "explanation": "the grouping column of the main analysis must stay in the model, because the "
-                                "exploratory model adjusts that comparison"}
+                                "exploratory model adjusts that comparison", "evidence": {"group_column": "region"}}  # M1.3c: every verdict carries its evidence
 
 
 def test_a_duplicate_is_reported_once():
     refusals = _validate(["region", "tenure", "tenure", "tenure", "tier"])["refusals"]
     assert refusals == [{"column": "tenure", "rule": "duplicate", "reason": "listed twice",
-                         "explanation": "it was listed more than once"}]
+                         "explanation": "it was listed more than once", "evidence": {"count": 3}}]  # M1.3c: every verdict carries its evidence
 
 
 def test_cap():
@@ -120,7 +125,8 @@ def test_cap():
                        *[(f"x{i}", "float64", 50, 0) for i in range(8)])
     result = validate_predictor_choice(profile, ["region", *[f"x{i}" for i in range(7)]], "total_spend", "region", 5)
     assert result["refusals"] == [{"column": None, "rule": "cap", "reason": "beyond the limit of 5 other predictors",
-                                   "explanation": "you chose 7 other predictors; the limit is 5; remove 2"}]
+                                   "explanation": "you chose 7 other predictors; the limit is 5; remove 2",
+                                   "evidence": {"chosen": 7, "limit": 5}}]  # M1.3c: every verdict carries its evidence
 
 
 def test_the_cap_counts_distinct_names():
@@ -131,7 +137,7 @@ def test_the_cap_counts_distinct_names():
 def test_none_chosen():
     assert _validate(["region"])["refusals"] == [{
         "column": None, "rule": "none_chosen", "reason": "no other predictor",
-        "explanation": "choose at least one other predictor besides the grouping column"}]
+        "explanation": "choose at least one other predictor besides the grouping column", "evidence": {}}]  # M1.3c: every verdict carries its evidence
 
 
 @pytest.mark.parametrize("chosen", ["region", None, {"region": True}, ["region", 3]],
@@ -139,7 +145,7 @@ def test_none_chosen():
 def test_not_a_list(chosen):
     assert _validate(chosen) == {"ok": False, "predictors": [], "refusals": [{
         "column": None, "rule": "not_a_list", "reason": "predictors must be a list of column names",
-        "explanation": "predictors must be a list of column names"}]}
+        "explanation": "predictors must be a list of column names", "evidence": {}}]}  # M1.3c: every verdict carries its evidence
 
 
 def test_the_group_column_is_never_checked_against_the_rules():

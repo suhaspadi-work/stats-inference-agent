@@ -71,3 +71,6 @@ class AgentState(TypedDict, total=False):
     # set by stage_gate when the user's predictors break a rule: {"submitted", "refusals", "attempt"}; the gate
     # re-opens and shows it. None otherwise (M1.3b step 2b).
     stage_gate_refusal: Optional[dict]
+    stage_plan_refusal: Optional[dict]  # run choices refused at the stage-plan gate, shown when it re-opens (M1.3c)
+    plan_approval_refusal: Optional[dict]  # an edit refused at plan approval, shown when the pause re-opens (M1.3c)
+    reselect_after_edit: Optional[dict]  # set by an accepted edit: select_method runs again, then freeze (M1.3c)

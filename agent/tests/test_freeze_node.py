@@ -1,3 +1,8 @@
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import pytest
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
@@ -8,7 +13,9 @@ from core.classifier import _DraftPlanOut
 from core.decision_log import log_update
 from core.draft_plan_records import draft_plan_records
 from core.model_safe_view import ColumnSummary, ModelSafeView
-from core.nodes import freeze_node
+from core.dataset import LocalDiskStore
+from core.ingestion import load_dataset
+from core.nodes import make_freeze_node
 from core.plan import AnalysisPlan, MethodDecision, AlternativeConsidered, QuestionType, CausalStatus, OutcomeType
 from core.selection_records import two_group_selection_record
 
@@ -28,9 +35,19 @@ def make_test_plan():
     return plan.record_method_decision(decision)
 
 
+# M1.3c: freeze is make_freeze_node(store), and an edit re-profiles the real dataset, so these tests carry a
+# small dataset with the same columns as the hand-made profile (region and plan_type with 2 levels each).
+_TMP = Path(tempfile.mkdtemp())
+STORE = LocalDiskStore(base_dir=_TMP / "store")
+_rng = np.random.default_rng(5)
+pd.DataFrame({"region": ["East", "West"] * 50, "plan_type": ["basic", "pro"] * 25 + ["pro", "basic"] * 25,
+              "total_spend": _rng.normal(50, 10, 100)}).to_csv(_TMP / "freeze.csv", index=False)
+DATASET = load_dataset(_TMP / "freeze.csv", session_id="session-abc", name="freeze", store=STORE)
+
+
 def build_freeze_graph():
     graph = StateGraph(AgentState)
-    graph.add_node("freeze", freeze_node)
+    graph.add_node("freeze", make_freeze_node(STORE))
     graph.add_edge(START, "freeze")
     graph.add_edge("freeze", END)
     return graph.compile(checkpointer=InMemorySaver())
@@ -79,14 +96,19 @@ def test_edit_changes_predictors_before_freezing():
         ),
     )
     app.invoke(
-        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile}, config,
+        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile,
+         "dataset": DATASET}, config,
     )
 
+    # M1.3c: an accepted edit is not frozen; the plan is refined, re-routed and goes back through select_method
+    # (two grouping columns would now be refused by the re-route, so the edit names the one other column)
     result = app.invoke(
-        Command(resume={"action": "edit", "candidate_predictors": ["region", "plan_type"]}), config,
+        Command(resume={"action": "edit", "candidate_predictors": ["plan_type"]}), config,
     )
-    assert result["plan"].status.value == "frozen"
-    assert list(result["plan"].candidate_predictors) == ["region", "plan_type"]
+    assert result["plan"].status.value == "refined"
+    assert list(result["plan"].candidate_predictors) == ["plan_type"]
+    assert result["plan"].method_decisions == [] or result["plan"].method_decisions == ()
+    assert result["route"]["capability"] == "two_group" and result["reselect_after_edit"] is not None
 
 
 def test_reject_never_freezes_and_signals_clarification_needed():
@@ -119,13 +141,17 @@ def test_edit_rejects_a_nonexistent_predictor_column():
         ),
     )
     app.invoke(
-        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile}, config,
+        {"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc", "profile": profile,
+         "dataset": DATASET}, config,
     )
 
-    with pytest.raises(ValueError, match="not present in the dataset"):
-        app.invoke(
-            Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config,
-        )
+    # M1.3c: the edit is refused and recorded (no exception); the plan is not frozen
+    result = app.invoke(
+        Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config,
+    )
+    assert [v["rule"] for v in result["plan_approval_refusal"]["refusals"]] == ["unknown_column"]
+    assert result["decision_log"][-1]["chosen"] == "refused"
+    assert result["plan"].status.value != "frozen"
 
 
 # --- plan approval decision records (M0.2 step 9) ---------------------------------
@@ -164,7 +190,7 @@ def _pause(thread, with_selection=True):
     config = {"configurable": {"thread_id": thread}}
     seed = _seed_log(with_selection)
     paused = app.invoke({"plan": make_test_plan(), "request_text": "x", "session_id": "session-abc",
-                         "profile": _profile(), "decision_log": seed}, config)
+                         "profile": _profile(), "decision_log": seed, "dataset": DATASET}, config)  # M1.3c: dataset
     return app, config, seed, paused
 
 
@@ -185,20 +211,22 @@ def test_approve_logs_one_plan_approval_record():
 
 def test_edit_logs_predictors_then_approval():
     app, config, seed, _ = _pause("rec-edit")
-    result = app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["region", "plan_type"]}), config)
+    # M1.3c: a single grouping column (two would be refused by the re-route)
+    result = app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["plan_type"]}), config)
     predictors, approval = _new_records(result, seed)
     assert (predictors["decision_point"], approval["decision_point"]) == ("planner.predictors", "planner.plan_approval")
     assert predictors["supersedes"] == seed[0]["id"]
     assert predictors["decided_by"] == "human" and predictors["overridden_by_human"] is True
     assert predictors["original_choice"] == "region"
-    assert predictors["chosen"] == "region, plan_type"
+    assert predictors["chosen"] == "plan_type"
     assert predictors["evidence"]["predictors_before"] == ["region"]
-    assert predictors["evidence"]["predictors_after"] == ["region", "plan_type"]
+    assert predictors["evidence"]["predictors_after"] == ["plan_type"]
     assert predictors["evidence"]["selection_record_id"] == seed[1]["id"]
     assert approval["chosen"] == "edit"
     assert approval["evidence"]["predictors_record_id"] == predictors["id"]
     assert approval["original_choice"] == "approve as drafted: predictors [region]"
-    assert list(result["plan"].candidate_predictors) == ["region", "plan_type"]
+    assert list(result["plan"].candidate_predictors) == ["plan_type"]
+    assert (approval["evidence"]["frozen"], approval["evidence"]["reselects"]) == (False, True)  # M1.3c
 
 
 def test_reject_logs_one_record_and_does_not_freeze():
@@ -236,11 +264,13 @@ def test_empty_resume_does_not_resume_the_node():
     assert app.get_state(config).next == ("freeze",)
 
 
-def test_invalid_edit_raises_and_leaves_no_records():
+def test_invalid_edit_is_refused_and_recorded():
+    # M1.3c: a refused edit is a recorded human decision, not an exception, and it is saved at once
     app, config, seed, _ = _pause("rec-invalid")
-    with pytest.raises(ValueError, match="not present in the dataset"):
-        app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config)
-    assert app.get_state(config).values["decision_log"] == seed
+    app.invoke(Command(resume={"action": "edit", "candidate_predictors": ["nonexistent_column_xyz"]}), config)
+    new = app.get_state(config).values["decision_log"][len(seed):]
+    assert [(r["decision_point"], r["chosen"], r["decided_by"]) for r in new] == [
+        ("planner.plan_approval", "refused", "human")]
 
 
 def test_no_earlier_selection_record_gives_none():
@@ -264,6 +294,8 @@ def test_pause_payload_keys_unchanged():
     assert set(payload) == {
         "type", "question", "request_text", "question_type", "causal_status", "outcome_name",
         "outcome_type", "candidate_predictors", "classification_rationale", "allowed_decisions",
+        "refused", "method", "reselected",  # M1.3c: the previous refusal, the method shown, and whether re-selected
     }
+    assert (payload["refused"], payload["method"], payload["reselected"]) == (None, "welch_t_test", False)
     assert payload["type"] == "plan_approval"
     assert payload["question"] == "Review this analysis plan before it is frozen and executed."
