@@ -277,7 +277,8 @@ def test_plan_stages_node(tmp_path, store):
         "planner.stage_plan", "planner.step.clean", "planner.step.describe", "planner.step.inference",
         "planner.step.modeling"]
     assert "clarification_needed" not in update
-    assert set(update) == {"stage_plan", "decision_log"}
+    assert set(update) == {"stage_plan", "decision_log", "exploratory_round", "next_round"}  # M1.3b: the round flags are reset
+    assert (update["exploratory_round"], update["next_round"]) == (False, None)
     assert {k: state[k] for k in ("dataset", "profile", "classification")} == before
     assert store.read(state["dataset"].storage_key).equals(stored)
 

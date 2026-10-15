@@ -10,6 +10,7 @@ from core.nodes import (
     make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
     make_describe_node, route_after_cleaning,
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
+    route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node,
     make_draft_plan_node,
     make_select_method_node, freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
@@ -65,7 +66,9 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> freeze (approval interrupt; routes to execute or END)
       -> execute
       -> report
-      -> END
+         -> M1.3b: after a comparison whose stage plan offered modeling: stage_gate (run or skip the exploratory round)
+         -> if run: start_round (an exploratory regression plan) -> select_method -> freeze -> execute -> report
+      -> END (after the exploratory round's report, or when nothing is offered)
 
     classify_fn, draft_fn and propose_fn exist so tests can run the real graph without the model;
     left as None, each node uses its real model call. When event_log_dir is given, every node's new
@@ -104,6 +107,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     add_node("freeze", freeze_node)
     add_node("execute", make_execute_node(store))
     add_node("report", make_report_node())
+    add_node("stage_gate", make_stage_gate_node(store))
+    add_node("start_round", make_start_round_node(store))
 
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_after_classify, {"profile": "profile", "clarify": "clarify"})
@@ -124,6 +129,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_edge("eda", "report")
     graph.add_conditional_edges("freeze", route_after_freeze, {"execute": "execute", END: END})
     graph.add_edge("execute", "report")
-    graph.add_edge("report", END)
+    graph.add_conditional_edges("report", route_after_report, {"stage_gate": "stage_gate", END: END})
+    graph.add_conditional_edges("stage_gate", route_after_stage_gate, {"start_round": "start_round", END: END})
+    graph.add_edge("start_round", "select_method")
 
     return graph.compile(checkpointer=checkpointer if checkpointer is not None else make_checkpointer())

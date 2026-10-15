@@ -13,7 +13,7 @@ from core.stage_plan import plan_steps
 # Inference and modeling offers become selectable in M1.3b (after the main analysis).
 ADJUSTABLE_STEPS = ("describe",)
 APPROVAL_STATUSES = ("approved", "approved_with_changes", "rejected")
-_NOT_SELECTABLE_NOTE = "offered after the main analysis; not selectable yet"
+_NOT_SELECTABLE_NOTE = "you will be asked after the main analysis, if the data allows it"
 
 
 def gate_needed(plan: dict) -> bool:

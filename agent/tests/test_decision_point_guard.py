@@ -24,6 +24,7 @@ import core.describe_records as describe_records
 import core.draft_plan_records as draft_plan_records
 import core.execution_records as execution_records
 import core.freeze_records as freeze_records
+import core.round_records as round_records
 import core.routing_records as routing_records
 import core.selection_records as selection_records
 import core.stage_plan_records as stage_plan_records
@@ -39,7 +40,7 @@ from core.ingestion import load_dataset
 from core.plan import CausalStatus, ClassificationDecision, OutcomeType, QuestionType
 
 RECORD_MODULES = (classification_records, cleaning_records, describe_records, draft_plan_records, execution_records,
-                  freeze_records, routing_records, selection_records, stage_plan_records)
+                  freeze_records, round_records, routing_records, selection_records, stage_plan_records)
 POINT_PREFIXES = ("intake.", "planner.", "stage1.", "stage2.", "stage3.")
 
 
@@ -170,9 +171,10 @@ def test_every_point_uses_a_known_prefix():
 
 def test_default_graph_has_the_same_nodes(tmp_path):
     nodes = set(build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes) - {"__start__", "__end__"}
-    # M1.1: plan_stages; M1.2: describe; M1.3a: stage_plan_gate after plan_stages
+    # M1.1: plan_stages; M1.2: describe; M1.3a: stage_plan_gate; M1.3b: stage_gate and start_round after report
     assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "stage_plan_gate", "wrangle_propose",
-                     "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report"}
+                     "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report",
+                     "stage_gate", "start_round"}
 
 
 # ------------------------------------------------------------------ negative tests
@@ -305,17 +307,18 @@ def _with_duplicate(df):
 
 # ------------------------------------------------------------------ driver
 
-def _drive(app, state, thread, resumes, emitted_by_node, gate=None):
+def _drive(app, state, thread, resumes, emitted_by_node, gate=None, stage_gate=None, stop=("execute", "eda")):
     """
     Run to the end or to the stop after execute/eda, resuming each pause with the next value in order.
     Streams in "updates" mode so each node's own records are seen: an event {node: update} whose update
     holds "decision_log" is that node's records, merged into emitted_by_node. A dynamic pause arrives as a
     non-empty "__interrupt__" tuple; the static stop after execute/eda arrives as an empty one.
     M1.3a: a stage_plan_approval pause is answered with gate (default {"action": "approve"}) without
-    using a value from resumes; it is still recorded in the returned pauses.
+    using a value from resumes; it is still recorded in the returned pauses. M1.3b: a stage_gate pause is
+    answered the same way with stage_gate (default {"action": "skip"}); stop=() runs past the report.
     """
     config = {"configurable": {"thread_id": thread}}
-    stop = ["execute", "eda"]
+    stop = list(stop)
 
     def run(graph_input):
         pause = None
@@ -329,12 +332,16 @@ def _drive(app, state, thread, resumes, emitted_by_node, gate=None):
         return pause
 
     gate = {"action": "approve"} if gate is None else gate
+    stage_gate = {"action": "skip"} if stage_gate is None else stage_gate
     queue, pauses = list(resumes), []
     pause = run(state)
     while pause is not None:
         pauses.append(pause)
         if pause == "stage_plan_approval":
             pause = run(Command(resume=gate))
+            continue
+        if pause == "stage_gate":
+            pause = run(Command(resume=stage_gate))
             continue
         assert queue, f"paused at {pause} with no resume value left"
         pause = run(Command(resume=queue.pop(0)))
@@ -350,8 +357,8 @@ def scenario_runs(tmp_path_factory):
     rng = np.random.default_rng(7)
     runs, emitted = {}, {}
 
-    def drive(app, state, thread, resumes):
-        return _drive(app, state, thread, resumes, emitted)
+    def drive(app, state, thread, resumes, **kwargs):
+        return _drive(app, state, thread, resumes, emitted, **kwargs)
 
     def start(ds, request, **extra):
         return {"request_text": request, "session_id": "session-abc", "dataset": ds, **extra}
@@ -434,6 +441,18 @@ def scenario_runs(tmp_path_factory):
                             draft_fn=binary_draft, propose_fn=must_not_propose)
     runs["S10"] = drive(app, start(_dataset(binary, tmp, store, "s10"), "Did West convert more?"), "s10", [])
 
+    # S11: two-group run to the end; the boundary gate is answered "run", so an exploratory regression follows
+    # (M1.3b). The reports need a chat model: the fixture is module-scoped, so the conftest guard is not active
+    # yet, and the fake is patched in here.
+    from tests.test_prompt_canaries import FakeChat
+    import core.report as report_module
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(report_module, "init_chat_model", lambda *a, **k: FakeChat([], {}))
+        app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                                draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
+        runs["S11"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s11"), "Did West spend more?"), "s11",
+                            [{"action": "approve"}, {"action": "approve"}], stage_gate={"action": "run"}, stop=())
+
     return runs, emitted
 
 
@@ -455,8 +474,9 @@ EXPECTED_PAUSES = {
     "S2": [GATE, "plan_approval"], "S3": [GATE, "plan_approval"], "S4": [GATE, "plan_approval"],
     "S5": [GATE, "plan_approval"], "S6": [GATE, "plan_approval"], "S7": [], "S8": [], "S9": [GATE, "plan_approval"],
     "S10": [GATE],
+    "S11": [GATE, "plan_approval", "stage_gate", "plan_approval"],  # M1.3b: the exploratory round
 }
-ENDS_WITHOUT_STOP = {"S3", "S8", "S10"}  # runs that end at END rather than at the stop before report
+ENDS_WITHOUT_STOP = {"S3", "S8", "S10", "S11"}  # runs that end at END rather than at the stop before report
 
 
 def test_each_scenario_pauses_in_order_and_stops_where_expected(scenario_logs):
@@ -524,5 +544,8 @@ def test_scenario_specifics(scenario_logs):
     # M1.2: the describe step runs after cleaning (S1) and when there is nothing to clean (S2), not for S7
     assert "stage1.describe.execution" in points("S1") and "stage1.describe.execution" in points("S2")
     assert "stage1.describe.execution" not in points("S7")
+    # M1.3b: S11 runs the exploratory round
+    assert "planner.stage_gate" in points("S11") and "planner.round_start" in points("S11")
+    assert len(scenario_logs["S11"][0]["rounds"]) == 2
     s10_route = scenario_logs["S10"][0]["decision_log"][-1]
     assert (s10_route["decision_point"], s10_route["chosen"]) == ("planner.route", "unsupported")

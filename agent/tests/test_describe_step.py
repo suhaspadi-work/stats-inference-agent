@@ -31,6 +31,7 @@ from tests.test_stage_plan import FOUR, classification
 EXPECTED_STAGES = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
     "stage_plan_gate": "intake",  # M1.3a
+    "stage_gate": "analysis", "start_round": "analysis",  # M1.3b
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",

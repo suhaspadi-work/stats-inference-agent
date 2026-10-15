@@ -2,9 +2,12 @@
 Live end-to-end check: one request per capability through the real graph and
 real model, auto-approving every interrupt. Run from the agent folder with:
     python -m eval.check_live_capabilities
+Set LIVE_ONLY to a comma-separated list of run labels (for example LIVE_ONLY=exploratory) to run only those;
+the final decision-point lines then cover the executed runs only.
 """
 import json
 import math
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -132,6 +135,13 @@ def print_rounds(state, label):
         f"{r['round']} ({r['capability']}, exploratory={r['exploratory']})" for r in rounds))
 
 
+def print_exploratory(state_log, label):
+    """M1.3b: the boundary gate's and the round start's chosen values, one line each."""
+    for point, name in (("planner.stage_gate", "stage gate"), ("planner.round_start", "round start")):
+        record = next((e for e in state_log if e["decision_point"] == point), None)
+        print(f"   {name} [{label}]: " + (f"chosen={record['chosen']}" if record else f"no {point} record"))
+
+
 def report_event_log(app, cfg, label, events, all_points, failed):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
@@ -167,6 +177,18 @@ def report_event_log(app, cfg, label, events, all_points, failed):
         print_lineage(state, state_log)
     if label in ("mismatch", "unsupported"):
         print_route(state, label)
+    if label == "exploratory":
+        print_exploratory(log, label)
+
+
+def filter_runs(runs, only):
+    """M1.3b: the runs named in only (all of them when only is empty); an unknown label raises ValueError."""
+    if not only:
+        return list(runs)
+    unknown = sorted(set(only) - {label for label, _, _ in runs})
+    if unknown:
+        raise ValueError(f"LIVE_ONLY names unknown run(s) {unknown}; known: {[label for label, _, _ in runs]}")
+    return [r for r in runs if r[0] in only]
 
 
 def main():
@@ -205,9 +227,12 @@ def main():
         ("messy", df_messy, "Did West customers spend more than East customers?"),
         # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
         ("mismatch", df3, "Did West customers spend more than East customers?"),
+        # M1.3b: the boundary gate is answered "run", so an exploratory regression follows the comparison
+        ("exploratory", df2, "Did customers in the West region spend more than the East region?"),
         # M0.3: the request that crashed select_method before M0.3 (expected to stop before method selection)
         ("unsupported", df_messy, "Is there a relationship between region, tenure and spend?"),
     ]
+    runs = filter_runs(runs, [s.strip() for s in os.environ.get("LIVE_ONLY", "").split(",") if s.strip()])
     for i, (label, df, question) in enumerate(runs):
         cfg = {"configurable": {"thread_id": f"live-{label}"}}
         try:
@@ -221,6 +246,8 @@ def main():
                 seen.append(p.get("type"))
                 if p.get("type") in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
                     resume = {"action": "approve"}
+                elif p.get("type") == "stage_gate":  # M1.3b: run the exploratory round only in its own run
+                    resume = {"action": "run" if label == "exploratory" else "skip"}
                 elif p.get("type") == "wrangling_approval":
                     resume = {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
                 else:

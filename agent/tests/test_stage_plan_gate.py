@@ -138,7 +138,7 @@ def test_gate_payload():
         "clean": False, "describe": True, "inference": False, "modeling": False}
     assert {n: s["note"] for n, s in steps.items()} == {
         "clean": None, "describe": None, "inference": None,
-        "modeling": "offered after the main analysis; not selectable yet"}
+        "modeling": "you will be asked after the main analysis, if the data allows it"}  # M1.3b: new note
     json.dumps(payload)
 
 
@@ -414,6 +414,6 @@ def test_graph_edges(tmp_path):
 
 
 def test_registry():
-    assert len(registered_points()) == 26 and len(DECISION_NODES) == 12
+    assert len(registered_points()) == 28 and len(DECISION_NODES) == 14  # M1.3b: stage_gate and start_round
     assert DECISION_NODES["stage_plan_gate"] == (STAGE_PLAN_APPROVAL_POINT,)
     assert NODE_STAGES["stage_plan_gate"] == "intake"

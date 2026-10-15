@@ -176,15 +176,18 @@ def _drive(app, state, thread):
                                                         for op in payload["proposed_operations"]]})
         elif payload["type"] in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
             graph_input = Command(resume={"action": "approve"})
+        elif payload["type"] == "stage_gate":  # M1.3b: skip the exploratory round by default
+            graph_input = Command(resume={"action": "skip"})
         else:
             raise AssertionError(f"unexpected pause {payload['type']}")
 
 
 SCENARIOS = {
-    # M1.3a: comparison and driver runs pause at the stage-plan gate first
+    # M1.3a: comparison and driver runs pause at the stage-plan gate first; M1.3b: comparisons end at the boundary gate
     "S1_two_group_with_cleaning": (QuestionType.TWO_GROUP_COMPARISON, ["region"], True,
-                                   ["stage_plan_approval", "wrangling_approval", "plan_approval"]),
-    "S2_multi_group": (QuestionType.MULTI_GROUP_COMPARISON, ["tier"], False, ["stage_plan_approval", "plan_approval"]),
+                                   ["stage_plan_approval", "wrangling_approval", "plan_approval", "stage_gate"]),
+    "S2_multi_group": (QuestionType.MULTI_GROUP_COMPARISON, ["tier"], False,
+                       ["stage_plan_approval", "plan_approval", "stage_gate"]),
     "S3_regression": (QuestionType.DRIVER_ANALYSIS, ["tenure", "tier"], False, ["stage_plan_approval", "plan_approval"]),
     "S4_descriptive": (QuestionType.DESCRIPTIVE, [], False, []),
 }

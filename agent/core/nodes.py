@@ -31,6 +31,11 @@ from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named
 from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
 from core.rounds import make_round_entry, with_exploratory_note
+from core.round_two import (
+    build_exploratory_plan, exploratory_offer, propose_exploratory_predictors, stage_gate_payload,
+)
+from core.round_records import round_start_record, stage_gate_record
+from core.routing import COMPARISON_TYPES
 from core.classification_records import (
     CAUSAL_STATUS_POINT, QUESTION_TYPE_POINT, causal_status_record,
     clarification_gate_record, clarification_record, question_type_record,
@@ -158,7 +163,8 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         issues = detect_all_issues(state["dataset"], state["profile"], store)
         plan = build_stage_plan(state["classification"], state["profile"], issues)
         records = (stage_plan_record(plan, state["classification"], issues), *step_records(plan))
-        update = {"stage_plan": plan, **log_update(*records)}
+        # M1.3b: a new question on the same thread starts outside any exploratory round.
+        update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, **log_update(*records)}
         if plan["status"] == "unsupported":
             update["clarification_needed"] = plan["message"]
         return update
@@ -685,3 +691,72 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
                                  report_text, exploratory)
         return {"report": report_text, "rounds": [entry]}
     return report_node
+
+
+# --- M1.3b: the boundary gate and the exploratory round ---------------------------------------------------
+
+def _round_two_proposal(state: AgentState, store: DatasetStore):
+    """Re-profile the cleaned dataset (read-only) and propose the exploratory predictors."""
+    plan = state["plan"]
+    profile = profile_dataset(state["dataset"], store=store)
+    group_column = (plan.candidate_predictors or ())[0]
+    return profile, propose_exploratory_predictors(profile, group_column, plan.outcome_name)
+
+
+def route_after_report(state: AgentState) -> str:
+    """After a report: an exploratory round ends the run; a comparison whose stage plan offered modeling goes
+    to the boundary gate; everything else ends."""
+    if state.get("exploratory_round"):
+        return END
+    stage_plan, plan = state.get("stage_plan"), state.get("plan")
+    if stage_plan is None or plan is None or plan.question_type.value not in COMPARISON_TYPES:
+        return END
+    modeling = next(s for s in plan_steps(stage_plan) if s["step"] == "modeling")
+    return "stage_gate" if modeling["state"] == "offered" else END
+
+
+def make_stage_gate_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M1.3b: after the main report, offer the exploratory regression when the stage plan offered it and the data
+    has a usable extra predictor; otherwise record that it was not offered and end. The proposal is computed
+    before interrupt() from a read-only re-profile, so the resumed re-run repeats it harmlessly.
+    """
+    def stage_gate_node(state: AgentState) -> dict:
+        plan = state["plan"]
+        rounds = state.get("rounds") or []
+        capability = rounds[-1]["capability"] if rounds else None
+        _, proposal = _round_two_proposal(state, store)
+        offered = exploratory_offer(state.get("stage_plan"), plan, proposal)
+        if not offered:
+            record = stage_gate_record(plan, proposal, None, "not_offered", False, capability)
+            return {"next_round": {"run": False, "predictors": []}, **log_update(record)}
+
+        decision = interrupt(stage_gate_payload(plan, state.get("test_result"), capability, len(rounds),
+                                                state["stage_plan"], proposal)) or {}
+        if decision.get("action") == "run":
+            record = stage_gate_record(plan, proposal, decision, "run", True, capability)
+            return {"next_round": {"run": True, "predictors": list(proposal["predictors"])}, **log_update(record)}
+        record = stage_gate_record(plan, proposal, decision, "skip", True, capability)
+        return {"next_round": {"run": False, "predictors": []}, **log_update(record)}
+    return stage_gate_node
+
+
+def route_after_stage_gate(state: AgentState) -> str:
+    return "start_round" if (state.get("next_round") or {}).get("run") else END
+
+
+def make_start_round_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M1.3b: set up the exploratory round by code: a new regression plan on the same outcome with the predictors
+    chosen at the gate. The existing select_method, freeze (the user's plan approval), execute and report run it.
+    """
+    def start_round_node(state: AgentState) -> dict:
+        predictors = state["next_round"]["predictors"]
+        profile, proposal = _round_two_proposal(state, store)
+        plan2 = build_exploratory_plan(state["plan"], state["dataset"].handle, predictors)
+        route = route_for_plan(plan2, profile)
+        if route["status"] != "ok":
+            raise ValueError(f"The exploratory round cannot run: {route['reason']}")
+        record = round_start_record(plan2, profile, proposal, from_round=len(state.get("rounds") or []))
+        return {"plan": plan2, "route": route, "profile": profile, "exploratory_round": True, **log_update(record)}
+    return start_round_node

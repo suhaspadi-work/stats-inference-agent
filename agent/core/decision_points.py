@@ -24,6 +24,7 @@ from core.describe_records import DESCRIBE_EXECUTION_POINT
 from core.draft_plan_records import OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
+from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
 from core.stage_plan_records import STAGE_PLAN_APPROVAL_POINT, STAGE_PLAN_POINT, STEP_POINTS
@@ -43,6 +44,8 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
     "select_method": (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT, ENCODING_POINT),
     "freeze": (PLAN_APPROVAL_POINT, PREDICTORS_POINT),
     "execute": (POST_HOC_POINT,),
+    "stage_gate": (STAGE_GATE_POINT,),
+    "start_round": (ROUND_START_POINT,),
 }
 
 # Graph nodes that choose nothing, and why.
@@ -61,6 +64,7 @@ NODE_STAGES: dict[str, str] = {
     "stage_plan_gate": "intake",
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
+    "stage_gate": "analysis", "start_round": "analysis",
     "report": "report",
 }
 

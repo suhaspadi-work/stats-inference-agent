@@ -67,3 +67,4 @@ class AgentState(TypedDict, total=False):
     # plan, test_result and report are the latest round.
     rounds: Annotated[list[dict], operator.add]
     exploratory_round: bool  # set by start_round in an exploratory round (M1.3b step 2); absent otherwise
+    next_round: Optional[dict]  # set by stage_gate: {"run": bool, "predictors": [...]} (M1.3b)
