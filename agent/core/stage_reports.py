@@ -38,15 +38,19 @@ def current_question_records(log: list) -> list:
 
 
 def make_stage_report_entry(stage: str, round_index, title: str, composed: dict, fallback: bool = False,
-                            exploratory: bool = False) -> dict:
-    """One stage_reports entry; text is the title line, then each section as "<heading>\\n<text>"."""
+                            exploratory: bool = False, explain_options=None) -> dict:
+    """One stage_reports entry; text is the title line, then each section as "<heading>\\n<text>". An analysis
+    entry also gets "explain_options" (M1.4b step 3); every other entry is unchanged."""
     # a section keeps "collapsed" only when it is true, so entries without collapsed sections are unchanged
     sections = [{"heading": s["heading"], "text": s["text"], **({"collapsed": True} if s.get("collapsed") else {})}
                 for s in composed["sections"]]
     blocks = [title] + [f"{s['heading']}\n{s['text']}" for s in sections]
-    return {"stage": stage, "round": round_index, "title": title, "text": "\n\n".join(blocks),
-            "sections": sections, "fallback": bool(fallback), "exploratory": bool(exploratory),
-            "source_records": list(composed["source_records"])}
+    entry = {"stage": stage, "round": round_index, "title": title, "text": "\n\n".join(blocks),
+             "sections": sections, "fallback": bool(fallback), "exploratory": bool(exploratory),
+             "source_records": list(composed["source_records"])}
+    if explain_options is not None:
+        entry["explain_options"] = [dict(o) for o in explain_options]
+    return entry
 
 
 def _bare(text) -> str:
@@ -234,6 +238,31 @@ def _names_text(names) -> str:
     return ", ".join(str(n) for n in names) if names else "none"
 
 
+def explain_options(records: list) -> list:
+    """
+    The methods of one round that can be explained on request (M1.4b step 3), as {"method_id", "name", "role"}:
+    the chosen method, the other candidates of the selection record ("alternative"), the follow-up test
+    ("follow_up") and each coding scheme of a text predictor ("encoding"). Only methods with a glossary entry;
+    a method keeps its first role.
+    """
+    found = []
+    selection = selection_record(records)
+    if selection is not None:
+        found.append((selection["chosen"], "chosen"))
+        found += [(c["option"], "alternative") for c in selection.get("candidates") or []
+                  if c["option"] != selection["chosen"]]
+    post_hoc = _latest(records, POST_HOC_POINT)
+    if post_hoc is not None and post_hoc["chosen"] != "none":
+        found.append((post_hoc["chosen"], "follow_up"))
+    found += [(r["chosen"], "encoding") for r in records if r.get("decision_point") == ENCODING_POINT]
+    options, seen = [], set()
+    for method_id, role in found:
+        if method_id in GLOSSARY and method_id not in seen:
+            seen.add(method_id)
+            options.append({"method_id": method_id, "name": method_name(method_id), "role": role})
+    return options
+
+
 def _why_this_test(records, selection, use):
     lines, extra = [], []
     if selection is None:
@@ -354,8 +383,8 @@ def _ordered_ids(records, used) -> list:
 
 
 def analysis_report(records: list, exploratory: bool) -> dict:
-    """{"sections", "source_records", "fallback"} from the records of one round; the last record is its
-    report.narrative record."""
+    """{"sections", "source_records", "fallback", "explain_options"} from the records of one round; the last
+    record is its report.narrative record."""
     records = copy.deepcopy(list(records))
     used = set()
 
@@ -383,7 +412,7 @@ def analysis_report(records: list, exploratory: bool) -> dict:
     use(narrative)
     sections.append({"heading": "Narrative", "text": _narrative_text(narrative)})
     return {"sections": sections, "source_records": _ordered_ids(records, used),
-            "fallback": narrative["chosen"] in _FALLBACKS}
+            "fallback": narrative["chosen"] in _FALLBACKS, "explain_options": explain_options(records)}
 
 
 # --- the summary (M1.4b step 2b) ---------------------------------------------------------------------------------------

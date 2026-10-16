@@ -806,7 +806,8 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
             title = (f"Exploratory analysis (round {round_index}): {name}" if exploratory
                      else f"Analysis (round {round_index}): {name}")
             update["stage_reports"] = [make_stage_report_entry("analysis", round_index, title, composed,
-                                                               fallback=composed["fallback"], exploratory=exploratory)]
+                                                               fallback=composed["fallback"], exploratory=exploratory,
+                                                               explain_options=composed["explain_options"])]
         except Exception:
             logger.warning("stage report composition failed for round %s", round_index, exc_info=True)
         return update

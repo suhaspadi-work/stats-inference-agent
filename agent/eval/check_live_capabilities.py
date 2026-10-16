@@ -26,6 +26,7 @@ from core.ingestion import load_dataset
 from core.graph import build_agent_graph
 from core.event_log import events_path, read_decision_log
 from core.decision_points import registered_points
+from core.explain import explain_method
 
 load_dotenv()
 
@@ -169,6 +170,26 @@ def print_analysis_reports(state, label):
             text(e)
 
 
+def print_explanation(state, label, chat=None):
+    """
+    M1.4b step 3: one on-request explanation of the chosen method of round 1, for the two_group run only (the real
+    model unless chat is given). Returns None when it passed or did not run, else (error_kind, problem line) with
+    error_kind from classify_error.
+    """
+    if label != "two_group":
+        return None
+    try:
+        explained = explain_method(state["plan"].primary_method, state, 1, chat=chat)
+    except Exception as e:
+        line = f"explanation [{label}]: FAILED: {type(e).__name__}: {str(e)[:500]}"
+        print(f"   {line}")
+        return classify_error(e), line
+    print(f"   explanation [{label}]: source={explained['source']}")
+    for text in explained["answer"].split("\n"):
+        print(f"      | {text}")
+    return None
+
+
 def print_report_narrative(state_log, label):
     """M1.4a: whose text became each analysis report, and whether each model attempt passed the guard."""
     records = [e for e in state_log if e["decision_point"] == "report.narrative"]
@@ -211,12 +232,13 @@ def print_edit(state_log, label):
           f"selections={len(selections)} (second supersedes first: {supersedes})")
 
 
-def report_event_log(app, cfg, label, events, all_points, failed):
+def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     """
     Compare the run's event log file with the state's decision_log, check strict JSON, print the
     decision points and (for the messy run) the cleaning lines and lineage. Used after successful and
     failed runs alike; a failed run's points still count toward the final union. Returns the problems
-    found (every FAIL line printed), for the summary (G54).
+    found (every FAIL line printed), for the summary (G54). An explanation blocked by the quota marks the outcome
+    (when given) as quota-blocked instead of adding a problem.
     """
     problems = []
     thread_id = cfg["configurable"]["thread_id"]
@@ -253,6 +275,15 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     print_describe(log, label)
     print_stage1_report(state, label)
     print_analysis_reports(state, label)
+    if not failed:
+        explanation = print_explanation(state, label)
+        if explanation is not None and explanation[0] == "quota":
+            print("   quota exhausted: not a code failure")
+            if outcome is not None and outcome.get("error_kind") is None:
+                outcome["error_kind"] = "quota"
+                outcome["hint"] = quota_reset_hint(explanation[1])
+        elif explanation is not None:
+            problems.append(explanation[1])
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
@@ -418,7 +449,8 @@ def main():
                   f"status={plan.status.value} result_type={kind} method={tr.get('method')}")
             print("   report:", (result.get("report") or "")[:160].replace("\n", " "))
 
-            outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=False)
+            outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=False,
+                                                    outcome=outcome)
         except Exception as e:
             message = str(e)
             print(f"[{label}] FAILED: {type(e).__name__}: {message[:500]}")

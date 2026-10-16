@@ -31,6 +31,7 @@ from tests.test_prompt_canaries import (
 from tests.test_stage1_report import _drive, _messy_frame, _reject_filter, _start
 
 ENTRY_KEYS = {"stage", "round", "title", "text", "sections", "fallback", "exploratory", "source_records"}
+ANALYSIS_KEYS = ENTRY_KEYS | {"explain_options"}  # M1.4b step 3: analysis entries also list explain_options
 GLOSSARY_DETAIL = ["When the agent uses it", "What it assumes", "How to read the result", "Other options"]
 TWO_GROUP_HEADINGS = ["About the test", *GLOSSARY_DETAIL, "Why this test", "Your plan decision", "Narrative"]
 SUMMARY_HEADINGS = ["Question", "Stage 1", "Results", "Caveats"]
@@ -118,7 +119,7 @@ def test_the_entry_shape(fake_model, tmp_path, store):
     values, _, _ = _run(store, tmp_path, _frame(), "shape")
     (entry,) = _analysis(values)
     method = values["plan"].primary_method
-    assert set(entry) == ENTRY_KEYS
+    assert set(entry) == ANALYSIS_KEYS
     assert (entry["stage"], entry["round"], entry["exploratory"], entry["fallback"]) == ("analysis", 1, False, False)
     assert entry["title"] == f"Analysis (round 1): {GLOSSARY[method]['name']}"
     assert [s["heading"] for s in entry["sections"]] == TWO_GROUP_HEADINGS
