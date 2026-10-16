@@ -28,6 +28,7 @@ from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
 from db import init_db, create_session, record_message, list_sessions, list_messages
+from run_state import record_once, reset_run
 
 MAX_RETRIES = 4
 
@@ -318,12 +319,13 @@ elif st.session_state.get("authentication_status"):
                     with st.expander("See the underlying statistics"):
                         st.json(test_result)
 
-                record_message(st.session_state.db_session_id, st.session_state.current_question, report, test_result)
+                record_once(st.session_state, lambda: record_message(
+                    st.session_state.db_session_id, st.session_state.current_question, report, test_result,
+                    stage_reports=st.session_state.graph_result.get("stage_reports")))
 
                 if st.button("Ask another question"):
                     st.session_state.dataset = st.session_state.graph_result.get("dataset", st.session_state.dataset)
-                    for key in ("graph_result", "current_question"):
-                        st.session_state.pop(key, None)
+                    reset_run(st.session_state)
                     st.rerun()
             else:
                 if st.session_state.graph_result.get("clarification_needed"):
@@ -332,11 +334,11 @@ elif st.session_state.get("authentication_status"):
                 else:
                     st.warning("The run finished without producing a report.")
                 if st.button("Try a new question"):
-                    for key in ("graph_result", "current_question"):
-                        st.session_state.pop(key, None)
+                    reset_run(st.session_state)
                     st.rerun()
 
         if st.button("Start a new session"):
-            for key in ("dataset", "thread_id", "db_session_id", "agent_app", "graph_result", "current_question"):
+            for key in ("dataset", "thread_id", "db_session_id", "agent_app", "graph_result", "current_question",
+                        "recorded_run"):
                 st.session_state.pop(key, None)
             st.rerun()

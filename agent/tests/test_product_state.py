@@ -1,0 +1,79 @@
+"""
+M1.5 step P1: the product's pure run bookkeeping (product/run_state.py) and widget keys (product/pause_types.py).
+The product modules import no streamlit, so they load here from the sibling product/ folder.
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "product"))
+
+from pause_types import widget_key  # noqa: E402
+from run_state import next_pause_serial, record_once, reset_run  # noqa: E402
+
+
+# --- widget_key -----------------------------------------------------------------------------------------------------
+
+def test_widget_key():
+    assert widget_key("wrangle_action", 3, 0) == "wrangle_action-3-0"
+    assert widget_key("approve", 1) == "approve-1"
+    assert widget_key("step", 2, "describe", "run") == "step-2-describe-run"
+    assert widget_key("x", 4, None, 1.5, True) == "x-4-None-1.5-True"
+
+
+# --- next_pause_serial -------------------------------------------------------------------------------------------------
+
+def test_next_pause_serial():
+    state = {}
+    assert [next_pause_serial(state) for _ in range(3)] == [1, 2, 3]
+    assert state["pause_serial"] == 3
+
+
+# --- record_once ---------------------------------------------------------------------------------------------------------
+
+def test_record_once():
+    state, calls = {}, []
+    assert record_once(state, lambda: calls.append(1)) is True
+    assert record_once(state, lambda: calls.append(2)) is False
+    assert calls == [1] and state["recorded_run"] is True
+
+
+def test_a_failing_recorder_leaves_the_flag_unset():
+    state, calls = {}, []
+
+    def boom():
+        raise RuntimeError("disk full")
+    with pytest.raises(RuntimeError, match="disk full"):
+        record_once(state, boom)
+    assert "recorded_run" not in state
+    assert record_once(state, lambda: calls.append(1)) is True and calls == [1]
+
+
+def test_record_once_is_per_state():
+    a, b, calls = {}, {}, []
+    assert record_once(a, lambda: calls.append("a")) and record_once(b, lambda: calls.append("b"))
+    assert calls == ["a", "b"]
+
+
+# --- reset_run -----------------------------------------------------------------------------------------------------------
+
+def test_reset_run():
+    state = {"graph_result": {}, "current_question": "q", "recorded_run": True, "pause_serial": 7, "dataset": "d"}
+    reset_run(state)
+    assert state == {"pause_serial": 7, "dataset": "d"}
+    empty = {}
+    reset_run(empty)
+    assert empty == {}
+
+
+def test_the_finished_screen_records_once_per_run():
+    state, calls = {"graph_result": {"report": "r1"}, "current_question": "q1"}, []
+    for _ in range(3):  # three Streamlit reruns of the finished screen
+        record_once(state, lambda: calls.append(state["current_question"]))
+    assert calls == ["q1"]
+    reset_run(state)  # "Ask another question"
+    state.update(graph_result={"report": "r2"}, current_question="q2")
+    for _ in range(2):
+        record_once(state, lambda: calls.append(state["current_question"]))
+    assert calls == ["q1", "q2"]
