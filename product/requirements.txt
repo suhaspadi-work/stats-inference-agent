@@ -1,0 +1,5 @@
+-r ../agent/requirements.txt
+PyYAML==6.0.3
+python-dotenv==1.2.3
+streamlit==1.64.0
+streamlit-authenticator==0.4.2

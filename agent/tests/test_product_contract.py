@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "product"))
 
-from pause_types import HANDLED_PAUSE_TYPES, REQUIRED_PAYLOAD_KEYS  # noqa: E402
+from pause_types import HANDLED_PAUSE_TYPES, NESTED_KEYS, REQUIRED_PAYLOAD_KEYS, nested_targets  # noqa: E402
 
 from core.dataset import LocalDiskStore  # noqa: E402
 from core.graph import build_agent_graph  # noqa: E402
@@ -82,3 +82,34 @@ def test_the_required_keys_cover_exactly_the_handled_types():
     assert set(REQUIRED_PAYLOAD_KEYS) == set(HANDLED_PAUSE_TYPES)
     assert len(HANDLED_PAUSE_TYPES) == len(set(HANDLED_PAUSE_TYPES))
     assert all(keys[0] == "type" for keys in REQUIRED_PAYLOAD_KEYS.values())
+
+
+# --- nested keys (M1.5 step P2a) ------------------------------------------------------------------------------------
+
+def test_every_nested_structure_has_the_keys_the_views_read(payloads):
+    for p in payloads:
+        for (kind, path), keys in NESTED_KEYS.items():
+            if kind != p["type"]:
+                continue
+            for target in nested_targets(p, path):
+                missing = [k for k in keys if k not in target]
+                assert missing == [], f"{kind} {'/'.join(path)} lacks {missing}"
+
+
+def test_nested_keys_belong_to_handled_types():
+    assert {kind for kind, _ in NESTED_KEYS} <= set(HANDLED_PAUSE_TYPES)
+    assert all(isinstance(path, tuple) and path for _, path in NESTED_KEYS)
+
+
+def test_every_nested_path_is_reached_by_a_real_payload(payloads):
+    for (kind, path) in NESTED_KEYS:
+        reached = [t for p in payloads if p["type"] == kind for t in nested_targets(p, path)]
+        assert reached, f"no real {kind} payload reaches {'/'.join(path)}"
+
+
+def test_nested_targets():
+    payload = {"a": [{"b": [{"c": 1}, {"c": 2}]}, {"b": []}], "d": None, "e": {"x": {"k": 1}, "y": {"k": 2}}}
+    assert nested_targets(payload, ("a",)) == payload["a"]
+    assert nested_targets(payload, ("a", "b")) == [{"c": 1}, {"c": 2}]
+    assert nested_targets(payload, ("d",)) == [] and nested_targets(payload, ("d", "z")) == []
+    assert nested_targets(payload, ("e", "*")) == [{"k": 1}, {"k": 2}]
