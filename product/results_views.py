@@ -203,6 +203,49 @@ def _round_view(entry, analysis) -> dict:
     }
 
 
+def current_overview(values):
+    """The overview of the CURRENT question's describe or eda result, or None. A result left in state by an earlier
+    question on the same thread is never shown."""
+    values = values or {}
+    plan = values.get("plan")
+    records = _current_question_records(list(values.get("decision_log") or []))
+    question_type = getattr(getattr(plan, "question_type", None), "value", None)
+    described = any(r.get("decision_point") == _DESCRIBE_POINT for r in records) or question_type == "descriptive"
+    return overview_rows(values.get("descriptive_result")) if described else None
+
+
+_OVERVIEW_HEADINGS = (("column", "Column"), ("type", "Type"), ("distinct", "Distinct values"), ("missing", "Missing"),
+                      ("summary", "Summary"))
+
+
+def overview_table(rows):
+    """{"columns", "rows"} for display, or None. A column that is "n/a" in every row is left out (the describe step
+    holds no missing counts, G62)."""
+    if not rows:
+        return None
+    kept = [(key, heading) for key, heading in _OVERVIEW_HEADINGS if any(r.get(key) != "n/a" for r in rows)]
+    return {"columns": [heading for _, heading in kept],
+            "rows": [{heading: r.get(key) for key, heading in kept} for r in rows]}
+
+
+_EXPLANATION_CAPTIONS = {
+    "model": "Written by the model from the computed facts and the recorded reasons.",
+    "model_retry": "Written by the model after one correction.",
+    "glossary_fallback": "The model's answer did not pass the checks, so this is the glossary description.",
+}
+
+
+def explanation_caption(source) -> str:
+    return _EXPLANATION_CAPTIONS.get(source, "")
+
+
+def explanation_items(explanations, round_index) -> list:
+    """The explanations of one round, in the order they were asked, ready to show."""
+    return [{"method_label": method_label(r.get("method_id")), "question": r.get("question"), "answer": r.get("answer"),
+             "caption": explanation_caption(r.get("source")), "saved": r.get("saved", True)}
+            for r in (explanations or {}).values() if r.get("round") == round_index]
+
+
 def finished_view(values) -> dict:
     values = values or {}
     plan = values.get("plan")
@@ -216,10 +259,6 @@ def finished_view(values) -> dict:
     all_rounds = list(values.get("rounds") or [])
     rounds = [r for r in all_rounds if r.get("round") in by_round] if analyses else all_rounds[-1:]
 
-    records = _current_question_records(list(values.get("decision_log") or []))
-    question_type = getattr(getattr(plan, "question_type", None), "value", None)
-    described = any(r.get("decision_point") == _DESCRIBE_POINT for r in records) or question_type == "descriptive"
-
     round_views = [_round_view(r, by_round.get(r.get("round"))) for r in rounds]
     return {
         "kind": "report",
@@ -227,7 +266,7 @@ def finished_view(values) -> dict:
         "stage1": next((e for e in entries if e.get("stage") == "stage1"), None),
         "summary": _summary_of(entries),
         "rounds": round_views,
-        "overview": overview_rows(values.get("descriptive_result")) if described else None,
+        "overview": current_overview(values),
         "fallback_any": any(r["fallback"] for r in round_views),
     }
 

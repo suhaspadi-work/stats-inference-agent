@@ -315,3 +315,76 @@ def test_history_view_of_an_old_or_broken_message():
     assert (view["summary"], view["analysis"], view["statistics"]) == (None, [], [])
     view = rv.history_view({"id": 2}, [])  # a row without the newer columns
     assert view["question"] is None and view["summary"] is None
+
+
+# --- current_overview, overview_table, explanation captions and items (M1.5 step P3b1) -----------------------------------
+
+def test_current_overview_matches_the_finished_view(fake_model, tmp_path, store):
+    two, _, _ = _run(store, tmp_path, _frame(), "cur_two")
+    described, _, _ = _run(store, tmp_path, _frame(), "cur_describe", QuestionType.DESCRIPTIVE, ())
+    for values in (two, described):
+        assert rv.current_overview(values) == rv.finished_view(values)["overview"] and rv.current_overview(values)
+    app = _app(store, propose_fn=fake_propose)
+    _drive(app, _start(_frame(seed=61), tmp_path, store, "c1"), "cur-thread")
+    values, _, _ = _drive(app, _start(_frame(seed=62, n=100), tmp_path, store, "c2"), "cur-thread",
+                          stage_plan_approval={"action": "approve", "run": {"describe": False}})
+    assert values.get("descriptive_result") is not None and rv.current_overview(values) is None
+    assert rv.current_overview({}) is None and rv.current_overview(None) is None
+
+
+def test_current_overview_of_a_rejected_plan(fake_model, tmp_path, store):
+    # describe runs in stage 1, before plan approval, so the rejected question did produce its own overview
+    values, _, _ = _run(store, tmp_path, _frame(), "cur_reject", plan_approval={"action": "reject", "reason": "no"})
+    assert any(r["decision_point"] == "stage1.describe.execution" for r in values["decision_log"])
+    assert rv.finished_view(values)["kind"] == "no_report"
+    assert rv.current_overview(values) == rv.overview_rows(values["descriptive_result"])
+
+
+def test_overview_table(fake_model, tmp_path, store):
+    assert rv.overview_table(None) is None and rv.overview_table([]) is None
+    values, _, _ = _run(store, tmp_path, _with_code(), "table")
+    rows = rv.current_overview(values)
+    before = copy.deepcopy(rows)
+    table = rv.overview_table(rows)
+    assert table["columns"] == ["Column", "Type", "Distinct values", "Summary"]  # every "missing" is n/a (G62)
+    assert [list(r) for r in table["rows"]] == [table["columns"]] * len(rows)
+    assert [r["Column"] for r in table["rows"]] == [r["column"] for r in rows]
+    assert table["rows"][0]["Summary"] == rows[0]["summary"]
+    assert rows == before
+
+
+def test_overview_table_keeps_a_real_missing_column():
+    rows = [{"column": "a", "type": "numeric", "distinct": "3", "missing": "n/a", "summary": "mean 1"},
+            {"column": "b", "type": "text", "distinct": "2", "missing": "1 (10.0%)", "summary": "n/a"}]
+    table = rv.overview_table(rows)
+    assert table["columns"] == ["Column", "Type", "Distinct values", "Missing", "Summary"]
+    assert table["rows"][1] == {"Column": "b", "Type": "text", "Distinct values": "2", "Missing": "1 (10.0%)",
+                                "Summary": "n/a"}
+
+
+def test_explanation_caption():
+    assert rv.explanation_caption("model") == "Written by the model from the computed facts and the recorded reasons."
+    assert rv.explanation_caption("model_retry") == "Written by the model after one correction."
+    assert rv.explanation_caption("glossary_fallback") == (
+        "The model's answer did not pass the checks, so this is the glossary description.")
+    assert rv.explanation_caption("other") == "" and rv.explanation_caption(None) == ""
+
+
+def test_explanation_items():
+    explanations = {
+        "1|student_t_test|": {"method_id": "student_t_test", "round": 1, "question": None, "answer": "a1", "source": "model"},
+        "2|ols|": {"method_id": "ols", "round": 2, "question": None, "answer": "b", "source": "model"},
+        "1|welch_t_test|why?": {"method_id": "welch_t_test", "round": 1, "question": "why?", "answer": "a2",
+                                "source": "glossary_fallback", "saved": False},
+    }
+    before = copy.deepcopy(explanations)
+    items = rv.explanation_items(explanations, 1)
+    assert items == [
+        {"method_label": GLOSSARY["student_t_test"]["name"], "question": None, "answer": "a1",
+         "caption": rv.explanation_caption("model"), "saved": True},
+        {"method_label": GLOSSARY["welch_t_test"]["name"], "question": "why?", "answer": "a2",
+         "caption": rv.explanation_caption("glossary_fallback"), "saved": False},
+    ]
+    assert [i["answer"] for i in rv.explanation_items(explanations, 2)] == ["b"]
+    assert rv.explanation_items(explanations, 3) == [] and rv.explanation_items(None, 1) == []
+    assert rv.explanation_items({}, 1) == [] and explanations == before
