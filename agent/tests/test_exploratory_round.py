@@ -10,7 +10,6 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-from langgraph.graph import END
 from langgraph.types import Command
 
 import core.report as report_module
@@ -242,24 +241,28 @@ def test_stage_gate_payload():
 def test_route_after_report():
     comparison = {"stage_plan": _stage_plan(QuestionType.TWO_GROUP_COMPARISON), "plan": _plan()}
     assert route_after_report(comparison) == "stage_gate"
-    assert route_after_report({**comparison, "exploratory_round": True}) == END
+    # M1.4b step 2b: where the router used to end the run it now goes to the summary
+    assert route_after_report({**comparison, "exploratory_round": True}) == "summary"
     driver = QuestionType.DRIVER_ANALYSIS
-    assert route_after_report({"stage_plan": _stage_plan(driver), "plan": _plan(driver, ("region",))}) == END
+    assert route_after_report({"stage_plan": _stage_plan(driver), "plan": _plan(driver, ("region",))}) == "summary"
     small = make_profile({"region": ("object", 2), "total_spend": ("float64", 100)})
     assert route_after_report({"stage_plan": _stage_plan(QuestionType.TWO_GROUP_COMPARISON, small),
-                               "plan": _plan()}) == END
+                               "plan": _plan()}) == "summary"
 
 
 def test_route_after_stage_gate():
     assert route_after_stage_gate({"next_round": {"run": True, "predictors": ["region"]}}) == "start_round"
-    assert route_after_stage_gate({"next_round": {"run": False, "predictors": []}}) == END
+    assert route_after_stage_gate({"next_round": {"run": False, "predictors": []}}) == "summary"  # M1.4b 2b: was END
 
 
 def test_graph_edges(tmp_path):
     edges = {(e.source, e.target): e.conditional
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
-    assert edges[("report", "stage_gate")] is True and edges[("report", "__end__")] is True
-    assert edges[("stage_gate", "start_round")] is True and edges[("stage_gate", "__end__")] is True
+    # M1.4b step 2b: report and stage_gate go to the summary instead of __end__; the summary ends the run
+    assert edges[("report", "stage_gate")] is True and edges[("report", "summary")] is True
+    assert edges[("stage_gate", "start_round")] is True and edges[("stage_gate", "summary")] is True
+    assert ("report", "__end__") not in edges and ("stage_gate", "__end__") not in edges
+    assert edges[("summary", "__end__")] is False
     assert edges[("start_round", "select_method")] is False
     assert edges[("stage_gate", "stage_gate")] is True  # M1.3b step 2b: a refused choice re-opens the gate
 

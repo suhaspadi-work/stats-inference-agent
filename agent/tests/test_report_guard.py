@@ -292,7 +292,9 @@ def test_the_first_text_passes(real):
     update, record = _run_node(stub, *real.two_group)
     assert stub.calls == [""] and record["chosen"] == "model" and update["report"] == CLEAN
     assert record["evidence"]["attempts"] == [PASS1]
-    assert set(update) == {"report", "rounds", "decision_log"} and update["rounds"][0]["report"] == CLEAN
+    # M1.4b step 2b: the analysis branch also returns its "how this was chosen" entry
+    assert set(update) == {"report", "rounds", "decision_log", "stage_reports"} and update["rounds"][0]["report"] == CLEAN
+    assert [e["stage"] for e in update["stage_reports"]] == ["analysis"]
 
 
 def test_one_retry_with_the_violation_fed_back(real):

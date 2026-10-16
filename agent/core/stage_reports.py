@@ -5,6 +5,10 @@ record holds, so no number in a stage report is model-generated. Each entry name
 
   stage1   prepare and describe: what was checked, what was changed and why, what was left as is, what was
            described
+  analysis how this was chosen, one per analysis round (M1.4b step 2b): the test (from the method glossary), why
+           this test, your plan decision, for an exploratory round the predictors and your choice at the boundary,
+           and whose text the narrative is
+  summary  the overall summary of the question: the question, Stage 1, the results of every round, the caveats
 """
 from __future__ import annotations
 
@@ -12,6 +16,13 @@ import copy
 
 from core.cleaning_records import APPROVAL_POINT, EXECUTION_POINT, FIX_POINT, SCAN_POINT
 from core.describe_records import DESCRIBE_EXECUTION_POINT
+from core.draft_plan_records import PREDICTORS_POINT
+from core.execution_records import POST_HOC_POINT
+from core.freeze_records import PLAN_APPROVAL_POINT
+from core.method_glossary import GLOSSARY, render_glossary
+from core.report_records import REPORT_NARRATIVE_POINT
+from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
+from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
 from core.stage_plan_records import STAGE_PLAN_POINT
 
 STAGE1_TITLE = "Stage 1: prepare and describe"
@@ -29,7 +40,9 @@ def current_question_records(log: list) -> list:
 def make_stage_report_entry(stage: str, round_index, title: str, composed: dict, fallback: bool = False,
                             exploratory: bool = False) -> dict:
     """One stage_reports entry; text is the title line, then each section as "<heading>\\n<text>"."""
-    sections = [{"heading": s["heading"], "text": s["text"]} for s in composed["sections"]]
+    # a section keeps "collapsed" only when it is true, so entries without collapsed sections are unchanged
+    sections = [{"heading": s["heading"], "text": s["text"], **({"collapsed": True} if s.get("collapsed") else {})}
+                for s in composed["sections"]]
     blocks = [title] + [f"{s['heading']}\n{s['text']}" for s in sections]
     return {"stage": stage, "round": round_index, "title": title, "text": "\n\n".join(blocks),
             "sections": sections, "fallback": bool(fallback), "exploratory": bool(exploratory),
@@ -179,3 +192,278 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
         if r.get("id") in used and r["id"] not in ordered:
             ordered.append(r["id"])
     return {"sections": sections, "source_records": ordered}
+
+
+# --- analysis rounds (M1.4b step 2b) ---------------------------------------------------------------------------------
+
+_FALLBACKS = ("facts_fallback", "minimal_fallback")
+_GLOSSARY_DETAIL = ("When the agent uses it", "What it assumes", "How to read the result", "Other options")
+
+
+def round_records(log: list) -> list:
+    """
+    The records of the round being reported: from just after the previous round's report.narrative record (when
+    there is one after the last planner.stage_plan) or from the last planner.stage_plan, to the end. The final
+    record of the log is the current round's own report.narrative record.
+    """
+    s = 0
+    for i, entry in enumerate(log):
+        if entry.get("decision_point") == STAGE_PLAN_POINT:
+            s = i
+    p = None
+    for i, entry in enumerate(log[:-1]):
+        if entry.get("decision_point") == REPORT_NARRATIVE_POINT:
+            p = i
+    start = p + 1 if p is not None and p > s else s
+    return list(log[start:])
+
+
+def method_name(method_id) -> str:
+    """The glossary's display name of a method, or the id itself when it has no entry."""
+    entry = GLOSSARY.get(method_id) if method_id is not None else None
+    return entry["name"] if entry is not None else str(method_id)
+
+
+def selection_record(records: list):
+    """The latest test-selection or regression-method record."""
+    return next((r for r in reversed(records)
+                 if r.get("decision_point") in (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT)), None)
+
+
+def _names_text(names) -> str:
+    return ", ".join(str(n) for n in names) if names else "none"
+
+
+def _why_this_test(records, selection, use):
+    lines, extra = [], []
+    if selection is None:
+        return "No method selection was recorded.", extra
+    use(selection)
+    chosen = selection["chosen"]
+    lines.append(selection["rationale"])
+    for c in selection.get("candidates") or []:
+        if c["option"] != chosen:
+            lines.append(f"Not used: {method_name(c['option'])}: {c['reason']}")
+    post_hoc = _latest(records, POST_HOC_POINT)
+    if post_hoc is not None:
+        use(post_hoc)
+        if post_hoc["chosen"] == "none":
+            lines.append(f"No pairwise follow-up ran: {post_hoc['rationale']}")
+        else:
+            lines.append(f"Follow-up: {method_name(post_hoc['chosen'])}: {post_hoc['rationale']}")
+    encodings = {}
+    for r in records:
+        if r.get("decision_point") == ENCODING_POINT:
+            encodings[r["evidence"].get("column")] = r  # the latest per column
+    schemes = []
+    for column, r in encodings.items():
+        use(r)
+        lines.append(f"{column}: {r['rationale']}")
+        if r["chosen"] not in schemes:
+            schemes.append(r["chosen"])
+    for scheme in schemes:
+        entry = GLOSSARY.get(scheme)
+        if entry is not None:
+            extra.append({"heading": f"About {entry['name']}", "text": f"{entry['what']} How to read it: {entry['reading']}",
+                          "collapsed": True})
+    if selection.get("supersedes"):
+        lines.append("The method was selected again after you edited the predictors.")
+    return "\n".join(lines), extra
+
+
+def _plan_decision(records, use) -> str:
+    by_id = {r.get("id"): r for r in records}
+    approvals = [r for r in records if r.get("decision_point") == PLAN_APPROVAL_POINT]
+    lines = []
+    for a in approvals:
+        use(a)
+        ev, chosen = a.get("evidence") or {}, a["chosen"]
+        if chosen == "approve":
+            lines.append("Approved as drafted.")
+        elif chosen == "edit":
+            linked = by_id.get(ev.get("predictors_record_id"))
+            if linked is not None:
+                use(linked)
+                before = _names_text(linked["evidence"].get("predictors_before"))
+                after = _names_text(linked["evidence"].get("predictors_after"))
+            else:
+                before, after = _names_text(ev.get("predictors_before")), "the new predictors"
+            lines.append(f"Edited the predictors from {before} to {after}; the method was selected again.")
+        elif chosen == "refused":
+            reasons = "; ".join(f"{v.get('column') or v.get('rule')}: {v.get('reason')}" for v in ev.get("refusals") or [])
+            lines.append(f"Refused: {reasons}.")
+        elif chosen == "reject":
+            lines.append("Rejected.")
+        else:
+            lines.append(f"{chosen}.")
+    predictors = _latest(records, PREDICTORS_POINT)
+    if predictors is not None:
+        use(predictors)
+        after = predictors.get("evidence", {}).get("predictors_after")
+        lines.append(f"Predictors used: {_names_text(after) if after is not None else predictors['chosen']}.")
+    elif approvals and approvals[-1].get("evidence", {}).get("predictors_before") is not None:
+        lines.append(f"Predictors used: {_names_text(approvals[-1]['evidence']['predictors_before'])}.")
+    return "\n".join(lines) if lines else "No plan decision was recorded."
+
+
+def _exploratory_sections(records, use) -> list:
+    sections = []
+    start = _latest(records, ROUND_START_POINT)
+    if start is not None:
+        use(start)
+        lines = [f"Chosen: {start['chosen']}.",
+                 "Chosen by: you." if start["evidence"].get("chosen_by") == "user" else "Chosen by: the agent's rules."]
+        lines += [f"Left out: {c['option']}: {c['reason']}" for c in start.get("candidates") or [] if c["eligible"] is False]
+        sections.append({"heading": "Why these predictors", "text": "\n".join(lines)})
+    gates = [r for r in records if r.get("decision_point") == STAGE_GATE_POINT]
+    if gates:
+        lines = []
+        for g in gates:
+            use(g)
+            if g["chosen"] == "refused":
+                lines.append(f"Refused: {g['rationale']}")
+        run = [g for g in gates if g["chosen"] == "run"]
+        if run:
+            lines.append("You chose to run the exploratory regression"
+                         + (" with your own predictors." if run[-1].get("overridden_by_human") else "."))
+        sections.append({"heading": "Your choice at the boundary", "text": "\n".join(lines) or "No choice was recorded."})
+    return sections
+
+
+def _narrative_text(narrative) -> str:
+    chosen = narrative["chosen"]
+    if chosen == "model":
+        return "The narrative was written by the model."
+    if chosen == "model_retry":
+        attempts = (narrative.get("evidence") or {}).get("attempts") or []
+        matched = ((attempts[0].get("violation") or {}).get("matched") if attempts else None)
+        return f"The narrative was written by the model after one correction (its first text used '{matched}')."
+    if chosen == "facts_fallback":
+        return "The model's text used causal language twice, so the narrative was written from the computed facts."
+    if chosen == "minimal_fallback":
+        return "The narrative could not be written safely, so a minimal text was used."
+    return f"{chosen}."
+
+
+def _ordered_ids(records, used) -> list:
+    ordered = []
+    for r in records:
+        if r.get("id") in used and r["id"] not in ordered:
+            ordered.append(r["id"])
+    return ordered
+
+
+def analysis_report(records: list, exploratory: bool) -> dict:
+    """{"sections", "source_records", "fallback"} from the records of one round; the last record is its
+    report.narrative record."""
+    records = copy.deepcopy(list(records))
+    used = set()
+
+    def use(record):
+        used.add(record["id"])
+
+    selection = selection_record(records)
+    chosen = selection["chosen"] if selection is not None else None
+    sections = []
+    entry = GLOSSARY.get(chosen) if chosen is not None else None
+    if entry is not None:
+        sections.append({"heading": "About the test",
+                         "text": f"{entry['name']}. {entry['what']} It answers: {entry['answers']}"})
+        sections += [{**s, "collapsed": True} for s in render_glossary(chosen)["sections"]
+                     if s["heading"] in _GLOSSARY_DETAIL]
+    why, encoding_sections = _why_this_test(records, selection, use)
+    sections.append({"heading": "Why this test", "text": why})
+    sections += encoding_sections
+    sections.append({"heading": "Your plan decision", "text": _plan_decision(records, use)})
+    if exploratory:
+        sections += _exploratory_sections(records, use)
+    narrative = records[-1] if records and records[-1].get("decision_point") == REPORT_NARRATIVE_POINT else None
+    if narrative is None:
+        raise ValueError("analysis_report: the last record must be the report.narrative record of this round.")
+    use(narrative)
+    sections.append({"heading": "Narrative", "text": _narrative_text(narrative)})
+    return {"sections": sections, "source_records": _ordered_ids(records, used),
+            "fallback": narrative["chosen"] in _FALLBACKS}
+
+
+# --- the summary (M1.4b step 2b) ---------------------------------------------------------------------------------------
+
+def _headline(entry) -> str:
+    result, capability = entry.get("result") or {}, entry.get("capability")
+    if capability in ("two_group", "multi_group"):
+        text = f"p = {result['p_value']:.3g}" if result.get("p_value") is not None else "no p-value recorded"
+        if capability == "two_group" and result.get("group_a_n") is not None and result.get("group_b_n") is not None:
+            text += f" (n = {result['group_a_n']} and {result['group_b_n']})"
+        return text
+    if capability == "regression":
+        parts = []
+        if result.get("r_squared") is not None:
+            parts.append(f"R-squared = {result['r_squared']:.2f}")
+        if result.get("f_p_value") is not None:
+            parts.append(f"overall F-test p = {result['f_p_value']:.3g}")
+        if result.get("n_observations") is not None:
+            parts.append(f"n = {result['n_observations']}")
+        return ", ".join(parts) or "no fit statistics recorded"
+    if capability == "descriptive":
+        return "the data were described (see the report)"
+    return "no headline recorded"
+
+
+def summary_report(records: list, rounds: list, request_text: str) -> dict:
+    """{"sections", "source_records"} from the records of the current question and its round entries."""
+    records = copy.deepcopy(list(records))
+    used = set()
+    narratives = [r for r in records if r.get("decision_point") == REPORT_NARRATIVE_POINT]
+    # a descriptive question writes no narrative record: its round is the last one (rounds accumulate across questions)
+    question_rounds = list(rounds[-len(narratives):]) if narratives else list(rounds[-1:])
+
+    question = [str(request_text)]
+    if question_rounds:
+        question.append(f"Run as: {question_rounds[0].get('question_type')}")
+    sections = [{"heading": "Question", "text": "\n".join(question)}]
+
+    scan = _latest(records, SCAN_POINT)
+    if scan is None:
+        stage1 = ["No Stage 1 scan was recorded."]
+    else:
+        used.add(scan["id"])
+        ev = scan["evidence"]
+        stage1 = [f"{ev['rows']} rows and {ev['columns_scanned']} columns checked."]
+        fixes = [r for r in records if r.get("decision_point") == FIX_POINT]
+        approved = left = 0
+        for fix in fixes:
+            used.add(fix["id"])
+            approval = next((r for r in records if r.get("decision_point") == APPROVAL_POINT
+                             and r["evidence"].get("fix_record_id") == fix["id"]), None)
+            if approval is not None:
+                used.add(approval["id"])
+            if approval is not None and approval["chosen"] == "reject":
+                left += 1
+            else:
+                approved += 1
+        stage1.append(f"{len(fixes)} operation(s) proposed: {approved} approved, {left} left as is.")
+    describe = _latest(records, DESCRIBE_EXECUTION_POINT)
+    if describe is not None:
+        used.add(describe["id"])
+        stage1.append(f"{describe['evidence']['row_count']} rows analysed.")
+    sections.append({"heading": "Stage 1", "text": "\n".join(stage1)})
+
+    results = []
+    for entry in question_rounds:
+        label = "Exploratory analysis (not corrected for multiple testing)" if entry.get("exploratory") else "Main analysis"
+        name = method_name(entry["method"]) if entry.get("method") else str(entry.get("capability"))
+        results.append(f"{label}: {name} - {_headline(entry)}.")
+    sections.append({"heading": "Results", "text": "\n".join(results) or "No results were recorded."})
+
+    caveats = []
+    last_plan = question_rounds[-1].get("plan") if question_rounds else None
+    for issue in (getattr(last_plan, "unaddressed_issues", None) or ()):
+        caveats.append(f"{issue.issue_type} ({issue.description}) was left unaddressed because: {issue.rejection_reason}")
+    for r in narratives:
+        used.add(r["id"])
+        if r["chosen"] in _FALLBACKS:
+            caveats.append(f"The narrative of round {r['evidence'].get('round')} was written from the computed facts.")
+    if any(entry.get("exploratory") for entry in question_rounds):
+        caveats.append("Exploratory results are not corrected for multiple testing.")
+    sections.append({"heading": "Caveats", "text": "\n".join(caveats) or "None recorded."})
+    return {"sections": sections, "source_records": _ordered_ids(records, used)}

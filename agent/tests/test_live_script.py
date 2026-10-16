@@ -6,7 +6,8 @@ import pytest
 
 from core.report import CausalLanguageViolation
 from eval.check_live_capabilities import (
-    _resume_for, classify_error, filter_runs, print_stage1_report, quota_reset_hint, summarize,
+    _resume_for, classify_error, filter_runs, print_analysis_reports, print_stage1_report, quota_reset_hint,
+    summarize,
 )
 
 GROQ_TPD = ("Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in "
@@ -147,4 +148,60 @@ def test_print_stage1_report(capsys):
         "      | ",
         "      | Checked",
         "      | No issues.",
+    ]
+
+
+# --- print_analysis_reports (M1.4b step 2b) -------------------------------------------------------------------------
+
+def _analysis(round_index, records=4):
+    return {"stage": "analysis", "round": round_index, "text": f"Analysis (round {round_index}): t\n\nWhy this test\nX.",
+            "sections": [{"heading": "About the test", "text": "A.", "collapsed": True},
+                         {"heading": "Why this test", "text": "X."}],
+            "source_records": [f"r{i}" for i in range(records)]}
+
+
+SUMMARY = {"stage": "summary", "text": "Summary\n\nRounds\nMain analysis.",
+           "sections": [{"heading": "Question", "text": "q"}, {"heading": "Rounds", "text": "Main analysis."}],
+           "source_records": ["s"]}
+STAGE1 = {"stage": "stage1", "text": "Stage 1", "sections": [{"heading": "Checked", "text": "x"}],
+          "source_records": ["a"]}
+
+
+def test_print_analysis_reports_without_entries(capsys):
+    print_analysis_reports({}, "two_group")
+    print_analysis_reports({"stage_reports": []}, "two_group")
+    print_analysis_reports({"stage_reports": [STAGE1]}, "two_group")
+    assert capsys.readouterr().out == ""
+
+
+def test_print_analysis_reports_for_another_label(capsys):
+    print_analysis_reports({"stage_reports": [STAGE1, _analysis(1), SUMMARY]}, "multi_group")
+    assert capsys.readouterr().out.splitlines() == [
+        "   analysis report [multi_group]: round 1, About the test*, Why this test (4 records)",
+        "   summary [multi_group]: Question, Rounds",
+    ]
+
+
+def test_print_analysis_reports_for_two_group(capsys):
+    print_analysis_reports({"stage_reports": [STAGE1, _analysis(1, 3), SUMMARY]}, "two_group")
+    assert capsys.readouterr().out.splitlines() == [
+        "   analysis report [two_group]: round 1, About the test*, Why this test (3 records)",
+        "      | Analysis (round 1): t",
+        "      | ",
+        "      | Why this test",
+        "      | X.",
+        "   summary [two_group]: Question, Rounds",
+        "      | Summary",
+        "      | ",
+        "      | Rounds",
+        "      | Main analysis.",
+    ]
+
+
+def test_print_analysis_reports_for_an_exploratory_run(capsys):
+    print_analysis_reports({"stage_reports": [STAGE1, _analysis(1), _analysis(2, 5), SUMMARY]}, "exploratory")
+    assert capsys.readouterr().out.splitlines() == [
+        "   analysis report [exploratory]: round 1, About the test*, Why this test (4 records)",
+        "   analysis report [exploratory]: round 2, About the test*, Why this test (5 records)",
+        "   summary [exploratory]: Question, Rounds",
     ]

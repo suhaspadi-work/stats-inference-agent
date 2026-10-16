@@ -181,4 +181,5 @@ def test_default_graph_has_the_same_nodes(tmp_path):
     assert nodes == {"classify", "clarify", "reclassify", "profile", "plan_stages", "stage_plan_gate", "wrangle_propose",
                      "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report",
                      "stage_gate", "start_round",
-                     "stage1_report"}  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
+                     "stage1_report",  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
+                     "summary"}  # M1.4b step 2b: the overall summary after the last report

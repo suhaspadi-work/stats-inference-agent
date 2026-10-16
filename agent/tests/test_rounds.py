@@ -56,9 +56,11 @@ def test_make_round_entry_without_a_method():
 def _check_entry(update, recorder, state, capability, result_key, round_index=1, exploratory=False):
     # M1.4a: an analysis report also returns its report.narrative record; the diagnostic path does not
     analysis = capability != "descriptive"
-    assert set(update) == {"report", "rounds"} | ({"decision_log"} if analysis else set())
+    # M1.4b step 2b: the analysis branch also returns its "how this was chosen" entry; the diagnostic one does not
+    assert set(update) == {"report", "rounds"} | ({"decision_log", "stage_reports"} if analysis else set())
     if analysis:
         assert [e["decision_point"] for e in update["decision_log"]] == ["report.narrative"]
+        assert [e["stage"] for e in update["stage_reports"]] == ["analysis"]
     (entry,) = update["rounds"]
     plan = state["plan"]
     assert set(entry) == ENTRY_KEYS

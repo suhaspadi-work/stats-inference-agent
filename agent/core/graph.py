@@ -10,7 +10,7 @@ from core.nodes import (
     make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
     make_describe_node, make_stage1_report_node, route_after_cleaning,
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
-    route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node,
+    route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node, make_summary_node,
     make_draft_plan_node,
     make_select_method_node, make_freeze_node, make_execute_node, make_eda_node, make_report_node,
 )
@@ -76,7 +76,9 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
          -> M1.3b: after a comparison whose stage plan offered modeling: stage_gate (run or skip the exploratory round)
             (a predictor choice that breaks a rule is refused and the gate re-opens: stage_gate -> stage_gate)
          -> if run: start_round (an exploratory regression plan) -> select_method -> freeze -> execute -> report
-      -> END (after the exploratory round's report, or when nothing is offered)
+         (M1.4b step 2b: each analysis report also adds a "how this was chosen" entry to stage_reports)
+      -> summary (M1.4b step 2b: the overall summary, composed by code; after the last report, a skip or no offer)
+      -> END
 
     classify_fn, draft_fn and propose_fn exist so tests can run the real graph without the model;
     left as None, each node uses its real model call. When event_log_dir is given, every node's new
@@ -118,6 +120,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     add_node("report", make_report_node())
     add_node("stage_gate", make_stage_gate_node(store))
     add_node("start_round", make_start_round_node(store))
+    add_node("summary", make_summary_node())
 
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_after_classify, {"profile": "profile", "clarify": "clarify"})
@@ -141,9 +144,10 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("freeze", route_after_freeze,
                                 {"freeze": "freeze", "select_method": "select_method", "execute": "execute", END: END})
     graph.add_edge("execute", "report")
-    graph.add_conditional_edges("report", route_after_report, {"stage_gate": "stage_gate", END: END})
+    graph.add_conditional_edges("report", route_after_report, {"stage_gate": "stage_gate", "summary": "summary"})
     graph.add_conditional_edges("stage_gate", route_after_stage_gate,
-                                {"start_round": "start_round", "stage_gate": "stage_gate", END: END})
+                                {"start_round": "start_round", "stage_gate": "stage_gate", "summary": "summary"})
     graph.add_edge("start_round", "select_method")
+    graph.add_edge("summary", END)
 
     return graph.compile(checkpointer=checkpointer if checkpointer is not None else make_checkpointer())

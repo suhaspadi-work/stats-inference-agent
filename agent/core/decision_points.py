@@ -56,6 +56,8 @@ NON_CHOOSING_NODES: dict[str, str] = {
     "eda": ("runs the descriptive statistics; the one choice around it, skipping method selection "
             "and freeze, is recorded by planner.route"),
     "stage1_report": "composes the Stage 1 report from the decision records of this question; no option is chosen",
+    "summary": ("composes the overall summary from the decision records and the round results of this question; "
+                "no option is chosen"),
 }
 
 # The stage of every graph node (M1.2). The stage is a tag on a node, not a LangGraph subgraph;
@@ -68,7 +70,7 @@ NODE_STAGES: dict[str, str] = {
     "stage1_report": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "stage_gate": "analysis", "start_round": "analysis",
-    "report": "report",
+    "report": "report", "summary": "report",
 }
 
 # Analyses that write no record at run time, and why.

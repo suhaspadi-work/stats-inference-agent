@@ -36,6 +36,7 @@ EXPECTED_STAGES = {
     "stage1_report": "stage1",  # M1.4b
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",
+    "summary": "report",  # M1.4b step 2b
 }
 RUNNABLE = (QuestionType.TWO_GROUP_COMPARISON, QuestionType.AB_TEST, QuestionType.MULTI_GROUP_COMPARISON,
             QuestionType.DRIVER_ANALYSIS)

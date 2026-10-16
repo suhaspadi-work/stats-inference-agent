@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import Callable, Optional
 from langgraph.graph import END
 from langgraph.types import interrupt
@@ -57,7 +58,12 @@ from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
 from core.stage_plan_gate import apply_gate_decision, changed_steps, check_run_overrides, gate_needed, gate_payload
 from core.describe_records import describe_execution_record
-from core.stage_reports import STAGE1_TITLE, current_question_records, make_stage_report_entry, stage1_report
+from core.stage_reports import (
+    STAGE1_TITLE, analysis_report, current_question_records, make_stage_report_entry, method_name, round_records,
+    selection_record, stage1_report, summary_report,
+)
+
+logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.6
 
@@ -790,8 +796,38 @@ def make_report_node(report_fn=generate_report) -> Callable[[AgentState], dict]:
         if capability.kind == "diagnostic":
             return {"report": report_text, "rounds": [entry]}  # the descriptive report is not guarded: no record
         record = report_narrative_record(round_index, capability.name, exploratory, attempts, chosen)
-        return {"report": report_text, "rounds": [entry], **log_update(record)}
+        update = {"report": report_text, "rounds": [entry], **log_update(record)}
+        # M1.4b step 2b: "how this was chosen", composed by code from this round's records. A failure to compose
+        # must never lose the finished report, so the update is returned without it.
+        try:
+            records = round_records(list(state.get("decision_log") or []) + update["decision_log"])
+            composed = analysis_report(records, exploratory)
+            name = method_name((selection_record(records) or {}).get("chosen"))
+            title = (f"Exploratory analysis (round {round_index}): {name}" if exploratory
+                     else f"Analysis (round {round_index}): {name}")
+            update["stage_reports"] = [make_stage_report_entry("analysis", round_index, title, composed,
+                                                               fallback=composed["fallback"], exploratory=exploratory)]
+        except Exception:
+            logger.warning("stage report composition failed for round %s", round_index, exc_info=True)
+        return update
     return report_node
+
+
+def make_summary_node() -> Callable[[AgentState], dict]:
+    """
+    M1.4b step 2b: the overall summary after the last report, composed by code from the decision records and the
+    round results of this question (no model call). It chooses nothing, so it writes no decision record; a run
+    without any round gets no summary.
+    """
+    def summary_node(state: AgentState) -> dict:
+        rounds = state.get("rounds") or []
+        if not rounds:
+            return {}
+        records = current_question_records(state.get("decision_log") or [])
+        request_text = state.get("request_text") or getattr(rounds[0].get("plan"), "request_text", "")
+        composed = summary_report(records, rounds, request_text)
+        return {"stage_reports": [make_stage_report_entry("summary", None, "Summary", composed)]}
+    return summary_node
 
 
 # --- M1.3b: the boundary gate and the exploratory round ---------------------------------------------------
@@ -805,15 +841,15 @@ def _round_two_proposal(state: AgentState, store: DatasetStore):
 
 
 def route_after_report(state: AgentState) -> str:
-    """After a report: an exploratory round ends the run; a comparison whose stage plan offered modeling goes
-    to the boundary gate; everything else ends."""
+    """After a report: an exploratory round goes to the summary; a comparison whose stage plan offered modeling
+    goes to the boundary gate; everything else goes to the summary (M1.4b step 2b; it used to end the run)."""
     if state.get("exploratory_round"):
-        return END
+        return "summary"
     stage_plan, plan = state.get("stage_plan"), state.get("plan")
     if stage_plan is None or plan is None or plan.question_type.value not in COMPARISON_TYPES:
-        return END
+        return "summary"
     modeling = next(s for s in plan_steps(stage_plan) if s["step"] == "modeling")
-    return "stage_gate" if modeling["state"] == "offered" else END
+    return "stage_gate" if modeling["state"] == "offered" else "summary"
 
 
 def _refused_attempts(state: AgentState) -> int:
@@ -869,10 +905,11 @@ def make_stage_gate_node(store: DatasetStore) -> Callable[[AgentState], dict]:
 
 
 def route_after_stage_gate(state: AgentState) -> str:
-    """A refused choice re-opens the gate; run starts the exploratory round; skip ends the run."""
+    """A refused choice re-opens the gate; run starts the exploratory round; skip goes to the summary (M1.4b
+    step 2b; it used to end the run)."""
     if state.get("stage_gate_refusal") is not None:
         return "stage_gate"
-    return "start_round" if (state.get("next_round") or {}).get("run") else END
+    return "start_round" if (state.get("next_round") or {}).get("run") else "summary"
 
 
 def make_start_round_node(store: DatasetStore) -> Callable[[AgentState], dict]:

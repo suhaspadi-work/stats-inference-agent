@@ -585,7 +585,7 @@ def test_the_exploratory_round_shows_the_same_report(fake_model, tmp_path, store
                                "explore", stage_gate={"action": "run"})
     first, second = [p["payload"]["stage1_report"] for p in pauses if p["type"] == "plan_approval"]
     assert first is not None and first == second
-    assert len(values["rounds"]) == 2 and len(values["stage_reports"]) == 1
+    assert len(values["rounds"]) == 2 and len([e for e in values["stage_reports"] if e["stage"] == "stage1"]) == 1  # M1.4b 2b
 
 
 def test_the_report_is_built_before_draft_plan(fake_model, tmp_path, store):
@@ -601,7 +601,7 @@ def test_a_second_question_on_the_same_thread_gets_its_own_report(fake_model, tm
     app = _app(store)
     _drive(app, _start(_messy_frame(), tmp_path, store, "q1"), "thread")
     values, _, _ = _drive(app, _start(_frame(seed=62), tmp_path, store, "q2"), "thread")
-    first, second = values["stage_reports"]
+    first, second = [e for e in values["stage_reports"] if e["stage"] == "stage1"]  # M1.4b step 2b: only the stage1 entries
     assert (first["stage"], second["stage"]) == ("stage1", "stage1")
     assert "Removed duplicate rows" in first["text"]
     assert _sections(second)["Changed"] == "No changes were proposed."

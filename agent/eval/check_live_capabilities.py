@@ -147,6 +147,28 @@ def print_stage1_report(state, label):
                 print(f"      | {line}")
 
 
+def print_analysis_reports(state, label):
+    """M1.4b step 2b: each analysis round's "how this was chosen" entry (collapsed sections marked *) and the
+    summary; for the two_group run, also their full text."""
+    entries = state.get("stage_reports") or []
+
+    def headings(e):
+        return ", ".join(s["heading"] + ("*" if s.get("collapsed") else "") for s in e["sections"])
+
+    def text(e):
+        for line in e["text"].split("\n"):
+            print(f"      | {line}")
+
+    for e in (e for e in entries if e.get("stage") == "analysis"):
+        print(f"   analysis report [{label}]: round {e['round']}, {headings(e)} ({len(e['source_records'])} records)")
+        if label == "two_group":
+            text(e)
+    for e in (e for e in entries if e.get("stage") == "summary"):
+        print(f"   summary [{label}]: {headings(e)}")
+        if label == "two_group":
+            text(e)
+
+
 def print_report_narrative(state_log, label):
     """M1.4a: whose text became each analysis report, and whether each model attempt passed the guard."""
     records = [e for e in state_log if e["decision_point"] == "report.narrative"]
@@ -230,6 +252,7 @@ def report_event_log(app, cfg, label, events, all_points, failed):
     print_stage_plan(log, label)
     print_describe(log, label)
     print_stage1_report(state, label)
+    print_analysis_reports(state, label)
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
