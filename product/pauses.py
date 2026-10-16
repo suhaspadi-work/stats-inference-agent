@@ -8,6 +8,7 @@ import streamlit as st
 
 import pause_views as pv
 from pause_types import widget_key
+from results_views import current_overview, overview_table
 
 GATE_OPTIONS = ("proposed", "own", "skip")
 
@@ -50,7 +51,7 @@ def _stage_plan(view, serial):
     return None
 
 
-def _plan_approval(view, serial):
+def _plan_approval(view, serial, values):
     st.subheader("Review the analysis plan")
     render_refusal(view)
     st.write(f"**Question:** {view['request_text']}")
@@ -66,6 +67,11 @@ def _plan_approval(view, serial):
     if report:
         with st.expander(report.get("title") or "Stage 1 report"):
             render_sections(report)
+            # M1.5 step P3b2: the data overview of this question's describe result (no nested expander)
+            table = overview_table(current_overview(values))
+            if table is not None:
+                st.markdown("**Your data**")
+                st.dataframe(table["rows"], hide_index=True, width="stretch")
     st.caption("Editing the predictors here is not available yet.")
     col1, col2 = st.columns(2)
     with col1:
@@ -159,7 +165,7 @@ def render_pause(payload, values, serial):
     if kind == "stage_plan_approval":
         return _stage_plan(view, serial)
     if kind == "plan_approval":
-        return _plan_approval(view, serial)
+        return _plan_approval(view, serial, values or {})
     if kind == "stage_gate":
         return _stage_gate(view, serial, values or {})
     if kind == "wrangling_approval":

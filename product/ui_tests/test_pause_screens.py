@@ -2,6 +2,8 @@
 The pause screens (product/pauses.py) rendered headless with AppTest on the real payloads: each renders, shows
 what it should, and returns exactly what the pure answer builders return for the same choices.
 """
+import copy
+
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -232,3 +234,21 @@ def test_an_unsupported_pause():
     at = _app({"payload": {"type": "made_up_pause", "x": 1}, "values": {}})
     assert [w.value for w in at.warning] == ["Interrupt type 'made_up_pause' isn't wired up in the UI yet."]
     assert len(at.json) == 1 and _answer(at) is None
+
+
+# --- hand-built variants of real payloads (M1.5 step P3b2) ------------------------------------------------------------
+
+def test_the_auto_approved_note(real_pauses):
+    (pause,) = _of(real_pauses, "wrangling_approval")
+    payload = {**copy.deepcopy(pause["payload"]), "auto_approved_note": "1 additional operation(s) were auto-approved."}
+    at = _app({"payload": payload, "values": pause["values"]})
+    assert [i.value for i in at.info] == ["1 additional operation(s) were auto-approved."]
+
+
+def test_a_gate_with_no_left_out_columns(real_pauses):
+    _, clean = _gates(real_pauses)
+    payload = copy.deepcopy(clean["payload"])
+    payload["offer"]["unsuitable"] = {}
+    at = _app({"payload": payload, "values": clean["values"]})
+    assert "Columns left out, and why" not in [e.label for e in at.expander]
+    assert _app(clean).expander[0].label == "Columns left out, and why"

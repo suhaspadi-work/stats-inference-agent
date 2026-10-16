@@ -27,9 +27,15 @@ from langgraph.types import Command
 from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
-from db import init_db, create_session, record_message, list_sessions, list_messages
+from core.explain import explain_method
+from db import (
+    init_db, create_session, record_message, list_sessions, list_messages, record_explanation, list_explanations,
+)
 from run_state import record_once, reset_run, store_result
 from pauses import render_pause
+from results_views import finished_view
+from explain_flow import explain_once
+from results_ui import render_finished, render_history
 
 MAX_RETRIES = 4
 
@@ -86,6 +92,26 @@ def run_agent_step(fn):
             "Please try a different question, or start a new session."
         )
 
+
+def handle_explain(request):
+    """One on-request explanation (M1.5 step P3b2): computed once per (round, method, question), recorded once
+    against the finished question's message, then the screen is redrawn with it."""
+    state = st.session_state.graph_result
+    try:
+        with st.spinner("Writing the explanation..."):
+            explain_once(
+                st.session_state, request,
+                lambda method_id, round_index, question: run_agent_step(
+                    lambda: explain_method(method_id, state, round_index, question)),
+                lambda result: record_explanation(
+                    st.session_state.db_session_id, st.session_state.get("message_id"), result["round"],
+                    result["method_id"], result["question"], result["answer"], result["source"]),
+            )
+    except AgentRunFailed as e:
+        st.error(str(e))
+        return
+    st.rerun()
+
 def render_session_history(session_row, messages):
     """
     Renders one past session's Q&A history, read-only. Deliberately
@@ -95,18 +121,7 @@ def render_session_history(session_row, messages):
     sidebar selector extended with a 'Resume' button -- this function
     itself won't need to change when that happens.
     """
-    st.subheader(f"History: {session_row['dataset_name']}")
-    st.caption(f"Session started {session_row['created_at'][:19].replace('T', ' ')}")
-    if not messages:
-        st.write("No questions were asked in this session.")
-    for msg in messages:
-        with st.container(border=True):
-            st.write(f"**Q:** {msg['question_text']}")
-            if msg["report_text"]:
-                st.write(f"**A:** {msg['report_text']}")
-            else:
-                st.caption("(This question did not produce a completed report.)")
-            st.caption(msg["created_at"][:19].replace("T", " "))
+    render_history(session_row, messages, list_explanations(session_row["id"]))
 
 st.set_page_config(page_title="Stats Inference Agent", page_icon="📊", layout="wide")
 
@@ -232,16 +247,17 @@ elif st.session_state.get("authentication_status"):
             report = st.session_state.graph_result.get("report")
             test_result = st.session_state.graph_result.get("test_result")
 
-            if plan and plan.status.value == "executed" and report:
-                st.subheader("Report")
-                st.write(report)
-                if test_result:
-                    with st.expander("See the underlying statistics"):
-                        st.json(test_result)
+            view = finished_view(st.session_state.graph_result)
+            if view["kind"] == "report":
+                request = render_finished(view, st.session_state.get("pause_serial", 0),
+                                          st.session_state.get("explanations"))
 
-                record_once(st.session_state, lambda: record_message(
+                record_once(st.session_state, lambda: st.session_state.__setitem__("message_id", record_message(
                     st.session_state.db_session_id, st.session_state.current_question, report, test_result,
-                    stage_reports=st.session_state.graph_result.get("stage_reports")))
+                    stage_reports=st.session_state.graph_result.get("stage_reports"))))
+
+                if request is not None:
+                    handle_explain(request)
 
                 if st.button("Ask another question"):
                     st.session_state.dataset = st.session_state.graph_result.get("dataset", st.session_state.dataset)
@@ -259,6 +275,6 @@ elif st.session_state.get("authentication_status"):
 
         if st.button("Start a new session"):
             for key in ("dataset", "thread_id", "db_session_id", "agent_app", "graph_result", "current_question",
-                        "recorded_run"):
+                        "recorded_run", "message_id", "explanations"):
                 st.session_state.pop(key, None)
             st.rerun()
