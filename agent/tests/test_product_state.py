@@ -10,7 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "product"))
 
 from pause_types import widget_key  # noqa: E402
-from run_state import next_pause_serial, record_once, reset_run, store_result  # noqa: E402
+from run_state import (  # noqa: E402
+    explanation_key, get_explanation, next_pause_serial, record_once, remember_explanation, reset_run, store_result,
+)
 
 
 # --- widget_key -----------------------------------------------------------------------------------------------------
@@ -99,3 +101,30 @@ def test_store_result_replaces_and_counts():
     serials = [store_result(state, r) for r in results]
     assert serials == [1, 2, None, 3]
     assert state["graph_result"] is results[-1]
+
+
+# --- the explanation cache (M1.5 step P3a) ----------------------------------------------------------------------------------
+
+def test_explanation_key():
+    assert explanation_key(1, "ols", None) == explanation_key(1, "ols", "") == explanation_key(1, "ols", "   ") == "1|ols|"
+    assert explanation_key(1, "ols", "  Why?  ") == "1|ols|Why?"
+    keys = {explanation_key(1, "ols", "q"), explanation_key(2, "ols", "q"), explanation_key(1, "dunn", "q"),
+            explanation_key(1, "ols", "other")}
+    assert len(keys) == 4
+
+
+def test_remember_and_get_explanation():
+    a, b = {}, {}
+    key = explanation_key(1, "ols", None)
+    result = {"answer": "It fits a line.", "source": "model"}
+    assert remember_explanation(a, key, result) is result
+    assert get_explanation(a, key) is result
+    assert get_explanation(a, explanation_key(2, "ols", None)) is None
+    assert get_explanation(b, key) is None and "explanations" not in b
+
+
+def test_reset_run_forgets_the_message_and_its_explanations():
+    state = {"graph_result": {}, "current_question": "q", "recorded_run": True, "message_id": 7,
+             "explanations": {"1|ols|": {}}, "pause_serial": 3}
+    reset_run(state)
+    assert state == {"pause_serial": 3}

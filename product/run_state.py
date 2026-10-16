@@ -3,7 +3,8 @@ Run bookkeeping for the product (M1.5 step P1). Pure: works on any dict-like, so
 st.session_state in the app.
 """
 
-RUN_KEYS = ("graph_result", "current_question", "recorded_run")
+# M1.5 step P3a: the finished question's message id and its cached explanations belong to the run too
+RUN_KEYS = ("graph_result", "current_question", "recorded_run", "message_id", "explanations")
 
 
 def next_pause_serial(state) -> int:
@@ -35,3 +36,17 @@ def reset_run(state) -> None:
     """Forgets the current run; pause_serial is kept so widget keys never repeat."""
     for key in RUN_KEYS:
         state.pop(key, None)
+
+
+def explanation_key(round_index, method_id, question) -> str:
+    """The cache key of one explanation; no question and a blank one are the same key."""
+    return f"{round_index}|{method_id}|{(question or '').strip()}"
+
+
+def remember_explanation(state, key, result):
+    state.setdefault("explanations", {})[key] = result
+    return result
+
+
+def get_explanation(state, key):
+    return (state.get("explanations") or {}).get(key)
