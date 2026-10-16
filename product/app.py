@@ -28,7 +28,8 @@ from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
 from db import init_db, create_session, record_message, list_sessions, list_messages
-from run_state import record_once, reset_run
+from run_state import record_once, reset_run, store_result
+from pauses import render_pause
 
 MAX_RETRIES = 4
 
@@ -206,7 +207,7 @@ elif st.session_state.get("authentication_status"):
                         {"request_text": question, "session_id": username, "dataset": st.session_state.dataset},
                         graph_config,
                     ))
-                    st.session_state.graph_result = result
+                    store_result(st.session_state, result)
                     st.rerun()
                 except AgentRunFailed as e:
                     st.error(str(e))
@@ -214,97 +215,16 @@ elif st.session_state.get("authentication_status"):
         # --- An interrupt is pending: render the right widget ---
         elif "__interrupt__" in st.session_state.graph_result:
             payload = st.session_state.graph_result["__interrupt__"][0].value
-            itype = payload.get("type")
-
-            if itype == "plan_approval":
-                st.subheader("Review the analysis plan")
-                st.write(f"**Question:** {payload['request_text']}")
-                st.write(f"**Outcome variable:** {payload['outcome_name']} ({payload['outcome_type']})")
-                st.write(f"**Comparing on:** {', '.join(payload['candidate_predictors'])}")
-                st.write(f"**Data type:** {payload['causal_status']}")
-                if payload.get("classification_rationale"):
-                    st.caption(payload["classification_rationale"])
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("✅ Approve"):
-                        try:
-                            result = run_agent_step(lambda: st.session_state.agent_app.invoke(
-                                Command(resume={"action": "approve"}), graph_config,
-                            ))
-                            st.session_state.graph_result = result
-                            st.rerun()
-                        except AgentRunFailed as e:
-                            st.error(str(e))
-                with col2:
-                    reason = st.text_input("Reason for rejecting (optional)", key="reject_reason")
-                    if st.button("❌ Reject"):
-                        try:
-                            result = run_agent_step(lambda: st.session_state.agent_app.invoke(
-                                Command(resume={"action": "reject", "reason": reason or "No reason given"}), graph_config,
-                            ))
-                            st.session_state.graph_result = result
-                            st.rerun()
-                        except AgentRunFailed as e:
-                            st.error(str(e))
-            elif itype == "wrangling_approval":
-                st.subheader("Review proposed data-cleaning steps")
-                st.write("The agent found some data-quality issues and proposes fixing them before analysis:")
-
-                if payload.get("auto_approved_note"):
-                    st.info(payload["auto_approved_note"])
-
-                decisions = []
-                for op in payload["proposed_operations"]:
-                    with st.container(border=True):
-                        st.write(f"**{op['op_type']}** — {op['rationale']}")
-                        st.caption(f"Alternative considered: {op['alternative']}")
-
-                        action = st.radio(
-                            "Decision", ["approve", "edit", "reject"],
-                            key=f"wrangle_action_{op['index']}", horizontal=True,
-                        )
-                        decision = {"index": op["index"], "action": action}
-
-                        if action == "reject":
-                            reason = st.text_input(
-                                "Reason for rejecting", key=f"wrangle_reason_{op['index']}",
-                            )
-                            decision["reason"] = reason or "No reason given"
-                        elif action == "edit":
-                            st.caption(f"Current params: {op['params']}")
-                            st.caption("Editing params via UI isn't built yet in this version — approving with original params instead.")
-                            decision["action"] = "approve"
-
-                        decisions.append(decision)
-
-                if st.button("Submit decisions"):
-                    try:
-                        result = run_agent_step(lambda: st.session_state.agent_app.invoke(
-                            Command(resume={"decisions": decisions}), graph_config,
-                        ))
-                        st.session_state.graph_result = result
-                        st.rerun()
-                    except AgentRunFailed as e:
-                        st.error(str(e))
-
-            elif itype == "clarification_needed":
-                st.subheader("A quick clarification")
-                st.write(payload["question"])
-                clarification = st.text_input("Your answer", key="clarification_input")
-                if st.button("Submit answer") and clarification:
-                    try:
-                        result = run_agent_step(lambda: st.session_state.agent_app.invoke(
-                            Command(resume=clarification), graph_config,
-                        ))
-                        st.session_state.graph_result = result
-                        st.rerun()
-                    except AgentRunFailed as e:
-                        st.error(str(e))
-
-            else:
-                st.warning(f"Interrupt type '{itype}' isn't wired up in the UI yet.")
-                st.json(payload)
+            answer = render_pause(payload, st.session_state.graph_result, st.session_state.get("pause_serial", 0))
+            if answer is not None:
+                try:
+                    result = run_agent_step(lambda: st.session_state.agent_app.invoke(
+                        Command(resume=answer), graph_config,
+                    ))
+                    store_result(st.session_state, result)
+                    st.rerun()
+                except AgentRunFailed as e:
+                    st.error(str(e))
 
         # --- Run finished: show the report ---
         else:

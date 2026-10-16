@@ -12,6 +12,15 @@ def next_pause_serial(state) -> int:
     return state["pause_serial"]
 
 
+def store_result(state, result):
+    """Stores a graph result; a result that pauses gets a new pause serial (returned), so the pause's widgets start
+    clean. None when the result did not pause."""
+    state["graph_result"] = result
+    if "__interrupt__" in result:
+        return next_pause_serial(state)
+    return None
+
+
 def record_once(state, record_fn) -> bool:
     """Calls record_fn once per finished run: False without calling it when this run is already recorded. When
     record_fn raises, the flag stays unset and the exception propagates, so a later rerun can record."""

@@ -29,3 +29,16 @@ python -m streamlit run app.py
 ```
 
 The app creates `app_data.db` (the session history) and `agent_data/` (uploaded datasets) here; neither is in git.
+
+## UI tests
+
+The pause screens are tested headless with Streamlit's AppTest (no browser, no model): the payloads come from a
+real run of the agent's graph with fake models. From this folder:
+
+```
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m pytest ui_tests -q
+```
+
+The backend's own tests (including the product's pure modules and the pause contract) run from `../agent`.

@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "product"))
 
 from pause_types import widget_key  # noqa: E402
-from run_state import next_pause_serial, record_once, reset_run  # noqa: E402
+from run_state import next_pause_serial, record_once, reset_run, store_result  # noqa: E402
 
 
 # --- widget_key -----------------------------------------------------------------------------------------------------
@@ -77,3 +77,25 @@ def test_the_finished_screen_records_once_per_run():
     for _ in range(2):
         record_once(state, lambda: calls.append(state["current_question"]))
     assert calls == ["q1", "q2"]
+
+
+# --- store_result (M1.5 step P2b) ----------------------------------------------------------------------------------------
+
+def test_store_result_with_an_interrupt():
+    state, paused = {}, {"__interrupt__": ("pause",)}
+    assert store_result(state, paused) == 1
+    assert state["graph_result"] is paused and state["pause_serial"] == 1
+
+
+def test_store_result_without_an_interrupt():
+    state, finished = {"pause_serial": 4}, {"report": "done"}
+    assert store_result(state, finished) is None
+    assert state["graph_result"] is finished and state["pause_serial"] == 4
+
+
+def test_store_result_replaces_and_counts():
+    state = {}
+    results = [{"__interrupt__": ("a",)}, {"__interrupt__": ("b",)}, {"report": "r"}, {"__interrupt__": ("c",)}]
+    serials = [store_result(state, r) for r in results]
+    assert serials == [1, 2, None, 3]
+    assert state["graph_result"] is results[-1]
