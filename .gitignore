@@ -1,1 +1,9 @@
 .Rhistory
+
+# OS files, the product sample zip, root-level environments and caches (product/ and agent/ have their own lists)
+.DS_Store
+product/*.zip
+.venv/
+**/__pycache__/
+.pytest_cache/
+.env
