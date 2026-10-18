@@ -34,6 +34,13 @@ class Dataset:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     schema_version: int = 1
+    # M2.1: the handles a join or aggregate result was built from; empty for an upload and for a
+    # single-parent version (whose parent is name@v{parent_version})
+    parents: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        # checkpoints turn tuples into lists; keep parents a tuple so equality and hashing survive a round trip
+        object.__setattr__(self, "parents", tuple(self.parents))
 
     @property
     def handle(self) -> str:
@@ -50,6 +57,24 @@ class Dataset:
             parent_version=self.version,
             created_from_operation=operation_id,
         )
+
+    @classmethod
+    def derived(cls, session_id: str, name: str, storage_key: str, parents, operation_id: str) -> "Dataset":
+        """M2.1: a dataset built from several parents (a join or an aggregate); its own version chain starts at 1."""
+        parents = tuple(parents)
+        if not parents:
+            raise ValueError("A derived dataset needs at least one parent.")
+        return cls(session_id=session_id, name=name, version=1, storage_key=storage_key, parent_version=None,
+                   created_from_operation=operation_id, parents=parents)
+
+
+def parent_handles(dataset: Dataset) -> tuple[str, ...]:
+    """The handles a dataset came from: its parents, the previous version of the same table, or none."""
+    if dataset.parents:
+        return tuple(dataset.parents)
+    if dataset.parent_version is not None:
+        return (f"{dataset.name}@v{dataset.parent_version}",)
+    return ()
 
 
 class LocalDiskStore:

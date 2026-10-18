@@ -359,7 +359,8 @@ def test_a_missing_type_breaks_the_first_resume(tmp_path, store, serde_log):
     paused = app.invoke(_start(_dataset(_messy(rng), tmp_path, store, "neg")), config, interrupt_after=STOP)
     assert "__interrupt__" in paused
     assert type(app.get_state(config).values["dataset"]) is dict  # already a raw payload at the pause
-    with pytest.raises(AttributeError, match="'dict' object has no attribute 'storage_key'"):
+    # M2.1: the profile node reads the blocked dataset's name before its storage key
+    with pytest.raises(AttributeError, match=r"'dict' object has no attribute 'name'[\s\S]*task with name 'profile'"):
         app.invoke(Command(resume="the regions"), config, interrupt_after=STOP)
     assert any("Blocked deserialization of core.dataset.Dataset" in m for m in serde_log.messages)
 

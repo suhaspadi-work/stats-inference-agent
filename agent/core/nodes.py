@@ -162,9 +162,74 @@ def make_profile_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     the store through the state dict.
     """
     def profile_node(state: AgentState) -> dict:
-        view = profile_dataset(state["dataset"], store=store)
-        return {"profile": view}
+        # M2.1: profile every table of the upload; dataset and profile mirror the analysis table
+        tables, analysis = _starting_tables(state)
+        profiles = {name: profile_dataset(ds, store=store) for name, ds in tables.items()}
+        return {"tables": tables, "profiles": profiles, "analysis_table": analysis, "dataset": tables[analysis],
+                "profile": profiles[analysis], "datasets": None, "main_table": None}
     return profile_node
+
+
+def _starting_tables(state) -> tuple[dict, str]:
+    """
+    The tables of this question and its analysis table. The inputs datasets and main_table belong to this question
+    only (the profile node clears both); analysis_table is the result and is read back only in (b):
+    (a) a "datasets" bundle wins: the analysis table is main_table when given, else the bundle's first table;
+    (b) otherwise the tables already in state, while tables[analysis_table] is state["dataset"] (same id): the
+        analysis table is main_table when given, else the persisted analysis_table;
+    (c) otherwise the given dataset alone, which is the analysis table (a stale analysis_table is ignored).
+    There is no limit on the number of tables.
+    """
+    given, choice = state.get("datasets"), state.get("main_table")
+    if given:
+        items = list(given.values()) if isinstance(given, dict) else list(given)
+        tables = {}
+        for ds in items:
+            if ds.name in tables:
+                raise ValueError(f"Two tables share the name '{ds.name}'.")
+            tables[ds.name] = ds
+        analysis = choice or next(iter(tables))
+    else:
+        dataset, existing, persisted = state.get("dataset"), state.get("tables") or {}, state.get("analysis_table")
+        current = existing.get(persisted)
+        # compare ids: a checkpoint round trip can change the type of other fields, the id is the identity
+        if existing and (dataset is None or (current is not None and current.id == dataset.id)):
+            tables, analysis = dict(existing), choice or persisted or next(iter(existing))
+        elif dataset is not None:
+            tables, analysis = {dataset.name: dataset}, choice or dataset.name
+        else:
+            raise ValueError("No dataset was given.")
+    if analysis not in tables:
+        names = sorted(tables)
+        listed = ", ".join(names[:20]) + (f" and {len(names) - 20} more" if len(names) > 20 else "")
+        raise ValueError(f"Unknown analysis table '{analysis}'. Tables: {listed}.")
+    return tables, analysis
+
+
+def with_dataset(state, new_dataset, new_profile=None) -> dict:
+    """
+    M2.1: the update that writes a new version of the analysis table into both dataset and tables (and profile
+    and profiles when a new profile is given), so they never drift. A state without tables (an old checkpoint or a
+    hand-built test state) is treated as one table named after the dataset.
+    """
+    tables = state.get("tables") or {new_dataset.name: new_dataset}
+    analysis = state.get("analysis_table") or new_dataset.name
+    update = {"dataset": new_dataset, "tables": {**tables, analysis: new_dataset}}
+    if new_profile is not None:
+        profiles = state.get("profiles") or {}
+        update.update(profile=new_profile, profiles={**profiles, analysis: new_profile})
+    return update
+
+
+def _table_list(state) -> list:
+    """The tables for the stage-plan record (never for a prompt): name, rows, columns and role."""
+    profiles, analysis = state.get("profiles"), state.get("analysis_table")
+    if profiles:
+        return [{"name": name, "rows": p.row_count, "columns": p.column_count,
+                 "role": "analysis" if name == analysis else "carried"} for name, p in profiles.items()]
+    profile = state["profile"]
+    name = analysis or getattr(state.get("dataset"), "name", None) or profile.dataset_handle
+    return [{"name": name, "rows": profile.row_count, "columns": profile.column_count, "role": "analysis"}]
 
 
 def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -176,7 +241,8 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     def plan_stages_node(state: AgentState) -> dict:
         issues = detect_all_issues(state["dataset"], state["profile"], store)
         plan = build_stage_plan(state["classification"], state["profile"], issues)
-        records = (stage_plan_record(plan, state["classification"], issues), *step_records(plan))
+        records = (stage_plan_record(plan, state["classification"], issues, tables=_table_list(state)),
+                   *step_records(plan))
         # M1.3b: a new question on the same thread starts outside any exploratory round.
         update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, "stage_gate_refusal": None,
                   "stage_plan_refusal": None, "plan_approval_refusal": None, "reselect_after_edit": None,
@@ -322,7 +388,7 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         issues = detect_all_issues(dataset, profile, store)
         scan = scan_record(profile, issues)
         if not issues:
-            return {"dataset": dataset, "pending_wrangling": None, **log_update(scan)}
+            return {**with_dataset(state, dataset), "pending_wrangling": None, **log_update(scan)}
 
         proposals = propose_fn(issues)
         operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
@@ -484,7 +550,7 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
             current_dataset, finished_op = execute_fn(current_dataset, store, approved_op)
             records.append(execution_record(finished_op, approval.id))
 
-        result = {"dataset": current_dataset, "pending_wrangling": None, **log_update(*records)}
+        result = {**with_dataset(state, current_dataset), "pending_wrangling": None, **log_update(*records)}
         if unaddressed:
             result["pending_unaddressed_issues"] = unaddressed
         return result
@@ -926,6 +992,7 @@ def make_start_round_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         if route["status"] != "ok":
             raise ValueError(f"The exploratory round cannot run: {route['reason']}")
         record = round_start_record(plan2, profile, proposal, from_round=len(state.get("rounds") or []))
-        return {"plan": plan2, "route": route, "profile": profile, "exploratory_round": True,
+        return {"plan": plan2, "route": route, **with_dataset(state, state["dataset"], profile),
+                "exploratory_round": True,
                 "plan_approval_refusal": None, "reselect_after_edit": None, **log_update(record)}
     return start_round_node

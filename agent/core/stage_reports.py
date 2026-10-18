@@ -173,6 +173,27 @@ def _described(record) -> str:
     return f"{ev['row_count']} rows and {ev['column_count']} columns described. Text values withheld for: {withheld}."
 
 
+_MAX_TABLE_LINES = 10
+
+
+def _tables_section(record):
+    """M2.1: the Tables section, or None for one table or none; at most 10 lines, the rest counted."""
+    tables = ((record or {}).get("evidence") or {}).get("tables") or []
+    if len(tables) <= 1:
+        return None
+
+    def line(t):
+        role = "main table" if t.get("role") == "analysis" else "carried along; not used until joins arrive"
+        return f"{t['name']}: {t['rows']} rows, {t['columns']} columns ({role})"
+    main = [t for t in tables if t.get("role") == "analysis"]
+    carried = [t for t in tables if t.get("role") != "analysis"]
+    if len(tables) <= _MAX_TABLE_LINES:
+        return "\n".join(line(t) for t in tables)
+    shown = main + carried[:_MAX_TABLE_LINES - 1]
+    rest = len(carried) - (_MAX_TABLE_LINES - 1)
+    return "\n".join([*(line(t) for t in shown), f"and {rest} more carried tables"])
+
+
 def stage1_report(records: list, stage_plan: dict) -> dict:
     """{"sections": [{"heading", "text"}], "source_records": [ids]} from the records of this question only."""
     records = copy.deepcopy(list(records))
@@ -181,6 +202,11 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if scan is not None:
         used.add(scan["id"])
     sections = [{"heading": "Checked", "text": _checked(scan)}]
+    plan_record = _latest(records, STAGE_PLAN_POINT)
+    tables_text = _tables_section(plan_record)
+    if tables_text is not None:
+        sections.append({"heading": "Tables", "text": tables_text})
+        used.add(plan_record["id"])
     columns_scanned = scan["evidence"].get("columns_scanned") if scan is not None else None
     changed, left = _changed(records, used, columns_scanned)
     sections.append({"heading": "Changed", "text": changed})

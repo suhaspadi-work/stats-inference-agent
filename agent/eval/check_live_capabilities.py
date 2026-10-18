@@ -22,7 +22,8 @@ import pandas as pd
 from langgraph.types import Command
 
 from core.dataset import LocalDiskStore
-from core.ingestion import load_dataset
+from core.ingestion import load_bundle, load_dataset
+from core.lineage import check_lineage, edges_from_operations, lineage_graph
 from core.graph import build_agent_graph
 from core.event_log import events_path, read_decision_log
 from core.decision_points import registered_points
@@ -102,6 +103,24 @@ def print_lineage(state, log):
     return problem
 
 
+def print_lineage_graph(state, log):
+    """M2.1: with more than one table, the lineage graph of the applied operations must lead from the analysis
+    table back to uploaded tables only. Returns the problem line, or None (also when there is one table)."""
+    tables = state.get("tables") or {}
+    if len(tables) <= 1:
+        return None
+    applied = [e["evidence"] for e in log if e["decision_point"] == "stage1.clean.execution" and e["chosen"] == "applied"]
+    graph = lineage_graph(edges_from_operations(applied))
+    uploaded = {f"{name}@v1" for name in tables}
+    problems = check_lineage(state["dataset"].handle, graph, uploaded)
+    if not problems:
+        print("   lineage graph: PASS")
+        return None
+    problem = f"lineage graph: FAIL ({'; '.join(problems)})"
+    print("   " + problem)
+    return problem
+
+
 def print_route(state, label):
     """For the routing runs: the planner.route record and the plan's final question type, labelled by status."""
     route = next((e for e in reversed(state.get("decision_log") or []) if e["decision_point"] == "planner.route"), None)
@@ -143,7 +162,7 @@ def print_stage1_report(state, label):
     for e in entries:
         headings = ", ".join(s["heading"] for s in e["sections"])
         print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
-        if label == "messy":
+        if label in ("messy", "bundle"):  # M2.1: the bundle run's report also lists its tables
             for line in e["text"].split("\n"):
                 print(f"      | {line}")
 
@@ -287,11 +306,14 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
-    if label == "messy":
+    if label in ("messy", "bundle"):  # M2.1: the bundle run is the messy run with a second table
         print_cleaning_lines(log)
         lineage = print_lineage(state, state_log)
         if lineage is not None:
             problems.append(lineage)
+        graph = print_lineage_graph(state, state_log)
+        if graph is not None:
+            problems.append(graph)
     if label in ("mismatch", "unsupported"):
         print_route(state, label)
     if label == "exploratory":
@@ -399,6 +421,9 @@ def main():
                              "tenure": m_tenure, "total_spend": m_spend})
     df_messy = pd.concat([df_messy, df_messy.iloc[[5, 40, 120, 250]]], ignore_index=True)
 
+    # M2.1: a second, small table carried along with the messy data (unused until joins arrive in M2.3)
+    df_regions = pd.DataFrame({"region": ["East", "West"], "manager": ["Ana", "Ben"]})
+
     store = LocalDiskStore(base_dir=Path("/tmp/live_capabilities_store"))
     events = Path(tempfile.mkdtemp(prefix="live_events_"))
     app = build_agent_graph(store, event_log_dir=events)
@@ -410,6 +435,8 @@ def main():
         ("regression", df3, "What factors drive total spend? Consider region, tenure and visits."),
         ("descriptive", df3, "Can you describe this dataset for me?"),
         ("messy", df_messy, "Did West customers spend more than East customers?"),
+        # M2.1: the messy run as a two-file bundle; the messy table is the analysis table, regions is carried
+        ("bundle", {"live_bundle": df_messy, "regions": df_regions}, "Did West customers spend more than East customers?"),
         # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
         ("mismatch", df3, "Did West customers spend more than East customers?"),
         # M1.3b: the boundary gate is answered "run", so an exploratory regression follows the comparison
@@ -426,10 +453,19 @@ def main():
         outcome = {"label": label, "error_kind": None, "problems": [], "hint": None}
         outcomes.append(outcome)
         try:
-            path = Path(f"/tmp/live_{label}.csv")
-            df.to_csv(path, index=False)
-            ds = load_dataset(path, session_id=f"s-live-{label}", name=f"live_{label}", store=store)
-            result = app.invoke({"request_text": question, "session_id": f"s-live-{label}", "dataset": ds}, cfg)
+            start = {"request_text": question, "session_id": f"s-live-{label}"}
+            if isinstance(df, dict):  # M2.1: a bundle of several files; the first is the analysis table
+                paths = []
+                for name, frame in df.items():
+                    paths.append(Path(f"/tmp/live_{label}_{name}.csv"))
+                    frame.to_csv(paths[-1], index=False)
+                tables = load_bundle(paths, session_id=f"s-live-{label}", store=store, names=list(df))
+                start["datasets"] = list(tables.values())
+            else:
+                path = Path(f"/tmp/live_{label}.csv")
+                df.to_csv(path, index=False)
+                start["dataset"] = load_dataset(path, session_id=f"s-live-{label}", name=f"live_{label}", store=store)
+            result = app.invoke(start, cfg)
             seen, counts = [], {}
             while "__interrupt__" in result:
                 p = result["__interrupt__"][0].value

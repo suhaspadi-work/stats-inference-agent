@@ -23,7 +23,7 @@ STEP_POINTS = {
 _ELIGIBLE_STATES = ("planned", "offered")
 
 
-def stage_plan_record(plan: dict, classification, issues) -> DecisionRecord:
+def stage_plan_record(plan: dict, classification, issues, tables=None) -> DecisionRecord:
     steps = plan_steps(plan)
     if plan["status"] == "unsupported":
         chosen = "unsupported"
@@ -47,6 +47,8 @@ def stage_plan_record(plan: dict, classification, issues) -> DecisionRecord:
             "issue_count": len(issues),
             "issue_types": sorted({i.issue_type for i in issues}),
             "message": plan["message"],
+            # M2.1: every table of the upload, {"name", "rows", "columns", "role": "analysis" or "carried"}
+            "tables": [dict(t) for t in (tables or [])],
         },
     )
 

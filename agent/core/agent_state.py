@@ -29,6 +29,13 @@ class AgentState(TypedDict, total=False):
 
     dataset: Dataset               # set once, by intake -- before this node, it doesn't exist
     profile: ModelSafeView         # set by the profile node
+    # M2.1: every table of the upload; dataset and profile always mirror the analysis table
+    tables: dict                   # table name -> Dataset (the analysis table's latest version)
+    profiles: dict                 # table name -> ModelSafeView
+    analysis_table: str            # the table the analysis runs on (default: the first)
+    datasets: list                 # an input: the files of a bundle (a list of Dataset or a dict name -> Dataset)
+    main_table: Optional[str]      # the user's explicit choice of the analysis table for THIS question; consumed by
+                                   # the profile node, like datasets
     stage_plan: dict               # set by plan_stages (M1.1): the steps of the three stages, core.stage_plan
 
     plan: AnalysisPlan             # set by classify, updated by draft_plan, updated again by freeze

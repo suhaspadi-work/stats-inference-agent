@@ -199,7 +199,8 @@ def test_stage_plan_record(question_type, profile, issues, chosen):
         f"{s['step']} {s['state']}" for s in plan_steps(plan))
     assert r.evidence == {"question_type": question_type.value, "status": plan["status"],
                           "classifier_confidence": 0.75, "issue_count": len(issues),
-                          "issue_types": sorted({i.issue_type for i in issues}), "message": plan["message"]}
+                          "issue_types": sorted({i.issue_type for i in issues}), "message": plan["message"],
+                          "tables": []}  # M2.1: the tables of the upload (none passed here)
     json.dumps(log_update(r))
 
 

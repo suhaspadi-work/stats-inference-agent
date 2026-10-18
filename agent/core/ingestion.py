@@ -40,6 +40,50 @@ def load_dataset(path: Path, session_id: str, name: str, store: DatasetStore) ->
     )
 
 
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def unique_table_name(name, taken, counters=None) -> str:
+    """M2.1: a safe table name (letters, digits, underscore, hyphen), made unique against the set taken by
+    appending _2, _3 and so on. taken is a set; counters (optional) remembers the next suffix to try per base name,
+    so many names sharing a base cost constant time each."""
+    base = _UNSAFE_NAME_CHARS.sub("_", str(name or "")) or "table"
+    if base not in taken:
+        return base
+    n = counters.get(base, 2) if counters is not None else 2
+    while f"{base}_{n}" in taken:
+        n += 1
+    if counters is not None:
+        counters[base] = n + 1
+    return f"{base}_{n}"
+
+
+def load_bundle(paths, session_id: str, store: DatasetStore, names=None) -> dict:
+    """
+    M2.1: several uploaded files as an insertion-ordered dict table name -> Dataset (version 1 each). There is no
+    limit on the number of files; a deployment may cap it in the product layer. Each name is names[i] when given,
+    else the file stem, made safe and unique.
+    """
+    paths = [Path(p) for p in paths]
+    if not paths:
+        raise ValueError("No files were given.")
+    tables, taken, counters = {}, set(), {}
+    for i, path in enumerate(paths):
+        raw = names[i] if names is not None and i < len(names) else path.stem
+        name = unique_table_name(raw, taken, counters)
+        taken.add(name)
+        try:
+            tables[name] = load_dataset(path, session_id=session_id, name=name, store=store)
+        except ValueError as e:  # includes pandas' EmptyDataError and ParserError, and UnicodeDecodeError
+            if isinstance(e, (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError)):
+                raise ValueError(f"{path.name}: could not read the file ({type(e).__name__}: {e})") from e
+            message = str(e)
+            raise ValueError(message if path.name in message else f"{path.name}: {message}") from e
+        except Exception as e:  # OSError and anything else a reader raises
+            raise ValueError(f"{path.name}: could not read the file ({type(e).__name__}: {e})") from e
+    return tables
+
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
