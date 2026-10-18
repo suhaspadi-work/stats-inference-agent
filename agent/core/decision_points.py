@@ -24,6 +24,7 @@ from core.describe_records import DESCRIBE_EXECUTION_POINT
 from core.draft_plan_records import OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
+from core.quality_records import LINKS_POINT, QUALITY_SNAPSHOT_POINT
 from core.report_records import REPORT_NARRATIVE_POINT
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
@@ -40,6 +41,8 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
     "stage_plan_gate": (STAGE_PLAN_APPROVAL_POINT,),
     "wrangle_propose": (SCAN_POINT, FIX_POINT),
     "wrangle_review": (CLEAN_APPROVAL_POINT, CLEAN_EXECUTION_POINT),
+    "diagnose": (QUALITY_SNAPSHOT_POINT, LINKS_POINT),  # M2.2: the before snapshot; links with several tables
+    "rediagnose": (QUALITY_SNAPSHOT_POINT,),  # M2.2: the after snapshot, when cleaning changed the data
     "describe": (DESCRIBE_EXECUTION_POINT,),
     "draft_plan": (DRAFT_PLAN_POINT, OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT, ROUTE_POINT),
     "select_method": (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT, ENCODING_POINT),
@@ -66,7 +69,8 @@ STAGES: tuple[str, ...] = ("intake", "stage1", "analysis", "report")
 NODE_STAGES: dict[str, str] = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
     "stage_plan_gate": "intake",
-    "wrangle_propose": "stage1", "wrangle_review": "stage1", "describe": "stage1", "eda": "stage1",
+    "wrangle_propose": "stage1", "wrangle_review": "stage1", "diagnose": "stage1", "rediagnose": "stage1",
+    "describe": "stage1", "eda": "stage1",
     "stage1_report": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "stage_gate": "analysis", "start_round": "analysis",

@@ -121,6 +121,29 @@ def print_lineage_graph(state, log):
     return problem
 
 
+def print_quality(log, label):
+    """M2.2: the before and after data-quality snapshots and the computed links between tables."""
+    def latest(point, chosen=None):
+        return next((e for e in reversed(log) if e["decision_point"] == point
+                     and (chosen is None or e["chosen"] == chosen)), None)
+
+    def numbers(ev):
+        return (f"rows={ev['rows']} duplicates={ev['duplicate_rows']} missing={ev['columns_with_missing']} "
+                f"outliers={ev['columns_with_outliers']}")
+    before = latest("stage1.quality.snapshot", "before")
+    if before is None:
+        return
+    print(f"   quality [{label}]: before {numbers(before['evidence'])}")
+    after = latest("stage1.quality.snapshot", "after")
+    if after is not None:
+        print(f"   quality [{label}]: after {numbers(after['evidence'])}")
+    links = latest("stage1.links.scan")
+    for c in ((links or {}).get("evidence") or {}).get("computed") or []:
+        print(f"   links [{label}]: {c['table_a']}.{c['column_a']} with {c['table_b']}.{c['column_b']} "
+              f"{c['cardinality']} matched={c['matched_distinct']} orphans={c['orphan_rows_a']}/{c['orphan_rows_b']} "
+              f"inner_join_rows={c['inner_join_rows']}")
+
+
 def print_route(state, label):
     """For the routing runs: the planner.route record and the plan's final question type, labelled by status."""
     route = next((e for e in reversed(state.get("decision_log") or []) if e["decision_point"] == "planner.route"), None)
@@ -292,6 +315,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print("   decision points:", points)
     print_stage_plan(log, label)
     print_describe(log, label)
+    print_quality(log, label)
     print_stage1_report(state, label)
     print_analysis_reports(state, label)
     if not failed:

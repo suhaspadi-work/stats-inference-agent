@@ -539,7 +539,12 @@ def test_a_comparison_with_the_filter_rejected(fake_model, tmp_path, store):
     values, _, _ = _drive(_app(store), _start(_messy_frame(), tmp_path, store, "rejected"), "rejected",
                           wrangling_approval=_reject_filter)
     sections = _sections(_stage1(values))
-    assert list(sections) == ["Checked", "Changed", "Left as is", "Described"]
+    assert list(sections) == ["Checked", "Data quality", "Changed", "Left as is", "Described"]  # M2.2: Data quality
+    # the filter was rejected but the dedupe ran, so the data changed: an after snapshot, no "did not change" line
+    deduped = _messy_frame().drop_duplicates()
+    after = f"After cleaning: {len(deduped)} rows, 0 exact duplicate rows."
+    assert after in sections["Data quality"].split("\n") and "Cleaning did not change the data." not in sections["Data quality"]
+    assert f"Missing values after cleaning: tenure {deduped['tenure'].isna().mean():.1%}." in sections["Data quality"]
     assert sections["Left as is"] == "high_missingness (tenure) was left unaddressed because: the gaps are meaningful"
     assert "Your decision: rejected: the gaps are meaningful." in sections["Changed"]
 
@@ -557,7 +562,8 @@ def test_a_descriptive_question(fake_model, tmp_path, store):
     values, pauses, nodes = _drive(_app(store, QuestionType.DESCRIPTIVE, (), must_not_propose),
                                    _start(_frame(), tmp_path, store, "descriptive"), "descriptive")
     entry = _stage1(values)
-    assert [s["heading"] for s in entry["sections"]] == ["Checked", "Changed"]
+    assert [s["heading"] for s in entry["sections"]] == ["Checked", "Data quality", "Changed"]  # M2.2: Data quality
+    assert "Cleaning did not change the data." not in _sections(entry)["Data quality"]  # nothing needed cleaning
     assert nodes.index("stage1_report") < nodes.index("draft_plan") < nodes.index("eda")
 
 
@@ -636,10 +642,11 @@ def test_graph_edges_and_registry(tmp_path):
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
     for target in ("wrangle_review", "describe", "stage1_report"):
         assert edges[("wrangle_propose", target)] is True, target
-    assert edges[("wrangle_review", "describe")] is True and edges[("wrangle_review", "stage1_report")] is True
+    assert edges[("rediagnose", "describe")] is True and edges[("rediagnose", "stage1_report")] is True  # M2.2
+    assert edges[("wrangle_review", "rediagnose")] is False  # M2.2: the after snapshot follows cleaning
     assert edges[("describe", "stage1_report")] is False
     assert edges[("stage1_report", "draft_plan")] is False
     assert ("describe", "draft_plan") not in edges
     assert "stage1_report" in NON_CHOOSING_NODES and "stage1_report" not in DECISION_NODES
     assert NODE_STAGES["stage1_report"] == "stage1"
-    assert (len(registered_points()), len(DECISION_NODES)) == (29, 15)
+    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)  # M2.2: diagnose and rediagnose

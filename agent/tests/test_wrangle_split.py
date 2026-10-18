@@ -232,10 +232,12 @@ def test_failing_approved_operation_finishes_silently(tmp_path, store):
 def test_full_graph_wrangle_edges(tmp_path):
     app = build_agent_graph(LocalDiskStore(base_dir=tmp_path))
     edges = {(e.source, e.target): e.conditional for e in app.get_graph().edges}
-    assert edges[("profile", "plan_stages")] is False and edges[("plan_stages", "wrangle_propose")] is True  # M1.1
+    assert edges[("profile", "plan_stages")] is False and edges[("plan_stages", "diagnose")] is True  # M1.1; M2.2
+    assert edges[("diagnose", "wrangle_propose")] is False  # M2.2: the before snapshot comes first
     assert edges[("wrangle_propose", "wrangle_review")] is True
     assert edges[("wrangle_propose", "stage1_report")] is True  # M1.4b: it was draft_plan
-    assert edges[("wrangle_review", "stage1_report")] is True  # M1.2: conditional, through route_after_cleaning; M1.4b
+    assert edges[("wrangle_review", "rediagnose")] is False  # M2.2: then rediagnose routes on
+    assert edges[("rediagnose", "stage1_report")] is True  # M1.2: conditional, through route_after_cleaning; M1.4b; M2.2
     assert "wrangle" not in {node for pair in edges for node in pair}
 
 

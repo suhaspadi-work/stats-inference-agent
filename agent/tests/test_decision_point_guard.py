@@ -178,7 +178,8 @@ def test_default_graph_has_the_same_nodes(tmp_path):
                      "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report",
                      "stage_gate", "start_round",
                      "stage1_report",  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
-                     "summary"}  # M1.4b step 2b: the overall summary after the last report
+                     "summary",  # M1.4b step 2b: the overall summary after the last report
+                     "diagnose", "rediagnose"}  # M2.2: the quality snapshots before and after cleaning
 
 
 # ------------------------------------------------------------------ negative tests
@@ -458,6 +459,14 @@ def scenario_runs(tmp_path_factory):
         runs["S11"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s11"), "Did West spend more?"), "s11",
                             [{"action": "approve"}, {"action": "approve"}], stage_gate={"action": "run"}, stop=())
 
+    # S12 (M2.2): a two-table bundle; the tables share the region column, so diagnose also writes stage1.links.scan
+    main = _dataset(_two_group_df(rng), tmp, store, "s12_main")
+    lookup = _dataset(pd.DataFrame({"region": ["East", "West"], "manager": ["a", "b"]}), tmp, store, "s12_lookup")
+    app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                            draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
+    bundle = {"request_text": "Did West spend more?", "session_id": "session-abc", "datasets": [main, lookup]}
+    runs["S12"] = drive(app, bundle, "s12", [{"action": "approve"}])
+
     return runs, emitted
 
 
@@ -481,6 +490,7 @@ EXPECTED_PAUSES = {
     "S5": [GATE, "plan_approval"], "S6": [GATE, "plan_approval"], "S7": [], "S8": [], "S9": [GATE, "plan_approval"],
     "S10": [GATE],
     "S11": [GATE, "plan_approval", "stage_gate", "plan_approval"],  # M1.3b: the exploratory round
+    "S12": [GATE, "plan_approval"],  # M2.2: a two-table bundle
 }
 ENDS_WITHOUT_STOP = {"S3", "S8", "S10", "S11"}  # runs that end at END rather than at the stop before report
 

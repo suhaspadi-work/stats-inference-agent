@@ -411,14 +411,14 @@ def test_route_after_stage_plan_gate():
 def test_graph_edges(tmp_path):
     edges = {(e.source, e.target): e.conditional
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
-    for target in ("stage_plan_gate", "wrangle_propose", "__end__"):
+    for target in ("stage_plan_gate", "diagnose", "__end__"):  # M2.2: "wrangle_propose" maps to diagnose
         assert edges[("plan_stages", target)] is True, target
-    assert edges[("stage_plan_gate", "wrangle_propose")] is True
+    assert edges[("stage_plan_gate", "diagnose")] is True  # M2.2
     assert edges[("stage_plan_gate", "__end__")] is True
     assert edges[("stage_plan_gate", "stage_plan_gate")] is True  # M1.3c: a refused choice re-opens the gate
 
 
 def test_registry():
-    assert len(registered_points()) == 29 and len(DECISION_NODES) == 15  # M1.4a: report.narrative
+    assert len(registered_points()) == 31 and len(DECISION_NODES) == 17  # M2.2: diagnose and rediagnose
     assert DECISION_NODES["stage_plan_gate"] == (STAGE_PLAN_APPROVAL_POINT,)
     assert NODE_STAGES["stage_plan_gate"] == "intake"

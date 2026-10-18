@@ -58,6 +58,9 @@ from core.stage_plan import build_stage_plan, plan_steps
 from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
 from core.stage_plan_gate import apply_gate_decision, changed_steps, check_run_overrides, gate_needed, gate_payload
 from core.describe_records import describe_execution_record
+from core.quality import profile_numbers, quality_snapshot
+from core.quality_records import QUALITY_SNAPSHOT_POINT, links_record, quality_snapshot_record
+from core.table_links import scan_links
 from core.stage_reports import (
     STAGE1_TITLE, analysis_report, current_question_records, make_stage_report_entry, method_name, round_records,
     selection_record, stage1_report, summary_report,
@@ -428,6 +431,52 @@ def route_after_cleaning(state: AgentState) -> str:
 
 def route_after_wrangle_propose(state: AgentState) -> str:
     return "wrangle_review" if state.get("pending_wrangling") is not None else route_after_cleaning(state)
+
+
+def make_diagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M2.2: the "before" data-quality snapshot of the analysis table, right after the stage plan (and its gate) and
+    before cleaning; with several tables also the carried tables' profile numbers and the candidate keys between
+    tables. No model call and no state change: records only. Nothing here reaches a prompt.
+    """
+    def diagnose_node(state: AgentState) -> dict:
+        dataset = state["dataset"]
+        tables = state.get("tables") or {dataset.name: dataset}
+        analysis = state.get("analysis_table") or dataset.name
+        profiles = state.get("profiles") or {}
+        snapshot = quality_snapshot(dataset, store, analysis)
+        carried = profile_numbers(profiles, analysis) if len(tables) > 1 else None
+        records = [quality_snapshot_record("before", snapshot, carried)]
+        if len(tables) > 1 and len(profiles) > 1:
+            records.append(links_record(scan_links(tables, profiles, store)))
+        return log_update(*records)
+    return diagnose_node
+
+
+def _latest_before_snapshot(state):
+    """The latest "before" snapshot record of the current question (after the last planner.stage_plan)."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
+    return next((e for e in reversed(log[start + 1:])
+                 if e.get("decision_point") == QUALITY_SNAPSHOT_POINT and e.get("chosen") == "before"), None)
+
+
+def make_rediagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M2.2: after cleaning. When an operation changed the analysis table, re-profile it (mirrored through
+    with_dataset, so profile is no longer the pre-cleaning one: G68) and take the "after" snapshot; when nothing
+    changed, write nothing. No model call.
+    """
+    def rediagnose_node(state: AgentState) -> dict:
+        before = _latest_before_snapshot(state)
+        dataset = state["dataset"]
+        if before is None or before["evidence"].get("handle") == dataset.handle:
+            return {}
+        analysis = state.get("analysis_table") or dataset.name
+        new_profile = profile_dataset(dataset, store=store)
+        snapshot = quality_snapshot(dataset, store, analysis)
+        return {**with_dataset(state, dataset, new_profile), **log_update(quality_snapshot_record("after", snapshot))}
+    return rediagnose_node
 
 
 def make_describe_node(store: DatasetStore) -> Callable[[AgentState], dict]:

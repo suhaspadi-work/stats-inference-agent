@@ -182,4 +182,5 @@ def test_default_graph_has_the_same_nodes(tmp_path):
                      "wrangle_review", "describe", "draft_plan", "eda", "select_method", "freeze", "execute", "report",
                      "stage_gate", "start_round",
                      "stage1_report",  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
-                     "summary"}  # M1.4b step 2b: the overall summary after the last report
+                     "summary",  # M1.4b step 2b: the overall summary after the last report
+                     "diagnose", "rediagnose"}  # M2.2: the quality snapshots before and after cleaning

@@ -20,6 +20,7 @@ from core.draft_plan_records import PREDICTORS_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
 from core.method_glossary import GLOSSARY, render_glossary
+from core.quality_records import LINKS_POINT, QUALITY_SNAPSHOT_POINT
 from core.report_records import REPORT_NARRATIVE_POINT
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
@@ -194,6 +195,78 @@ def _tables_section(record):
     return "\n".join([*(line(t) for t in shown), f"and {rest} more carried tables"])
 
 
+_MAX_LISTED = 8
+_CARDINALITY_WORDS = {"one_to_one": "one to one", "one_to_many": "one to many", "many_to_one": "many to one",
+                      "many_to_many": "many to many"}
+
+
+def _listed(items) -> str:
+    """At most 8 items joined by "; ", then " and N more"."""
+    items = list(items)
+    text = "; ".join(items[:_MAX_LISTED])
+    return text + (f" and {len(items) - _MAX_LISTED} more" if len(items) > _MAX_LISTED else "")
+
+
+def _missing_text(snapshot) -> str:
+    missing = snapshot.get("missing") or []
+    return _listed(f"{m['column']} {m['missing_pct']:.1%}" for m in missing) + "." if missing else "none."
+
+
+def _outliers_text(snapshot) -> str:
+    outliers = snapshot.get("outliers") or []
+    return _listed(f"{o['column']}: {o['below']} below, {o['above']} above" for o in outliers) + "." if outliers \
+        else "none."
+
+
+def _quality_section(before, after, cleaned) -> str:
+    """M2.2: the Data quality section from the before (and after) snapshot records."""
+    b = before["evidence"]
+    lines = [f"Before: {b['rows']} rows, {b['columns']} columns, {b['duplicate_rows']} exact duplicate rows.",
+             f"Missing values: {_missing_text(b)}"]
+    if b.get("constant_columns"):
+        lines.append(f"Constant columns: {_listed(b['constant_columns'])}.")
+    outliers = _outliers_text(b)
+    lines.append(f"Outliers (beyond 1.5 times the interquartile range): {outliers}" if outliers != "none."
+                 else "Outliers: none.")
+    if b.get("skewed_columns"):
+        lines.append("Skewed columns (skewness beyond 1 in either direction): "
+                     f"{_listed(c['column'] for c in b['skewed_columns'])}.")
+    if after is not None:
+        a = after["evidence"]
+        lines += [f"After cleaning: {a['rows']} rows, {a['duplicate_rows']} exact duplicate rows.",
+                  f"Missing values after cleaning: {_missing_text(a)}",
+                  f"Outliers after cleaning: {_outliers_text(a)}"]
+    elif cleaned:
+        lines.append("Cleaning did not change the data.")
+    return "\n".join(lines)
+
+
+def _links_section(record):
+    """M2.2: the Links between tables section from the links scan record."""
+    ev = record["evidence"]
+    if record["chosen"] == "none" or not ev.get("candidates_total"):
+        return "No shared key columns were found between the tables."
+    lines = []
+    for c in ev.get("computed") or []:
+        line = (f"{c['table_a']}.{c['column_a']} with {c['table_b']}.{c['column_b']}: "
+                f"{_CARDINALITY_WORDS.get(c['cardinality'], c['cardinality'])}; {c['matched_distinct']} of "
+                f"{c['distinct_a']} keys in {c['table_a']} are found in {c['table_b']}; {c['orphan_rows_a']} rows of "
+                f"{c['table_a']} and {c['orphan_rows_b']} rows of {c['table_b']} have no match; an inner join would "
+                f"give {c['inner_join_rows']} rows.")
+        if c.get("normalizing_helps"):
+            line += (f" Matching would improve by {c['matched_distinct_normalized'] - c['matched_distinct']} keys "
+                     "after trimming spaces and ignoring case.")
+        lines.append(line)
+    if ev.get("not_computed"):
+        lines.append(f"and {ev['not_computed']} more candidate(s) not computed.")
+    return "\n".join(lines)
+
+
+def _quality_record(records, label):
+    return next((r for r in reversed(records)
+                 if r.get("decision_point") == QUALITY_SNAPSHOT_POINT and r.get("chosen") == label), None)
+
+
 def stage1_report(records: list, stage_plan: dict) -> dict:
     """{"sections": [{"heading", "text"}], "source_records": [ids]} from the records of this question only."""
     records = copy.deepcopy(list(records))
@@ -207,6 +280,19 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if tables_text is not None:
         sections.append({"heading": "Tables", "text": tables_text})
         used.add(plan_record["id"])
+    before, after = _quality_record(records, "before"), _quality_record(records, "after")
+    if after is not None and before is not None and after["evidence"].get("handle") == before["evidence"].get("handle"):
+        after = None
+    if before is not None:
+        # "Cleaning did not change the data." only when the scan found something to clean (chosen propose_fixes)
+        issues_found = scan is not None and scan.get("chosen") == "propose_fixes"
+        sections.append({"heading": "Data quality", "text": _quality_section(before, after, issues_found)})
+        used.update(r["id"] for r in (before, after) if r is not None)
+    links = _latest(records, LINKS_POINT)
+    several = len(((plan_record or {}).get("evidence") or {}).get("tables") or []) > 1
+    if links is not None and (links["evidence"].get("candidates_total") or several):
+        sections.append({"heading": "Links between tables", "text": _links_section(links)})
+        used.add(links["id"])
     columns_scanned = scan["evidence"].get("columns_scanned") if scan is not None else None
     changed, left = _changed(records, used, columns_scanned)
     sections.append({"heading": "Changed", "text": changed})

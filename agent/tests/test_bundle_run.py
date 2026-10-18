@@ -107,7 +107,10 @@ def test_a_two_table_bundle_analyses_the_main_table_only(fake_model, tmp_path, s
     values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "bundle")
     assert values["test_result"]["method"] == alone["test_result"]["method"]
     assert values["test_result"]["p_value"] == alone["test_result"]["p_value"]
-    assert _points(values) == _points(alone)
+    # M2.2: a bundle adds exactly one links record, right after its before snapshot
+    expected = list(_points(alone))
+    expected.insert(expected.index("stage1.quality.snapshot") + 1, "stage1.links.scan")
+    assert _points(values) == expected
     assert [t["name"] for t in _record(values, "planner.stage_plan")["evidence"]["tables"]] == ["main", CARRIED_NAME]
     assert values["tables"][CARRIED_NAME] == carried_before
     assert (store.base_dir / carried_before.storage_key).read_bytes() == carried_bytes
@@ -141,7 +144,10 @@ def test_the_tables_section(fake_model, tmp_path, store):
     values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "tables")
     entry = _stage1(values)
     headings = [s["heading"] for s in entry["sections"]]
-    assert headings[:3] == ["Checked", "Tables", "Changed"]
+    # M2.2: the quality numbers, and the region column the two tables share
+    assert headings[:5] == ["Checked", "Tables", "Data quality", "Links between tables", "Changed"]
+    assert _record(values, "stage1.quality.snapshot")["id"] in entry["source_records"]
+    assert _record(values, "stage1.links.scan")["id"] in entry["source_records"]
     assert _sections(entry)["Tables"].split("\n") == [_line("main", main, "analysis"),
                                                       _line(CARRIED_NAME, carried, "carried")]
     assert _record(values, "planner.stage_plan")["id"] in entry["source_records"]

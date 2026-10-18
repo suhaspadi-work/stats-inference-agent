@@ -8,7 +8,7 @@ from core.event_sink import with_event_log
 from core.nodes import (
     classify_node, clarify_node, reclassify_node, route_after_classify,
     make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
-    make_describe_node, make_stage1_report_node, route_after_cleaning,
+    make_describe_node, make_stage1_report_node, route_after_cleaning, make_diagnose_node, make_rediagnose_node,
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
     route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node, make_summary_node,
     make_draft_plan_node,
@@ -63,8 +63,10 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> plan_stages (M1.1: which steps of the three stages run, by code; an unsupported question ends here)
          -> if some step is offered: stage_plan_gate (M1.3a: approval interrupt; describe on or off, or reject)
             (M1.3c: run choices that break a rule are refused and the gate re-opens: stage_plan_gate -> stage_plan_gate)
+      -> diagnose (M2.2: the "before" data-quality snapshot; with several tables, the links between them)
       -> wrangle_propose (detect issues, one model call for fixes)
-         -> if any issues: wrangle_review (checklist interrupt, then execute)
+         -> if any issues: wrangle_review (checklist interrupt, then execute) -> rediagnose (M2.2: re-profile and the
+            "after" snapshot when an operation changed the data)
       -> describe (M1.2: when the stage plan says run and the question is not descriptive; no model call)
       -> stage1_report (M1.4b: the Stage 1 report, composed by code from the records; shown at plan approval)
       -> draft_plan
@@ -107,6 +109,8 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     else:
         add_node("wrangle_propose", make_wrangle_propose_node(store, propose_fn=propose_fn))
     add_node("wrangle_review", make_wrangle_review_node(store))
+    add_node("diagnose", make_diagnose_node(store))
+    add_node("rediagnose", make_rediagnose_node(store))
     add_node("describe", make_describe_node(store))
     add_node("stage1_report", make_stage1_report_node())
     if draft_fn is None:
@@ -127,13 +131,16 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_edge("clarify", "reclassify")
     graph.add_edge("reclassify", "profile")
     graph.add_edge("profile", "plan_stages")
+    # M2.2: the routers still answer "wrangle_propose"; the diagnose step runs first
     graph.add_conditional_edges("plan_stages", route_after_plan_stages,
-                                {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "wrangle_propose", END: END})
+                                {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "diagnose", END: END})
     graph.add_conditional_edges("stage_plan_gate", route_after_stage_plan_gate,
-                                {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "wrangle_propose", END: END})
+                                {"stage_plan_gate": "stage_plan_gate", "wrangle_propose": "diagnose", END: END})
+    graph.add_edge("diagnose", "wrangle_propose")
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
                                 {"wrangle_review": "wrangle_review", "describe": "describe", "stage1_report": "stage1_report"})
-    graph.add_conditional_edges("wrangle_review", route_after_cleaning,
+    graph.add_edge("wrangle_review", "rediagnose")
+    graph.add_conditional_edges("rediagnose", route_after_cleaning,
                                 {"describe": "describe", "stage1_report": "stage1_report"})
     graph.add_edge("describe", "stage1_report")
     graph.add_edge("stage1_report", "draft_plan")

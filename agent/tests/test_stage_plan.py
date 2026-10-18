@@ -300,7 +300,8 @@ def test_graph_edges(tmp_path):
     edges = {(e.source, e.target): e.conditional
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
     assert edges[("profile", "plan_stages")] is False
-    assert edges[("plan_stages", "wrangle_propose")] is True
+    assert edges[("plan_stages", "diagnose")] is True  # M2.2: the router's "wrangle_propose" maps to diagnose
+    assert edges[("diagnose", "wrangle_propose")] is False
     assert edges[("plan_stages", "__end__")] is True
     assert ("profile", "wrangle_propose") not in edges
 
@@ -348,6 +349,7 @@ def test_full_run_two_group_with_cleaning(tmp_path, store):
     start = points.index("planner.stage_plan")
     assert points[start:start + 5] == ["planner.stage_plan", "planner.step.clean", "planner.step.describe",
                                        "planner.step.inference", "planner.step.modeling"]
-    assert start + 6 == points.index("stage1.clean.scan")  # M1.3a: the gate's record comes between
+    assert points[start + 6] == "stage1.quality.snapshot"  # M2.2: the before snapshot follows the gate's record
+    assert start + 7 == points.index("stage1.clean.scan")  # M1.3a: the gate's record comes between; M2.2: and the snapshot
     assert points[start + 5] == "planner.stage_plan_approval"
     assert values["stage_plan"]["status"] == "ok"

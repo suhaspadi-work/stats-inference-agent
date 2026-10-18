@@ -37,6 +37,7 @@ EXPECTED_STAGES = {
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",
     "report": "report",
     "summary": "report",  # M1.4b step 2b
+    "diagnose": "stage1", "rediagnose": "stage1",  # M2.2: the quality snapshots
 }
 RUNNABLE = (QuestionType.TWO_GROUP_COMPARISON, QuestionType.AB_TEST, QuestionType.MULTI_GROUP_COMPARISON,
             QuestionType.DRIVER_ANALYSIS)
@@ -162,8 +163,10 @@ def test_graph_edges(tmp_path):
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
     for target in ("wrangle_review", "describe", "stage1_report"):  # M1.4b: stage1_report replaces draft_plan
         assert edges[("wrangle_propose", target)] is True, target
-    assert edges[("wrangle_review", "describe")] is True
-    assert edges[("wrangle_review", "stage1_report")] is True  # M1.4b
+    # M2.2: wrangle_review -> rediagnose (plain), and rediagnose routes on with route_after_cleaning
+    assert edges[("wrangle_review", "rediagnose")] is False
+    assert edges[("rediagnose", "describe")] is True
+    assert edges[("rediagnose", "stage1_report")] is True  # M1.4b
     assert edges[("describe", "stage1_report")] is False  # M1.4b: describe -> stage1_report -> draft_plan
 
 

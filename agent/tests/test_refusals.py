@@ -464,4 +464,4 @@ def test_graph_edges_and_registry(tmp_path):
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
     assert edges[("stage_plan_gate", "stage_plan_gate")] is True
     assert edges[("freeze", "freeze")] is True and edges[("freeze", "select_method")] is True
-    assert len(registered_points()) == 29 and len(DECISION_NODES) == 15  # M1.4a: report.narrative
+    assert len(registered_points()) == 31 and len(DECISION_NODES) == 17  # M2.2: diagnose and rediagnose
