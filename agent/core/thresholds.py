@@ -18,3 +18,4 @@ GROUP_MAX_LEVELS = 12          # a group column for a group-wise fill has 2 to t
 GROUP_MIN_OBSERVED = 5         # observed values of the target column needed in every group
 MAX_GROUP_COLUMNS = 3          # group-wise candidates are offered for at most this many group columns
 NUMERIC_TEXT_PARSE_RATE = 0.95  # the share of non-missing values that must parse as numbers before a text column is flagged
+MAX_AGG_COLUMNS = 5            # the numeric columns of a carried table that an aggregate-then-join summarizes

@@ -12,7 +12,7 @@ from core.capabilities import run_transform
 from core.ingestion import unique_table_name
 from core.thresholds import (
     DISCRETE_MAX_DISTINCT, GROUP_MAX_LEVELS, GROUP_MIN_OBSERVED, IMPUTE_MAX_MISSING_PCT, IMPUTE_MIN_OBSERVED,
-    MAX_GROUP_COLUMNS,
+    MAX_AGG_COLUMNS, MAX_GROUP_COLUMNS,
 )
 from core.wrangling import describe_operation, normalize_key
 
@@ -247,15 +247,71 @@ def _join_candidates(df, dataset, issue, tables, frames) -> list:
     ]
 
 
+def _summarized_columns(right, right_key) -> list:
+    """M2.3b step 2: the carried table's numeric non-bool columns other than the key, without identifier-like ones (an
+    integer column whose non-missing values are all distinct), in column order, at most MAX_AGG_COLUMNS."""
+    out = []
+    for column in right.columns:
+        series = right[column]
+        if column == right_key or not _is_numeric(series):
+            continue
+        observed = series.dropna()
+        if pd.api.types.is_integer_dtype(series) and len(observed) and observed.is_unique:
+            continue
+        out.append(column)
+    return out[:MAX_AGG_COLUMNS]
+
+
+def _aggregate_candidates(df, dataset, issue, tables, frames) -> list:
+    """
+    M2.3b step 2: the candidates of one aggregatable_table issue: the carried table is summarized per key by code (a
+    row count, and the mean and sum of its numeric columns), then joined like a plain join (one join operation with
+    an "aggregate" parameter). The keys repeat in the carried table, so the summary is what makes the join safe.
+    """
+    ev = issue.evidence
+    right_name, left_key, right_key = ev["right_table"], ev["left_key"], ev["right_key"]
+    right = frames[right_name]
+    left_keys = set(df[left_key].dropna().tolist())
+    right_set = set(right[right_key].dropna().tolist())
+    exact = sum(1 for k in left_keys if k in right_set)
+    normalized_set = set(right[right_key].dropna().map(normalize_key).tolist())
+    normalized = sum(1 for k in left_keys if normalize_key(k) in normalized_set)
+    columns = _summarized_columns(right, right_key)
+    summary = {"count": True, "columns": columns, "stats": ["mean", "sum"]}
+    count_only = {"count": True, "columns": [], "stats": []}
+    base = {"right_table": right_name, "left_key": left_key, "right_key": right_key, "how": "left",
+            "normalize_keys": False,
+            "result_name": unique_table_name(f"{dataset.name}_{right_name}", set(tables or {}))}
+    no_match = "no key value matches" if exact == 0 else None
+    summary_blocked = f"{right_name} has no numeric column to summarize" if not columns else no_match
+    return [
+        _candidate(df, dataset, LEAVE, None, {}, True, "do not join; the table stays carried along"),
+        _candidate(df, dataset, "aggregate_left_summary", "join", {**base, "aggregate": summary},
+                   summary_blocked is None,
+                   summary_blocked or (f"summarizes {right_name} per key (a row count, and the mean and sum of its "
+                                       "numeric columns) and keeps every row of the analysis table"), frames),
+        _candidate(df, dataset, "aggregate_left_count", "join", {**base, "aggregate": count_only}, no_match is None,
+                   no_match or f"summarizes {right_name} per key as a row count and keeps every row of the analysis table",
+                   frames),
+        _candidate(df, dataset, "aggregate_left_normalized", "join",
+                   {**base, "normalize_keys": True, "aggregate": summary if columns else count_only}, normalized > exact,
+                   "compares the keys after trimming spaces and ignoring case, which matches more rows"
+                   if normalized > exact else "comparing after trimming spaces and ignoring case matches no more keys",
+                   frames),
+    ]
+
+
 def enumerate_candidates(issue, dataset, profile, store, df=None, tables=None, frames=None) -> list:
     """Every candidate fix for one issue, JSON-clean; reads the data at most once (pass df to read none). M2.3b: a
     joinable_table issue also reads its right table from tables (once, cached in frames when given)."""
     df = df if df is not None else store.read(dataset.storage_key)
-    if issue.issue_type == "joinable_table":
+    if issue.issue_type in ("joinable_table", "aggregatable_table"):
         frames = frames if frames is not None else {}
         right_name = issue.evidence["right_table"]
         if right_name not in frames:
             frames[right_name] = store.read(tables[right_name].storage_key)
+        if issue.issue_type == "aggregatable_table":  # M2.3b step 2
+            return _aggregate_candidates(df, dataset, issue, tables, frames)
         return _join_candidates(df, dataset, issue, tables, frames)
     if issue.issue_type == "duplicate_rows":
         return [

@@ -187,7 +187,7 @@ def print_stage1_report(state, label):
     for e in entries:
         headings = ", ".join(s["heading"] for s in e["sections"])
         print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
-        if label in ("messy", "bundle", "normalize", "join"):  # M2.1: the bundle run's report also lists its tables
+        if label in ("messy", "bundle", "normalize", "join", "aggregate"):  # M2.1: the bundle run's report also lists its tables
             for line in e["text"].split("\n"):
                 print(f"      | {line}")
 
@@ -332,7 +332,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
-    if label in ("messy", "bundle", "normalize", "join"):  # M2.1: the bundle run is the messy run with a second table
+    if label in ("messy", "bundle", "normalize", "join", "aggregate"):  # M2.1: the bundle run is the messy run with a second table
         print_cleaning_lines(log)
         lineage = print_lineage(state, state_log)
         if lineage is not None:
@@ -474,6 +474,19 @@ def main():
     df_orders = pd.DataFrame({"customer_id": order_customer,
                               "total_spend": 50 + np.where(west, 10.0, 0.0) + jrng.normal(0, 5, 300)})
 
+    # M2.3b step 2: customers is the analysis table; its orders repeat each customer, so they are summarized, then
+    # joined; about 20 customers have no orders, total_spend is about 8% missing and 3 order rows are exact repeats
+    arng = np.random.default_rng(31)
+    agg_customers = pd.DataFrame({"customer_id": range(1, 151), "region": arng.choice(["East", "West"], 150),
+                                  "tier": arng.choice(["basic", "plus"], 150)})
+    agg_ids = arng.integers(1, 131, 297)
+    agg_west = agg_customers.set_index("customer_id").loc[agg_ids, "region"].to_numpy() == "West"
+    agg_spend = 50 + np.where(agg_west, 10.0, 0.0) + arng.normal(0, 5, 297)
+    agg_spend[arng.choice(np.arange(10, 297), 24, replace=False)] = np.nan
+    agg_orders = pd.DataFrame({"customer_id": agg_ids, "total_spend": agg_spend,
+                               "quantity": arng.integers(1, 6, 297)})
+    agg_orders = pd.concat([agg_orders, agg_orders.iloc[[0, 1, 2]]], ignore_index=True)  # 3 exact repeats
+
     store = LocalDiskStore(base_dir=Path("/tmp/live_capabilities_store"))
     events = Path(tempfile.mkdtemp(prefix="live_events_"))
     app = build_agent_graph(store, event_log_dir=events)
@@ -491,6 +504,9 @@ def main():
         ("normalize", df_normalize, "Did West customers spend more than East customers?"),
         # M2.3b: region is only on the customers table, so the orders need the join; every decision is approve
         ("join", {"orders": df_orders, "customers": df_customers},
+         "Did customers in the West region spend more than customers in the East region?"),
+        # M2.3b step 2: the orders repeat each customer, so they are summarized per customer, then joined; approve all
+        ("aggregate", {"customers": agg_customers, "orders": agg_orders},
          "Did customers in the West region spend more than customers in the East region?"),
         # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
         ("mismatch", df3, "Did West customers spend more than East customers?"),
@@ -550,6 +566,12 @@ def main():
                 final = store.read(result["dataset"].storage_key)
                 print(f"   join [{label}]: analysis table={result.get('analysis_table')} "
                       f"columns={', '.join(str(c) for c in final.columns)} rows={len(final)}")
+            if label == "aggregate":  # M2.3b step 2: the summarized join and the outcome's caveat
+                final = store.read(result["dataset"].storage_key)
+                caveats = ",".join(u.issue_type for u in plan.unaddressed_issues)
+                print(f"   aggregate [{label}]: analysis table={result.get('analysis_table')} "
+                      f"columns={', '.join(str(c) for c in final.columns)} rows={len(final)} "
+                      f"outcome={plan.outcome_name} caveats={caveats}")
         except Exception as e:
             message = str(e)
             print(f"[{label}] FAILED: {type(e).__name__}: {message[:500]}")

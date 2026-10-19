@@ -399,7 +399,7 @@ _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
 # M2.3a step 2: the order the cleaning operations run in (an unknown issue type runs last); M2.3b: a join runs
 # after normalization and dedupe (so it matches on the cleaned keys) and before the missing-value fixes
 _EXECUTION_RANK = {"numeric_as_text": 0, "inconsistent_text": 1, "duplicate_rows": 2, "joinable_table": 3,
-                   "high_missingness": 4}
+                   "aggregatable_table": 3, "high_missingness": 4}  # M2.3b step 2: an aggregate join runs with the joins
 
 
 def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_operations) -> Callable[[AgentState], dict]:
@@ -659,8 +659,8 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
             if action == "reject":
                 records.append(approval_record(op, issue, decision, None, fix_ids[idx]))
-                if issue.issue_type == "joinable_table":
-                    continue  # M2.3b: a declined join is not a data-quality caveat
+                if issue.issue_type in ("joinable_table", "aggregatable_table"):
+                    continue  # M2.3b: a declined join (or aggregate join) is not a data-quality caveat
                 unaddressed += (UnaddressedIssue(
                     issue_type=issue.issue_type, description=issue.description,
                     proposed_operation=f"{op.op_type}({op.params})",
@@ -726,6 +726,32 @@ def _imputed_outcome_issues(state, outcome_name) -> list:
     return issues
 
 
+def _aggregated_outcome_issues(state, outcome_name) -> list:
+    """M2.3b step 2: one UnaddressedIssue per applied aggregate join of the current question that added the outcome
+    column (a summary per key): each row then stands for one key value, not for a row of the carried table."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
+    issues = []
+    for e in log[start + 1:]:
+        ev = e.get("evidence") or {}
+        params = ev.get("params") or {}
+        if (e.get("decision_point") != "stage1.clean.execution" or e.get("chosen") != "applied"
+                or ev.get("op_type") != "join" or not params.get("aggregate")
+                or outcome_name not in ((ev.get("details") or {}).get("columns_added") or [])):
+            continue
+        right, key = params.get("right_table"), params.get("left_key")
+        # count-free and number-free on purpose: the description reaches the report prompts
+        issues.append(UnaddressedIssue(
+            issue_type="outcome_aggregated",
+            description=(f"The outcome '{outcome_name}' is a summary of the table '{right}' per {key}, so each row "
+                         f"stands for one value of {key}, not for a row of {right}."),
+            proposed_operation=f"join({params})",
+            rejection_reason="the column was made by summarizing a table in Stage 1, before the outcome was chosen",
+            affected_columns=(outcome_name,),
+        ))
+    return issues
+
+
 def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
     """
     Injectable draft_fn, same pattern as classify_node, for deterministic
@@ -780,6 +806,9 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
                 plan = plan.record_unaddressed_issue(issue)
         # M2.3a: an imputed outcome is a caveat; it travels on the plan like a rejected fix
         for issue in _imputed_outcome_issues(state, plan.outcome_name):
+            plan = plan.record_unaddressed_issue(issue)
+        # M2.3b step 2: an outcome made by summarizing a carried table is a caveat too
+        for issue in _aggregated_outcome_issues(state, plan.outcome_name):
             plan = plan.record_unaddressed_issue(issue)
 
         update = {"plan": plan, "route": route, **log_update(*records)}

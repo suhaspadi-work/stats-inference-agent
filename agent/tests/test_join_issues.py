@@ -91,17 +91,31 @@ def _cardinality(tmp_path, store, frames):
     return link["cardinality"], detect_join_issues("main", tables, profiles, store)
 
 
-def test_a_repeating_carried_key_raises_no_issue(tmp_path, store):
+def test_a_repeating_carried_key_raises_an_aggregatable_issue_not_a_join(tmp_path, store):
     main = _main().drop(columns="region").assign(customer_id=range(1, 61))  # unique on the analysis side
     carried = pd.DataFrame({"customer_id": [1, 1, 2, 3] * 5, "score": range(20)})
-    assert _cardinality(tmp_path, store, {"main": main, "carried": carried}) == ("one_to_many", [])
+    cardinality, issues = _cardinality(tmp_path, store, {"main": main, "carried": carried})
+    # M2.3b step 2: no joinable_table issue; the repeating key raises the aggregatable_table issue instead
+    assert cardinality == "one_to_many" and [i.issue_type for i in issues] == ["aggregatable_table"]
+    (issue,) = issues
+    assert issue.affected_columns == ("customer_id",)
+    assert issue.evidence == {"right_table": "carried", "left_key": "customer_id", "right_key": "customer_id"}
+    assert issue.description == ("The table 'carried' (columns: customer_id, score) has several rows for each value "
+                                 "of the key 'customer_id' it shares with the analysis table.")
 
 
-def test_a_many_to_many_link_raises_no_issue(tmp_path, store):
+def test_a_many_to_many_link_raises_an_aggregatable_issue_not_a_join(tmp_path, store):
     main = pd.DataFrame({"code": ["a", "b"] * 20, "y": range(40)})
     carried = pd.DataFrame({"code": [f"c{chr(97 + i)}" for i in range(19)] + ["a"], "z": range(20)})
     carried.loc[0, "code"] = "a"  # 19 distinct of 20 values: key-like, but "a" repeats
-    assert _cardinality(tmp_path, store, {"main": main, "carried": carried}) == ("many_to_many", [])
+    cardinality, issues = _cardinality(tmp_path, store, {"main": main, "carried": carried})
+    # M2.3b step 2: no joinable_table issue; the repeating key raises the aggregatable_table issue instead
+    assert cardinality == "many_to_many" and [i.issue_type for i in issues] == ["aggregatable_table"]
+    (issue,) = issues
+    assert (issue.affected_columns, issue.evidence) == (
+        ("code",), {"right_table": "carried", "left_key": "code", "right_key": "code"})
+    assert issue.description == ("The table 'carried' (columns: code, z) has several rows for each value of the key "
+                                 "'code' it shares with the analysis table.")
 
 
 def test_no_match_at_all_raises_no_issue(tmp_path, store):

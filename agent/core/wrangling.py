@@ -140,6 +140,43 @@ def _added_name(name, right_table, taken) -> str:
     return candidate
 
 
+AGG_STATS = ("mean", "sum")
+
+
+def _summarize(right: pd.DataFrame, right_key, right_table, aggregate: dict, normalize: bool) -> pd.DataFrame:
+    """
+    M2.3b step 2: the carried table summarized per key (a unique key by construction): the key, then (count) the rows
+    per key under f"rows_in_{right_table}" (every row counts), then f"{column}_{stat}" for each column and statistic,
+    over the observed values (a key whose values are all missing gets a missing value, never 0).
+    """
+    columns = list(aggregate.get("columns") or [])
+    stats = list(aggregate.get("stats") or [])
+    count = bool(aggregate.get("count"))
+    for column in columns:
+        if column not in right.columns:
+            raise ValueError(f"Cannot summarize — column not found: {column}")
+        series = right[column]
+        if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+            raise ValueError(f"Cannot summarize — {column} is not numeric.")
+    for stat in stats:
+        if stat not in AGG_STATS:
+            raise ValueError(f"Unsupported statistic: {stat}. Must be mean or sum.")
+    if not count and not (columns and stats):
+        raise ValueError("Cannot summarize — nothing to summarize.")
+    keys = _join_keys(right[right_key], normalize)
+    present = keys.notna()
+    grouped = right.loc[present].groupby(keys[present], sort=False)
+    summary = pd.DataFrame(index=grouped.size().index)
+    if count:
+        summary[f"rows_in_{right_table}"] = grouped.size()
+    for column in columns:
+        for stat in stats:
+            values = grouped[column].mean() if stat == "mean" else grouped[column].sum(min_count=1)
+            summary[f"{column}_{stat}"] = values
+    summary.index.name = right_key
+    return summary.reset_index()
+
+
 def transform_join(df: pd.DataFrame, params: dict, frames: dict):
     """
     M2.3b: join a carried table (frames[right_table]) to the analysis frame df (the left side) on one key. The right
@@ -157,7 +194,12 @@ def transform_join(df: pd.DataFrame, params: dict, frames: dict):
         raise ValueError(f"Cannot join — column not found: {right_key}")
     if how not in ("left", "inner"):
         raise ValueError(f"Unsupported join type: {how}. Must be left or inner.")
-    left_keys, right_keys = _join_keys(df[left_key], normalize), _join_keys(right[right_key], normalize)
+    aggregate = params.get("aggregate")
+    carried = right
+    if aggregate:  # M2.3b step 2: summarize the carried table per key; the summary's key is unique
+        right = _summarize(carried, right_key, right_table, aggregate, normalize)
+    left_keys = _join_keys(df[left_key], normalize)
+    right_keys = right[right_key] if aggregate else _join_keys(right[right_key], normalize)
     present = right_keys.notna()
     if right_keys[present].duplicated().any():
         raise ValueError(f"Cannot join: the key {right_key} repeats in {right_table}, so the join would multiply rows.")
@@ -178,23 +220,43 @@ def transform_join(df: pd.DataFrame, params: dict, frames: dict):
     added = right_rows[[c for c, _ in added_columns]].reindex(positions)  # -1 is no row: every value missing
     added.columns = [name for _, name in added_columns]
     added.index = df.index
+    count_column = None
+    if aggregate and aggregate.get("count"):
+        count_column = dict(added_columns)[f"rows_in_{right_table}"]
+        added[count_column] = added[count_column].fillna(0).astype(int)  # no matching row: a real zero
     new_df = pd.concat([df, added], axis=1)
     unmatched = int((~matched).sum())
     if how == "inner":
         new_df = new_df[matched]
     kept_unmatched = 0 if how == "inner" else unmatched
+    missing_columns = len(added_columns) - (1 if count_column is not None else 0)
     details = {"right_table": str(right_table), "left_key": str(left_key), "right_key": str(right_key),
-               "rows_left": len(df), "rows_right": len(right), "rows_after": len(new_df),
+               "rows_left": len(df), "rows_right": len(carried), "rows_after": len(new_df),
                "matched_rows": int(matched.sum()), "unmatched_left_rows": unmatched,
                "columns_added": [str(name) for _, name in added_columns], "renamed_columns": renamed,
                # cells missing only because their row found no match (a matched row copies the right table's value)
-               "new_missing_cells": kept_unmatched * len(added_columns),
+               "new_missing_cells": kept_unmatched * missing_columns,
                "how": how, "normalize_keys": normalize}
     warnings = ()
     if unmatched and how == "left":
         warnings = (f"{unmatched} row(s) have no match in {right_table}",)
     elif unmatched:
         warnings = (f"{unmatched} row(s) have no match in {right_table} and are removed",)
+    if aggregate:  # counts and names only: the carried table is summarized as uploaded (it is never cleaned, G78)
+        columns, stats = list(aggregate.get("columns") or []), list(aggregate.get("stats") or [])
+        duplicates = int(carried.duplicated().sum())
+        missing = {str(c): int(carried[c].isna().sum()) for c in columns}
+        details.update({
+            "aggregate": {"rows_summarized": len(carried), "keys": len(right), "columns": [str(c) for c in columns],
+                          "stats": stats, "count_column": count_column},
+            "carried_duplicate_rows": duplicates, "carried_missing": missing})
+        if duplicates:
+            warnings += (f"{duplicates} exact duplicate row(s) in {right_table} are counted again in the summary",)
+        which = " and ".join(s for s in AGG_STATS if s in stats)
+        for column in columns:
+            if missing[str(column)] and which:
+                warnings += (f"{column} is {missing[str(column)] / len(carried):.1%} missing in {right_table}: its "
+                             f"{which} use{'s' if ' and ' not in which else ''} only the rows that have a value",)
     return new_df, details, warnings
 
 
@@ -396,6 +458,28 @@ def describe_operation(op_type, params, details=None) -> str:
         if before is not None and after is not None and before != after:
             text += f" ({before} distinct values become {after})"
         return text + "."
+    if op_type == "join" and params.get("aggregate"):  # M2.3b step 2: summarize per key, then join
+        aggregate = params["aggregate"]
+        keep = "keeping only the rows that have a match" if params.get("how") == "inner" else "keeping every row"
+        which = " and ".join(s for s in AGG_STATS if s in (aggregate.get("stats") or []))
+        columns = list(aggregate.get("columns") or [])
+        count = bool(aggregate.get("count"))
+        if not (columns and which):
+            what = "a row count"  # also the impossible case with nothing to summarize (the transform refuses it)
+        else:
+            of = (f"the {which} of {' and '.join(str(c) for c in columns)}" if "columns_added" in details
+                  else f"the {which} of its numeric columns")
+            what = f"a row count, and {of}" if count else of  # M2.3b step 2: no count, no "a row count"
+        text = (f"Summarize {params.get('right_table')} per {params.get('left_key')} ({what}), then join the summary "
+                f"to the analysis table, {keep}.")
+        if params.get("normalize_keys"):
+            text += " Keys are compared after trimming spaces and ignoring case."
+        added = details.get("columns_added")
+        if added is not None:
+            names = [str(n) for n in added]
+            shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+            text += f" Adds {len(names)} column(s): {shown}." if names else " Adds no column."
+        return text
     if op_type == "join":
         keep = "keeping only the rows that have a match" if params.get("how") == "inner" else "keeping every row"
         text = f"Join {params.get('right_table')} to the analysis table on {params.get('left_key')}, {keep}."

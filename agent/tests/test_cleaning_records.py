@@ -59,7 +59,8 @@ def test_scan_no_issues_is_skipped():
     assert r.evidence == {"rows": 21, "columns_scanned": 3, "duplicate_row_count": 0,
                           "columns_above_missing_threshold": [], "missing_threshold": 0.05,
                           "text_issues": [], "numeric_text_columns": [],  # M2.3a step 2: the two new issue lists
-                          "joinable_tables": []}  # M2.3b: the join issues (names only)
+                          "joinable_tables": [],  # M2.3b: the join issues (names only)
+                          "aggregatable_tables": []}  # M2.3b step 2: the aggregate issues (names only)
     expected = "no exact duplicate rows and no column above the 5% missing threshold (21 rows, 3 columns scanned)"
     assert r.rationale == expected
     c = _by_option(r)

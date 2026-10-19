@@ -83,6 +83,9 @@ def _checked(scan) -> str:
         lines.append(f"{t['column']}: stored as text, but {t['parse_rate']:.1%} of its values are numbers.")
     for t in ev.get("joinable_tables") or []:  # M2.3b
         lines.append(f"{t['table']}: can be joined to the analysis table on {t['left_key']}.")
+    for t in ev.get("aggregatable_tables") or []:  # M2.3b step 2
+        lines.append(f"{t['table']}: has several rows for each {t['left_key']}; it can be summarized and joined to the "
+                     "analysis table.")
     if len(lines) == 1:
         lines.append("No data-quality issues found.")
     return "\n".join(lines)
@@ -163,12 +166,15 @@ def _effect(ev) -> str:
     if op == "join" and d:  # M2.3b
         added = len(d.get("columns_added") or [])
         if d.get("how") == "inner":
-            return f"Effect: {ev['rows_before']} to {ev['rows_after']} rows; {added} column(s) added."
-        text = f"Effect: {ev['rows_before']} rows stay {ev['rows_after']}; {added} column(s) added; "
-        unmatched = d.get("unmatched_left_rows") or 0
-        if unmatched:
-            return text + f"{d.get('new_missing_cells', 0)} new missing value(s) from {unmatched} row(s) with no match."
-        return text + "no new missing values."
+            text = f"Effect: {ev['rows_before']} to {ev['rows_after']} rows; {added} column(s) added."
+        else:
+            text = f"Effect: {ev['rows_before']} rows stay {ev['rows_after']}; {added} column(s) added; "
+            unmatched = d.get("unmatched_left_rows") or 0
+            text += (f"{d.get('new_missing_cells', 0)} new missing value(s) from {unmatched} row(s) with no match."
+                     if unmatched else "no new missing values.")
+        # M2.3b step 2: what the summary was built from (the carried table as uploaded), not the unmatched rows again
+        notes = [w for w in ev.get("warnings") or [] if "have no match in" not in w] if d.get("aggregate") else []
+        return text + (f" Notes: {'; '.join(notes)}." if notes else "")
     return f"Effect: {ev['rows_before']} to {ev['rows_after']} rows."
 
 
@@ -231,7 +237,7 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
         parts = [f"{k}. {_operation_words(fix, params, columns_scanned, ran)}.",
                  f"{_why_label(fix)}: {_bare(fix['rationale'])}."]
         fix_ev = fix.get("evidence") or {}
-        joined = fix_ev.get("issue_type") == "joinable_table"
+        joined = fix_ev.get("issue_type") in ("joinable_table", "aggregatable_table")  # M2.3b (step 2)
         if (joined and fix_ev.get("recommendation") == "skip" and approval is not None
                 and approval["chosen"] in ("approve", "edit", "auto_approve")):
             parts.append("The model recommended not joining this table.")  # M2.3b
@@ -245,11 +251,19 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
             parts.append(_effect(execution["evidence"]))
         lines.append(" ".join(parts))
         if approval is not None and approval["chosen"] == "reject" and joined:  # M2.3b: both reasons, in plain words
-            advice = "recommended against joining" if fix_ev.get("recommendation") == "skip" else "recommended joining"
+            summarized = fix_ev.get("issue_type") == "aggregatable_table"
+            if fix_ev.get("recommendation") == "skip":
+                advice = "recommended against joining"
+            else:
+                advice = "recommended summarizing and joining" if summarized else "recommended joining"
             reason = approval["rationale"]
             given = f": {_bare(reason)}" if reason and reason != "no reason given" else " without giving a reason"
-            left.append(f"{fix_ev.get('right_table')} was not joined. The model {advice}: {_bare(fix['rationale'])}. "
-                        f"You rejected the join{given}.")
+            if summarized:  # M2.3b step 2
+                left.append(f"{fix_ev.get('right_table')} was not summarized and joined. The model {advice}: "
+                            f"{_bare(fix['rationale'])}. You rejected it{given}.")
+            else:
+                left.append(f"{fix_ev.get('right_table')} was not joined. The model {advice}: {_bare(fix['rationale'])}. "
+                            f"You rejected the join{given}.")
         elif approval is not None and approval["chosen"] == "reject":
             ev = fix["evidence"]
             about = ev.get("description") or ", ".join(ev.get("affected_columns") or [])
@@ -291,7 +305,7 @@ def _tables_section(record, records=None):
             results[-1][3] = f"main table after the join; {joined}"
         else:
             roles[left] = f"main table; {joined}"
-        roles[right] = f"joined into {result}"
+        roles[right] = f"{'summarized and joined' if params.get('aggregate') else 'joined'} into {result}"
         results.append([result, ev.get("rows_after"), ev.get("columns_after"), "main table after the join"])
         left = result
 

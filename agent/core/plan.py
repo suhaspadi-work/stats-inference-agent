@@ -58,7 +58,7 @@ class UnaddressedIssue:
 
 # M2.3a: issue types that are caveats about a fix that WAS applied (not a rejected fix); they render as their
 # description alone, never as "... was left unaddressed because: ..."
-PLAIN_CAVEAT_TYPES = ("outcome_imputed",)
+PLAIN_CAVEAT_TYPES = ("outcome_imputed", "outcome_aggregated")
 
 
 def unaddressed_text(issue, verb: str = "was left unaddressed") -> str:

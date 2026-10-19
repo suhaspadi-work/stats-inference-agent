@@ -90,6 +90,10 @@ def scan_record(profile: ModelSafeView, issues) -> DecisionRecord:
             "joinable_tables": [{"table": i.evidence["right_table"], "left_key": i.evidence["left_key"],
                                  "right_key": i.evidence["right_key"]}
                                 for i in issues if i.issue_type == "joinable_table"],
+            # M2.3b step 2: names only
+            "aggregatable_tables": [{"table": i.evidence["right_table"], "left_key": i.evidence["left_key"],
+                                     "right_key": i.evidence["right_key"]}
+                                    for i in issues if i.issue_type == "aggregatable_table"],
         },
     )
 
@@ -154,7 +158,7 @@ def _fix_record_from_candidates(issue, operation: Operation, issue_index: int, c
             # M2.3b: the model's recommendation ("apply" unless it recommended not joining), and a join's names
             "recommendation": ev.get("recommendation", "apply"),
             **({k: issue.evidence[k] for k in ("right_table", "left_key", "right_key")}
-               if issue.issue_type == "joinable_table" else {}),
+               if issue.issue_type in ("joinable_table", "aggregatable_table") else {}),
         },
     )
 
@@ -229,7 +233,7 @@ def approval_record(operation: Operation, issue, decision: Optional[dict], auto_
         chosen, decided_by = "reject", "human"
         rationale = decision.get("reason") or "no reason given"
         # M2.3b: a declined join is not a data-quality caveat, so it is not carried forward
-        evidence["carried_forward_as_unaddressed"] = issue.issue_type != "joinable_table"
+        evidence["carried_forward_as_unaddressed"] = issue.issue_type not in ("joinable_table", "aggregatable_table")
     else:
         chosen, decided_by = "approve", "code_rule"
         rationale = f"action '{action}' is not one of approve, edit or reject; the node treats it as approval (G36)"

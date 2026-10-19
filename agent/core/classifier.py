@@ -172,10 +172,13 @@ class _ProposedOperationOut(BaseModel):
     alternative_rejected_because: str
     # M2.3b: for a joinable_table issue, whether the question needs the other table; "apply" for every other issue
     recommendation: Literal["apply", "skip"] = Field(
-        default="apply", description="For a joinable_table issue: 'apply' when the question needs the other table, "
+        default="apply", description="For a joinable_table or aggregatable_table issue: 'apply' when the question needs the other table, "
                                      "'skip' when it does not; 'apply' for every other issue")
     # M2.3a: True when this proposal came from the one corrected answer (not part of the schema the model sees)
     _retried: bool = PrivateAttr(default=False)
+
+
+_JOIN_KINDS = {"joinable": "joinable_table", "aggregatable": "joinable_table or aggregatable_table"}
 
 
 class _WranglingProposalsOut(BaseModel):
@@ -209,6 +212,9 @@ def propose_wrangling_operations(
     assert_model_safe(options, "options")
     if request_text is not None:
         assert_model_safe(request_text, "request_text")
+    # M2.3b step 2: the recommendation sentence names an aggregatable_table issue too when one is present
+    kinds = ("aggregatable" if any(i.issue_type == "aggregatable_table" for i in issues)
+             else "joinable" if any(i.issue_type == "joinable_table" for i in issues) else None)
     model = init_chat_model(model_name, model_provider="groq")
     structured_model = model.with_structured_output(_WranglingProposalsOut)
 
@@ -224,9 +230,9 @@ def propose_wrangling_operations(
         "option id of the same issue as the alternative you considered and did not choose (alternative_candidate_id); "
         "'leave_as_is' (keep the data as it is) is also a valid alternative. Choose exactly one option per issue, "
         "referencing its index. Copy each option id exactly as written, including every part of it."
-        + (" For a joinable_table issue, say in 'recommendation' whether the question needs the other table "
+        + (f" For a {_JOIN_KINDS[kinds]} issue, say in 'recommendation' whether the question needs the other table "
            "('apply') or not ('skip'), and in 'rationale' why; you must still choose the best join option so the user "
-           "can decide." if any(i.issue_type == "joinable_table" for i in issues) else "")
+           "can decide." if kinds else "")
         + (f"\n\nThe user's question: {request_text}" if request_text is not None else "")
         + "\n\nDetected issues:\n" + "\n".join(blocks)
     )

@@ -20,7 +20,7 @@ class CandidateIssue:
     WHETHER an issue exists, using concrete thresholds against real numbers.
     """
     issue_type: str                      # "duplicate_rows" | "high_missingness" | "inconsistent_text" | "numeric_as_text"
-                                         # | "joinable_table" (M2.3b)
+                                         # | "joinable_table" | "aggregatable_table" (M2.3b)
     description: str
     affected_columns: tuple[str, ...]
     evidence: dict = field(default_factory=dict)
@@ -179,27 +179,30 @@ def _joined_names(analysis_name, tables: dict) -> set:
 
 def detect_join_issues(analysis_name, tables: dict, profiles: dict, store: DatasetStore) -> list[CandidateIssue]:
     """
-    M2.3b: one joinable_table issue per carried table that has a usable link with the analysis table: its key is
-    unique in the carried table (so a join never multiplies rows) and at least one key matches (as given or after
-    trimming spaces and ignoring case). The best usable link per carried table (highest score, then names) is kept.
-    A carried table already joined into the analysis table (its lineage) is skipped; a rejection is not remembered.
-    Links between two carried tables, and links whose carried side repeats the key (one-to-many, many-to-many), raise
-    no issue: aggregate-then-join is the next step. The evidence holds names only: issue evidence reaches the
-    proposer's prompt, so no number from the link scan goes into it. scan_links reads each table at most once.
+    M2.3b: one issue per carried table that has a usable link with the analysis table and at least one matching key
+    (as given or after trimming spaces and ignoring case): a joinable_table issue when its key is unique in the carried
+    table (so a join never multiplies rows), an aggregatable_table issue when the carried key repeats (step 2: the
+    carried table is summarized per key, then joined). The best usable link per carried table is kept (highest score,
+    then a unique-key link before a repeating-key one, then names). A carried table already joined into the analysis
+    table (its lineage) is skipped; a rejection is not remembered. Links between two carried tables raise none. The
+    evidence holds names only: issue evidence reaches the proposer's prompt, so no number from the link scan goes into
+    it. scan_links reads each table at most once.
     """
     from core.table_links import scan_links
     joined = _joined_names(analysis_name, tables)  # a table already joined in is not proposed again
     best = {}
     for link in scan_links(tables, profiles, store)["computed"]:
         oriented = _oriented(link, analysis_name)
-        if oriented is None or not oriented["unique_b"]:
+        if oriented is None:
             continue
         if oriented["matched_distinct"] <= 0 and oriented["matched_distinct_normalized"] <= 0:
             continue
         right = oriented["table_b"]
         if right in joined:
             continue
-        rank = (-oriented["score"], str(oriented["column_a"]), str(oriented["column_b"]))
+        # a unique carried key: a plain join; a repeating one: summarize per key, then join (M2.3b step 2)
+        rank = (-oriented["score"], 0 if oriented["unique_b"] else 1, str(oriented["column_a"]),
+                str(oriented["column_b"]))
         if right not in best or rank < best[right][0]:
             best[right] = (rank, oriented)
     issues = []
@@ -209,11 +212,16 @@ def detect_join_issues(analysis_name, tables: dict, profiles: dict, store: Datas
         link = best[right][1]
         left_key, right_key = link["column_a"], link["column_b"]
         key = f"'{left_key}'" if left_key == right_key else f"'{left_key}' (called '{right_key}' there)"
+        columns = _column_list(profiles[right])
+        if link["unique_b"]:
+            issue_type = "joinable_table"
+            description = f"The table '{right}' (columns: {columns}) shares the key {key} with the analysis table."
+        else:
+            issue_type = "aggregatable_table"
+            description = (f"The table '{right}' (columns: {columns}) has several rows for each value of the key {key} "
+                           "it shares with the analysis table.")
         issues.append(CandidateIssue(
-            issue_type="joinable_table",
-            description=(f"The table '{right}' (columns: {_column_list(profiles[right])}) shares the key {key} "
-                         "with the analysis table."),
-            affected_columns=(left_key,),
+            issue_type=issue_type, description=description, affected_columns=(left_key,),
             evidence={"right_table": right, "left_key": left_key, "right_key": right_key},
         ))
     return issues
