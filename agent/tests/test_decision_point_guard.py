@@ -271,17 +271,30 @@ def fake_draft(predictors, outcome="total_spend"):
     return draft
 
 
-def choose(mapping_or_function):
+def _first_eligible(candidates):
+    return next(c["id"] for c in candidates if c["eligible"] and c["id"] != "leave_as_is")
+
+
+def choose(mapping_or_function, recommendation="apply"):
     """
     M2.3a: a fake proposer that picks candidate ids: a dict {issue_type: candidate_id} or a function
-    (issue, candidates) -> candidate_id. The alternative is leave_as_is with a fixed reason.
+    (issue, candidates) -> candidate_id. The alternative is leave_as_is with a fixed reason. M2.3b: it takes the
+    question as a third argument; an issue type the dict does not name gets its first eligible candidate other than
+    leave_as_is (a bundle's join issue gets join_left when eligible); recommendation is "apply", "skip" or a
+    function (issue, candidates) -> "apply" or "skip".
     """
-    pick = mapping_or_function if callable(mapping_or_function) else (lambda issue, cands: mapping_or_function[issue.issue_type])
+    if callable(mapping_or_function):
+        pick = mapping_or_function
+    else:
+        def pick(issue, cands):
+            return mapping_or_function.get(issue.issue_type) or _first_eligible(cands)
+    advise = recommendation if callable(recommendation) else (lambda issue, cands: recommendation)
 
-    def propose(issues, candidates):
+    def propose(issues, candidates, request_text=None):
         return [_ProposedOperationOut(issue_index=i, candidate_id=pick(issue, cands), rationale=f"fix {issue.issue_type}",
                                       alternative_candidate_id="leave_as_is",
-                                      alternative_rejected_because="it would bias the result")
+                                      alternative_rejected_because="it would bias the result",
+                                      recommendation=advise(issue, cands))
                 for i, (issue, cands) in enumerate(zip(issues, candidates))]
     return propose
 
@@ -290,8 +303,15 @@ def choose(mapping_or_function):
 fake_propose = choose({"duplicate_rows": "dedupe_all", "high_missingness": "delete_rows"})
 
 
-def must_not_propose(issues, candidates=None):
+def must_not_propose(issues, candidates=None, request_text=None):
     raise AssertionError("no issues were expected, so the proposer must not be called")
+
+
+def reject_joins(payload):
+    """M2.3b: the wrangling answers that reject every join (the carried table stays untouched) and approve the rest."""
+    return {"decisions": [{"index": op["index"], "action": "reject", "reason": "the question does not need this table"}
+                          if op["op_type"] == "join" else {"index": op["index"], "action": "approve"}
+                          for op in payload["proposed_operations"]]}
 
 
 # ------------------------------------------------------------------ datasets
@@ -464,13 +484,16 @@ def scenario_runs(tmp_path_factory):
         runs["S11"] = drive(app, start(_dataset(_two_group_df(rng), tmp, store, "s11"), "Did West spend more?"), "s11",
                             [{"action": "approve"}, {"action": "approve"}], stage_gate={"action": "run"}, stop=())
 
-    # S12 (M2.2): a two-table bundle; the tables share the region column, so diagnose also writes stage1.links.scan
+    # S12 (M2.2): a two-table bundle; the tables share the region column, so diagnose also writes stage1.links.scan;
+    # M2.3b: the shared unique key is also a join proposal (join_left), rejected here
     main = _dataset(_two_group_df(rng), tmp, store, "s12_main")
     lookup = _dataset(pd.DataFrame({"region": ["East", "West"], "manager": ["a", "b"]}), tmp, store, "s12_lookup")
     app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
-                            draft_fn=fake_draft(["region"]), propose_fn=must_not_propose)
+                            draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
     bundle = {"request_text": "Did West spend more?", "session_id": "session-abc", "datasets": [main, lookup]}
-    runs["S12"] = drive(app, bundle, "s12", [{"action": "approve"}])
+    runs["S12"] = drive(app, bundle, "s12", [
+        {"decisions": [{"index": 0, "action": "reject", "reason": "the question does not need this table"}]},
+        {"action": "approve"}])
 
     return runs, emitted
 
@@ -495,7 +518,7 @@ EXPECTED_PAUSES = {
     "S5": [GATE, "plan_approval"], "S6": [GATE, "plan_approval"], "S7": [], "S8": [], "S9": [GATE, "plan_approval"],
     "S10": [GATE],
     "S11": [GATE, "plan_approval", "stage_gate", "plan_approval"],  # M1.3b: the exploratory round
-    "S12": [GATE, "plan_approval"],  # M2.2: a two-table bundle
+    "S12": [GATE, "wrangling_approval", "plan_approval"],  # M2.2: a two-table bundle; M2.3b: its join proposal
 }
 ENDS_WITHOUT_STOP = {"S3", "S8", "S10", "S11"}  # runs that end at END rather than at the stop before report
 
@@ -568,5 +591,13 @@ def test_scenario_specifics(scenario_logs):
     # M1.3b: S11 runs the exploratory round
     assert "planner.stage_gate" in points("S11") and "planner.round_start" in points("S11")
     assert len(scenario_logs["S11"][0]["rounds"]) == 2
+    # M2.3b: S12 links the tables and rejects the proposed join (a fix and a reject approval, no execution)
+    s12 = scenario_logs["S12"][0]["decision_log"]
+    assert "stage1.links.scan" in points("S12")
+    (s12_fix,) = [e for e in s12 if e["decision_point"] == "stage1.clean.fix"]
+    assert (s12_fix["evidence"]["issue_type"], s12_fix["chosen"]) == ("joinable_table", "join_left")
+    (s12_approval,) = [e for e in s12 if e["decision_point"] == "stage1.clean.approval"]
+    assert s12_approval["chosen"] == "reject" and s12_approval["evidence"]["carried_forward_as_unaddressed"] is False
+    assert "stage1.clean.execution" not in points("S12")
     s10_route = scenario_logs["S10"][0]["decision_log"][-1]
     assert (s10_route["decision_point"], s10_route["chosen"]) == ("planner.route", "unsupported")

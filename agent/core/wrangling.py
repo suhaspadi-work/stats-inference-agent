@@ -96,6 +96,11 @@ def _cast_numeric(df: pd.DataFrame, column):
 _SPACES = re.compile(r"\s+")
 
 
+def normalize_key(value) -> str:
+    """M2.3b: a key compared after trimming spaces (runs of spaces become one) and ignoring case."""
+    return _SPACES.sub(" ", str(value).strip()).lower()
+
+
 def transform_normalize_text(df: pd.DataFrame, params: dict):
     """M2.3a step 2: trim spaces (and runs of spaces) in a text column, and optionally ignore case."""
     column, lowercase = params.get("column"), bool(params.get("lowercase", False))
@@ -115,6 +120,82 @@ def transform_normalize_text(df: pd.DataFrame, params: dict):
     details = {"column": str(column), "lowercase": lowercase, "levels_before": int(before.nunique()),
                "levels_after": int(after.nunique()), "cells_changed": int((after != before).sum())}
     return new_df, details, ()
+
+
+def _join_keys(series: pd.Series, normalize: bool) -> pd.Series:
+    """The keys as compared: as given, or normalized; a missing key stays missing (it never matches)."""
+    if not normalize:
+        return series
+    return series.map(lambda v: normalize_key(v) if pd.notna(v) else None)
+
+
+def _added_name(name, right_table, taken) -> str:
+    """A right column's name in the result: kept, or f"{name}_{right_table}" (then _2, _3) when it is taken."""
+    if name not in taken:
+        return name
+    base = f"{name}_{right_table}"
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate, n = f"{base}_{n}", n + 1
+    return candidate
+
+
+def transform_join(df: pd.DataFrame, params: dict, frames: dict):
+    """
+    M2.3b: join a carried table (frames[right_table]) to the analysis frame df (the left side) on one key. The right
+    key must be unique, so a join never multiplies rows; a left join keeps every left row in order, an inner join
+    only the matched ones. The right key is not added again; a right column whose name is taken gets the table name.
+    """
+    right_table, left_key, right_key = params.get("right_table"), params.get("left_key"), params.get("right_key")
+    how, normalize = params.get("how", "left"), bool(params.get("normalize_keys", False))
+    if right_table not in (frames or {}):
+        raise ValueError(f"Cannot join — table not found: {right_table}")
+    right = frames[right_table]
+    if left_key not in df.columns:
+        raise ValueError(f"Cannot join — column not found: {left_key}")
+    if right_key not in right.columns:
+        raise ValueError(f"Cannot join — column not found: {right_key}")
+    if how not in ("left", "inner"):
+        raise ValueError(f"Unsupported join type: {how}. Must be left or inner.")
+    left_keys, right_keys = _join_keys(df[left_key], normalize), _join_keys(right[right_key], normalize)
+    present = right_keys.notna()
+    if right_keys[present].duplicated().any():
+        raise ValueError(f"Cannot join: the key {right_key} repeats in {right_table}, so the join would multiply rows.")
+    lookup = pd.Index(right_keys[present].tolist())
+    positions = lookup.get_indexer(left_keys.tolist())
+    positions[left_keys.isna().to_numpy()] = -1  # a missing key never matches
+    matched = positions >= 0
+    right_rows = right.loc[present].reset_index(drop=True)
+    added_columns, renamed, taken = [], {}, set(df.columns)
+    for column in right.columns:
+        if column == right_key:
+            continue
+        name = _added_name(column, right_table, taken)
+        taken.add(name)
+        added_columns.append((column, name))
+        if name != column:
+            renamed[str(column)] = str(name)
+    added = right_rows[[c for c, _ in added_columns]].reindex(positions)  # -1 is no row: every value missing
+    added.columns = [name for _, name in added_columns]
+    added.index = df.index
+    new_df = pd.concat([df, added], axis=1)
+    unmatched = int((~matched).sum())
+    if how == "inner":
+        new_df = new_df[matched]
+    kept_unmatched = 0 if how == "inner" else unmatched
+    details = {"right_table": str(right_table), "left_key": str(left_key), "right_key": str(right_key),
+               "rows_left": len(df), "rows_right": len(right), "rows_after": len(new_df),
+               "matched_rows": int(matched.sum()), "unmatched_left_rows": unmatched,
+               "columns_added": [str(name) for _, name in added_columns], "renamed_columns": renamed,
+               # cells missing only because their row found no match (a matched row copies the right table's value)
+               "new_missing_cells": kept_unmatched * len(added_columns),
+               "how": how, "normalize_keys": normalize}
+    warnings = ()
+    if unmatched and how == "left":
+        warnings = (f"{unmatched} row(s) have no match in {right_table}",)
+    elif unmatched:
+        warnings = (f"{unmatched} row(s) have no match in {right_table} and are removed",)
+    return new_df, details, warnings
 
 
 def transform_rename(df: pd.DataFrame, params: dict):
@@ -315,6 +396,17 @@ def describe_operation(op_type, params, details=None) -> str:
         if before is not None and after is not None and before != after:
             text += f" ({before} distinct values become {after})"
         return text + "."
+    if op_type == "join":
+        keep = "keeping only the rows that have a match" if params.get("how") == "inner" else "keeping every row"
+        text = f"Join {params.get('right_table')} to the analysis table on {params.get('left_key')}, {keep}."
+        if params.get("normalize_keys"):
+            text += " Keys are compared after trimming spaces and ignoring case."
+        added = details.get("columns_added")
+        if added is not None:
+            names = [str(n) for n in added]
+            shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+            text += f" Adds {len(names)} column(s): {shown}." if names else " Adds no column."
+        return text
     if op_type == "rename":
         mapping = params.get("mapping") or {}
         return "Rename the columns: " + ", ".join(f"{a} to {b}" for a, b in mapping.items()) + "."
@@ -376,3 +468,31 @@ def execute_impute(dataset: Dataset, store: DatasetStore, operation: Operation) 
 
 def execute_normalize_text(dataset: Dataset, store: DatasetStore, operation: Operation) -> tuple[Dataset, Operation]:
     return _run(dataset, store, operation, transform_normalize_text)
+
+
+def execute_join(dataset: Dataset, store: DatasetStore, operation: Operation, tables: dict) -> tuple[Dataset, Operation]:
+    """
+    M2.3b: run a join on the analysis table (dataset, the left side) with tables[params["right_table"]]; the result
+    is a NEW derived table (its own version chain, parents both inputs). A ValueError marks the operation FAILED.
+    """
+    if operation.approval_status != ApprovalStatus.APPROVED:
+        raise ValueError("Operation must be APPROVED before execution.")
+    params = operation.params
+    right_table, result_name = params.get("right_table"), params.get("result_name")
+    right = (tables or {}).get(right_table)
+    if right is None:
+        return dataset, operation.mark_failed(f"Cannot join — table not found: {right_table}")
+    if not result_name:
+        return dataset, operation.mark_failed("Cannot join — no result_name was given.")
+    left_df = store.read(dataset.storage_key)
+    try:
+        new_df, details, warnings = transform_join(left_df, params, {right_table: store.read(right.storage_key)})
+    except (ValueError, TypeError) as e:
+        return dataset, operation.mark_failed(str(e))
+    storage_key = f"{dataset.session_id}/{result_name}_v1.csv"
+    store.write(storage_key, new_df)
+    derived = Dataset.derived(dataset.session_id, result_name, storage_key, parents=(dataset.handle, right.handle),
+                              operation_id=operation.id)
+    impact = OperationImpact(rows_before=len(left_df), rows_after=len(new_df), columns_before=len(left_df.columns),
+                             columns_after=len(new_df.columns), warnings=tuple(warnings), details=dict(details))
+    return derived, operation.with_result(impact=impact, output_handle=derived.handle)

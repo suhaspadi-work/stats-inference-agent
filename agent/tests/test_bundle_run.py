@@ -5,6 +5,7 @@ dataset and profile always mirror the analysis table; a second question on the s
 when it passes the cleaned dataset back, as the product's "Ask another question" does.
 """
 import copy
+import re
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from core.graph import build_agent_graph
 from core.ingestion import load_bundle
 from core.nodes import with_dataset
 from core.plan import QuestionType
-from tests.test_decision_point_guard import confident, fake_draft, fake_propose, must_not_propose
+from tests.test_decision_point_guard import confident, fake_draft, fake_propose, must_not_propose, reject_joins
 from tests.test_exploratory_round import _frame
 from tests.test_prompt_canaries import _base_df, _with_duplicates, canary_hits, fake_model  # noqa: F401 (fixture)
 from tests.test_stage1_report import _answer, _drive, _messy_frame
@@ -104,12 +105,16 @@ def test_a_two_table_bundle_analyses_the_main_table_only(fake_model, tmp_path, s
     carried_before = tables[CARRIED_NAME]
     carried_bytes = (store.base_dir / carried_before.storage_key).read_bytes()
     alone, _, _ = _drive(_app(store, propose_fn=must_not_propose), _single_state(tables, "main"), "alone")
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "bundle")
+    # M2.3b: the carried table shares region with the main table, so a join is proposed; it is rejected
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "bundle", wrangling_approval=reject_joins)
     assert values["test_result"]["method"] == alone["test_result"]["method"]
     assert values["test_result"]["p_value"] == alone["test_result"]["p_value"]
     # M2.2: a bundle adds exactly one links record, right after its before snapshot
     expected = list(_points(alone))
     expected.insert(expected.index("stage1.quality.snapshot") + 1, "stage1.links.scan")
+    # M2.3b: and the rejected join's fix and approval records right after the scan (no execution)
+    expected[expected.index("stage1.clean.scan") + 1:expected.index("stage1.clean.scan") + 1] = [
+        "stage1.clean.fix", "stage1.clean.approval"]
     assert _points(values) == expected
     assert [t["name"] for t in _record(values, "planner.stage_plan")["evidence"]["tables"]] == ["main", CARRIED_NAME]
     assert values["tables"][CARRIED_NAME] == carried_before
@@ -121,7 +126,8 @@ def test_a_two_table_bundle_analyses_the_main_table_only(fake_model, tmp_path, s
 
 def test_cleaning_applies_to_the_main_table_only(fake_model, tmp_path, store):
     tables = _bundle(tmp_path, store, {"main": _messy_frame(), CARRIED_NAME: _carried_df()})
-    values, pauses, _ = _drive(_app(store), _bundle_state(tables), "messy-bundle")
+    values, pauses, _ = _drive(_app(store), _bundle_state(tables), "messy-bundle",
+                               wrangling_approval=reject_joins)  # M2.3b: the proposed join is rejected
     assert "wrangling_approval" in [p["type"] for p in pauses]
     assert values["tables"]["main"].version > 1 and values["tables"]["main"] == values["dataset"]
     assert values["tables"][CARRIED_NAME] == tables[CARRIED_NAME] and values["tables"][CARRIED_NAME].version == 1
@@ -134,14 +140,15 @@ def test_cleaning_applies_to_the_main_table_only(fake_model, tmp_path, store):
 # --- (d) the Stage 1 report lists the tables -----------------------------------------------------------------------------------
 
 def _line(name, frame, role):
-    tail = "main table" if role == "analysis" else "carried along; not used until joins arrive"
+    tail = "main table" if role == "analysis" else "carried along; not joined"  # M2.3b: the new wording
     return f"{name}: {len(frame)} rows, {frame.shape[1]} columns ({tail})"
 
 
 def test_the_tables_section(fake_model, tmp_path, store):
     main, carried = _frame(), _carried_df()
     tables = _bundle(tmp_path, store, {"main": main, CARRIED_NAME: carried})
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "tables")
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "tables",
+                          wrangling_approval=reject_joins)  # M2.3b: the proposed join is rejected
     entry = _stage1(values)
     headings = [s["heading"] for s in entry["sections"]]
     # M2.2: the quality numbers, and the region column the two tables share
@@ -175,15 +182,32 @@ def test_no_carried_table_reaches_a_prompt(fake_model, tmp_path, store):
     prompts, config = fake_model
     config.update(question_type=QuestionType.TWO_GROUP_COMPARISON, predictors=["region"])
     tables = _bundle(tmp_path, store, {"main": _with_duplicates(_base_df()), CARRIED_NAME: _carried_df()})
-    values, pauses, _ = _drive(build_agent_graph(store), _bundle_state(tables), "privacy")
+    values, pauses, _ = _drive(build_agent_graph(store), _bundle_state(tables), "privacy",
+                               wrangling_approval=reject_joins)
     assert "wrangling_approval" in [p["type"] for p in pauses] and values["report"]
     stages = {p["stage"] for p in prompts}
     assert {"report", "_ClassificationOut", "_DraftPlanOut", "_WranglingProposalsOut"} <= stages
     assert canary_hits(prompts) == []  # the main table's canaries, as before
-    assert canary_hits(prompts, canaries=(*CARRIED_STRINGS, CARRIED_NUMBER)) == []
+    assert canary_hits(prompts, canaries=(*CARRIED_STRINGS, CARRIED_NUMBER)) == []  # no carried value, ever
+    # M2.3b: the carried table's name and column names reach only the proposer, only in its join issue's block
+    (proposer,) = [p["text"] for p in prompts if p["stage"] == "_WranglingProposalsOut"]
     for p in prompts:
-        assert CARRIED_COLUMN not in p["text"] and "budget" not in p["text"], p["stage"]
-        assert CARRIED_NAME not in p["text"], p["stage"]
+        if p["stage"] != "_WranglingProposalsOut":
+            assert CARRIED_COLUMN not in p["text"] and "budget" not in p["text"], p["stage"]
+            assert CARRIED_NAME not in p["text"], p["stage"]
+    (join_line,) = [line for line in proposer.splitlines() if re.match(r"^\[\d+\] joinable_table: ", line)]
+    assert join_line.endswith(
+        f"joinable_table: The table '{CARRIED_NAME}' (columns: region, {CARRIED_COLUMN}, budget) shares the key "
+        f"'region' with the analysis table. (columns: region, evidence: {{'right_table': '{CARRIED_NAME}', "
+        "'left_key': 'region', 'right_key': 'region'})")
+    # the columns only in the issue line; the table name also in its join options' plain words (no number)
+    assert [line for line in proposer.splitlines() if CARRIED_COLUMN in line or "budget" in line] == [join_line]
+    assert [line for line in proposer.splitlines() if CARRIED_NAME in line] == [
+        join_line, f"      join_left: Join {CARRIED_NAME} to the analysis table on region, keeping every row.",
+        f"      join_inner: Join {CARRIED_NAME} to the analysis table on region, keeping only the rows that have a "
+        "match."]
+    for word in ("matched_distinct", "inner_join_rows", "orphan", "fan_out", "many_to_one", "cardinality"):
+        assert word not in proposer, word  # no link number or link field
 
 
 # --- (f) another analysis table ------------------------------------------------------------------------------------------------------
@@ -191,8 +215,8 @@ def test_no_carried_table_reaches_a_prompt(fake_model, tmp_path, store):
 def test_an_analysis_table_other_than_the_first(fake_model, tmp_path, store):
     tables = _bundle(tmp_path, store, {CARRIED_NAME: _carried_df(), "main": _frame()})
     # the user's choice of the analysis table is the main_table input
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables, main_table="main"),
-                          "second-table")
+    values, _, _ = _drive(_app(store), _bundle_state(tables, main_table="main"), "second-table",
+                          wrangling_approval=reject_joins)  # M2.3b: the proposed join is rejected
     assert values["analysis_table"] == "main" and values["dataset"] == tables["main"]
     # a checkpoint turns the plan's tuple fields into lists (M0.4); the value is what matters
     assert list(values["plan"].data_sources) == [tables["main"].handle] and values["plan"].outcome_name == "total_spend"
@@ -242,23 +266,25 @@ def test_with_dataset_without_tables(tmp_path, store):
 
 # --- (i) the second question on the same thread ----------------------------------------------------------------------------------------
 
-def _invoke_to_end(app, graph_input, thread):
-    """As the product does it: invoke, answer each pause, and return the values invoke returned."""
+def _invoke_to_end(app, graph_input, thread, **overrides):
+    """As the product does it: invoke, answer each pause, and return the values invoke returned (M2.3b: overrides
+    answer a pause type, as _drive's do)."""
     config = {"configurable": {"thread_id": thread}}
     result = app.invoke(graph_input, config)
     while "__interrupt__" in result:
-        result = app.invoke(Command(resume=_answer(result["__interrupt__"][0].value, {})), config)
+        result = app.invoke(Command(resume=_answer(result["__interrupt__"][0].value, overrides)), config)
     return result
 
 
 def test_a_second_question_keeps_the_carried_tables(fake_model, tmp_path, store):
     app = _app(store)
     tables = _bundle(tmp_path, store, {"main": _messy_frame(), CARRIED_NAME: _carried_df()})
-    first = _invoke_to_end(app, _bundle_state(tables), "thread")
+    first = _invoke_to_end(app, _bundle_state(tables), "thread", wrangling_approval=reject_joins)  # M2.3b
     cleaned = first["dataset"]
     assert cleaned.version > 1 and first["plan"].status.value == "executed"
 
-    second = _invoke_to_end(app, {"request_text": QUESTION, "session_id": "s-bundle", "dataset": cleaned}, "thread")
+    second = _invoke_to_end(app, {"request_text": QUESTION, "session_id": "s-bundle", "dataset": cleaned}, "thread",
+                            wrangling_approval=reject_joins)  # M2.3b: the join is proposed again and rejected
     assert list(second["tables"]) == ["main", CARRIED_NAME] and second["analysis_table"] == "main"
     assert second["tables"][CARRIED_NAME] == tables[CARRIED_NAME]
     # a checkpoint turns the plan's tuple fields into lists (M0.4); the value is what matters
@@ -271,7 +297,7 @@ def test_a_second_question_keeps_the_carried_tables(fake_model, tmp_path, store)
     _assert_mirror(third)
 
     bundle2 = _bundle(tmp_path, store, {"again": _frame(seed=64), "lookup2": _carried_df()}, session="s-two")
-    fourth = _invoke_to_end(app, _bundle_state(bundle2), "thread")
+    fourth = _invoke_to_end(app, _bundle_state(bundle2), "thread", wrangling_approval=reject_joins)  # M2.3b
     assert list(fourth["tables"]) == ["again", "lookup2"] and CARRIED_NAME not in fourth["tables"]
     assert fourth["analysis_table"] == "again"
     _assert_mirror(fourth)
@@ -307,12 +333,12 @@ def test_checkpointed_datasets_equal_their_originals(fake_model, tmp_path, store
 def test_a_new_bundle_uses_its_own_first_table(second_names, fake_model, tmp_path, store):
     app = _app(store)
     first = _bundle(tmp_path, store, {"main": _messy_frame(), "carried": _carried_df()})
-    q1 = _invoke_to_end(app, _bundle_state(first), "stale")
+    q1 = _invoke_to_end(app, _bundle_state(first), "stale", wrangling_approval=reject_joins)  # M2.3b
     assert q1["analysis_table"] == "main" and q1["plan"].status.value == "executed"
     a, b = second_names
     frames = {a: _frame(seed=71), b: _frame(seed=72) if b == "main" else _carried_df()}
     second = _bundle(tmp_path, store, frames, session="s-second")
-    q2 = _invoke_to_end(app, _bundle_state(second), "stale")
+    q2 = _invoke_to_end(app, _bundle_state(second), "stale", wrangling_approval=reject_joins)  # M2.3b
     assert q2["analysis_table"] == a
     assert list(q2["tables"]) == [a, b] and q2["dataset"] == second[a]
     # a checkpoint turns the plan's tuple fields into lists (M0.4); the value is what matters

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.capabilities import operation_named
+from core.capabilities import run_transform
+from core.ingestion import unique_table_name
 from core.thresholds import (
     DISCRETE_MAX_DISTINCT, GROUP_MAX_LEVELS, GROUP_MIN_OBSERVED, IMPUTE_MAX_MISSING_PCT, IMPUTE_MIN_OBSERVED,
     MAX_GROUP_COLUMNS,
 )
-from core.wrangling import describe_operation
+from core.wrangling import describe_operation, normalize_key
 
 LEAVE = "leave_as_is"
 
@@ -26,15 +27,16 @@ def _float(x):
     return None if x is None else float(x)
 
 
-def dry_run(dataset, store_or_frame, op_type: str, params: dict) -> dict:
-    """The impact preview of one operation: the same transform as the execution, on an in-memory frame."""
-    return _public(_dry_run(dataset, store_or_frame, op_type, params))
+def dry_run(dataset, store_or_frame, op_type: str, params: dict, frames=None) -> dict:
+    """The impact preview of one operation: the same transform as the execution, on an in-memory frame. frames
+    (table name -> DataFrame) holds the other tables a join reads."""
+    return _public(_dry_run(dataset, store_or_frame, op_type, params, frames))
 
 
-def _dry_run(dataset, store_or_frame, op_type: str, params: dict) -> dict:
+def _dry_run(dataset, store_or_frame, op_type: str, params: dict, frames=None) -> dict:
     """dry_run plus the transform's own details (for the plain-words sentence)."""
     df = _frame(dataset, store_or_frame)
-    new_df, details, warnings = operation_named(op_type).transform(df, params)
+    new_df, details, warnings = run_transform(op_type, df, params, frames)
     rows_before, rows_after = len(df), len(new_df)
     shift, cells = None, 0
     if op_type in ("dedupe", "filter"):
@@ -53,6 +55,9 @@ def _dry_run(dataset, store_or_frame, op_type: str, params: dict) -> dict:
     elif op_type == "normalize_text":
         rows_changed = cells = int(details["cells_changed"])
         affected = [params["column"]]
+    elif op_type == "join":  # M2.3b: rows removed by an inner join; the cells left missing by unmatched rows
+        rows_changed = rows_before - rows_after
+        cells, affected = int(details["new_missing_cells"]), list(details["columns_added"])
     elif op_type == "cast" and params.get("to_type") == "numeric":
         rows_changed, cells, affected = 0, int(details["non_missing_before"]), [params["column"]]
         if details["became_missing"]:
@@ -82,14 +87,14 @@ def _zero_preview(df) -> dict:
             "cells_changed": 0, "shift": None, "warnings": [], "details": {}}
 
 
-def _candidate(df, dataset, cid, op_type, params, eligible, reason) -> dict:
+def _candidate(df, dataset, cid, op_type, params, eligible, reason, frames=None) -> dict:
     if not eligible:
         return {"id": cid, "op_type": op_type, "params": params, "eligible": False, "reason": reason,
                 "what_was_run": describe_operation(op_type, params), "preview": None}
     if op_type is None:
         preview = _zero_preview(df)
     else:
-        preview = _dry_run(dataset, df, op_type, params)
+        preview = _dry_run(dataset, df, op_type, params, frames)
     words = {**preview["details"]}
     if op_type in ("dedupe", "filter"):
         words["rows_removed"] = preview["rows_changed"]
@@ -199,9 +204,59 @@ def _numeric_text_candidates(df, dataset, column) -> list:
     ]
 
 
-def enumerate_candidates(issue, dataset, profile, store, df=None) -> list:
-    """Every candidate fix for one issue, JSON-clean; reads the data at most once (pass df to read none)."""
+def _join_candidates(df, dataset, issue, tables, frames) -> list:
+    """
+    M2.3b: the join candidates of one joinable_table issue. A join that would multiply rows (a right key that
+    repeats) is never eligible; join_left_normalized only when comparing after trimming spaces and ignoring case
+    matches more distinct keys and the right key stays unique.
+    """
+    ev = issue.evidence
+    right_name, left_key, right_key = ev["right_table"], ev["left_key"], ev["right_key"]
+    right = frames[right_name]
+    left_keys = set(df[left_key].dropna().tolist())
+    right_keys = right[right_key].dropna()
+    repeats = bool(right_keys.duplicated().any())
+    right_set = set(right_keys.tolist())
+    exact = sum(1 for k in left_keys if k in right_set)
+    normalized_right = right_keys.map(normalize_key)
+    normalized_set = set(normalized_right.tolist())
+    normalized = sum(1 for k in left_keys if normalize_key(k) in normalized_set)
+    normalized_repeats = bool(normalized_right.duplicated().any())
+    base = dataset.name  # a derived analysis table's name is used as is
+    params = {"right_table": right_name, "left_key": left_key, "right_key": right_key, "how": "left",
+              "normalize_keys": False, "result_name": unique_table_name(f"{base}_{right_name}", set(tables or {}))}
+    blocked = (f"the key {right_key} repeats in {right_name}: a join would multiply rows" if repeats
+               else "no key value matches" if exact == 0 else None)
+    if normalized <= exact:
+        normalized_blocked = "comparing after trimming spaces and ignoring case matches no more keys"
+    elif normalized_repeats:
+        normalized_blocked = f"the key repeats in {right_name} once its spaces and case are ignored"
+    else:
+        normalized_blocked = None
+    return [
+        _candidate(df, dataset, LEAVE, None, {}, True, "do not join; the table stays carried along"),
+        _candidate(df, dataset, "join_left", "join", params, blocked is None,
+                   blocked or (f"keeps every row of the analysis table; rows whose key is not found in {right_name} "
+                               "get missing values in the added columns"), frames),
+        _candidate(df, dataset, "join_inner", "join", {**params, "how": "inner"}, blocked is None,
+                   blocked or f"keeps only the rows whose key is found in {right_name}", frames),
+        _candidate(df, dataset, "join_left_normalized", "join", {**params, "normalize_keys": True},
+                   normalized_blocked is None,
+                   normalized_blocked or "compares the keys after trimming spaces and ignoring case, which matches more "
+                                         "rows", frames),
+    ]
+
+
+def enumerate_candidates(issue, dataset, profile, store, df=None, tables=None, frames=None) -> list:
+    """Every candidate fix for one issue, JSON-clean; reads the data at most once (pass df to read none). M2.3b: a
+    joinable_table issue also reads its right table from tables (once, cached in frames when given)."""
     df = df if df is not None else store.read(dataset.storage_key)
+    if issue.issue_type == "joinable_table":
+        frames = frames if frames is not None else {}
+        right_name = issue.evidence["right_table"]
+        if right_name not in frames:
+            frames[right_name] = store.read(tables[right_name].storage_key)
+        return _join_candidates(df, dataset, issue, tables, frames)
     if issue.issue_type == "duplicate_rows":
         return [
             _candidate(df, dataset, "dedupe_all", "dedupe", {"subset": None}, True, "exact duplicate rows were found"),
@@ -216,7 +271,7 @@ def enumerate_candidates(issue, dataset, profile, store, df=None) -> list:
     return [_candidate(df, dataset, LEAVE, None, {}, True, "no fix is registered for this issue type")]
 
 
-def recompute_candidates(candidates, dataset, frame, basis: str) -> list:
+def recompute_candidates(candidates, dataset, frame, basis: str, frames=None) -> list:
     """
     M2.3a: the eligible candidates' previews (and plain words) recomputed on frame, the data as it will be when
     this operation runs; every preview gains "basis". Eligibility is not re-decided. A dry run that raises keeps
@@ -227,7 +282,7 @@ def recompute_candidates(candidates, dataset, frame, basis: str) -> list:
         c = dict(c)
         if c["eligible"]:
             try:
-                fresh = _candidate(frame, dataset, c["id"], c["op_type"], c["params"], True, c["reason"])
+                fresh = _candidate(frame, dataset, c["id"], c["op_type"], c["params"], True, c["reason"], frames)
                 c["preview"], c["what_was_run"] = {**fresh["preview"], "basis": basis}, fresh["what_was_run"]
             except ValueError:
                 if c["preview"] is not None:

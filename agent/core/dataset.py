@@ -56,6 +56,9 @@ class Dataset:
             storage_key=new_storage_key,
             parent_version=self.version,
             created_from_operation=operation_id,
+            # M2.3b: the handles the chain's FIRST version was built from; a later version keeps them so a join is
+            # not forgotten after another operation
+            parents=self.parents,
         )
 
     @classmethod
@@ -69,11 +72,12 @@ class Dataset:
 
 
 def parent_handles(dataset: Dataset) -> tuple[str, ...]:
-    """The handles a dataset came from: its parents, the previous version of the same table, or none."""
-    if dataset.parents:
-        return tuple(dataset.parents)
+    """The handles a dataset came from: the previous version of the same table, else its parents (a derived v1), or
+    none. M2.3b: a later version of a derived table keeps the parents, so the previous version is checked first."""
     if dataset.parent_version is not None:
         return (f"{dataset.name}@v{dataset.parent_version}",)
+    if dataset.parents:
+        return tuple(dataset.parents)
     return ()
 
 

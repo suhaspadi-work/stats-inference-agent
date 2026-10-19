@@ -23,6 +23,7 @@ from core.method_glossary import GLOSSARY, render_glossary
 from core.plan import unaddressed_text
 from core.quality_records import LINKS_POINT, QUALITY_SNAPSHOT_POINT
 from core.report_records import REPORT_NARRATIVE_POINT
+from core.wrangling import describe_operation
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
 from core.stage_plan_records import STAGE_PLAN_POINT
@@ -80,6 +81,8 @@ def _checked(scan) -> str:
                      f"{t['column']}: {t['cells_changed_trim']} value(s) have extra spaces.")
     for t in ev.get("numeric_text_columns") or []:
         lines.append(f"{t['column']}: stored as text, but {t['parse_rate']:.1%} of its values are numbers.")
+    for t in ev.get("joinable_tables") or []:  # M2.3b
+        lines.append(f"{t['table']}: can be joined to the analysis table on {t['left_key']}.")
     if len(lines) == 1:
         lines.append("No data-quality issues found.")
     return "\n".join(lines)
@@ -157,13 +160,30 @@ def _effect(ev) -> str:
     if op == "cast" and d.get("to_type") == "numeric":
         return (f"Effect: {d['became_missing']} value(s) that were not numbers became missing." if d["became_missing"]
                 else "Effect: every value was converted.")
+    if op == "join" and d:  # M2.3b
+        added = len(d.get("columns_added") or [])
+        if d.get("how") == "inner":
+            return f"Effect: {ev['rows_before']} to {ev['rows_after']} rows; {added} column(s) added."
+        text = f"Effect: {ev['rows_before']} rows stay {ev['rows_after']}; {added} column(s) added; "
+        unmatched = d.get("unmatched_left_rows") or 0
+        if unmatched:
+            return text + f"{d.get('new_missing_cells', 0)} new missing value(s) from {unmatched} row(s) with no match."
+        return text + "no new missing values."
     return f"Effect: {ev['rows_before']} to {ev['rows_after']} rows."
 
 
-def _operation_words(fix, params, columns_scanned) -> str:
+def _operation_words(fix, params, columns_scanned, execution=None) -> str:
     """M2.3a: the chosen candidate's plain words; an edited operation (other params) or an older record falls
-    back to the wording built from its op_type and params."""
+    back to the wording built from its op_type and params. M2.3b: a join that ran is re-rendered from its executed
+    details, so the sentence names the columns it added."""
     ev = fix.get("evidence") or {}
+    if (ev.get("op_type") or fix["chosen"]) == "join":
+        details = ((execution or {}).get("evidence") or {}).get("details") if execution is not None else None
+        if details:
+            return _bare(describe_operation("join", params, details))
+        if ev.get("what_was_run") and params == (ev.get("params") or {}):
+            return _bare(ev["what_was_run"])
+        return _bare(describe_operation("join", params))
     if ev.get("what_was_run") and params == (ev.get("params") or {}):
         return _bare(ev["what_was_run"])
     return _what(ev.get("op_type") or fix["chosen"], params, columns_scanned)
@@ -207,8 +227,14 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
             used.add(execution["id"])
         # the params that ran (after an edit) when the operation ran, otherwise the proposed ones
         params = (execution or fix)["evidence"].get("params") or {}
-        parts = [f"{k}. {_operation_words(fix, params, columns_scanned)}.",
+        ran = execution if execution is not None and execution["chosen"] == "applied" else None
+        parts = [f"{k}. {_operation_words(fix, params, columns_scanned, ran)}.",
                  f"{_why_label(fix)}: {_bare(fix['rationale'])}."]
+        fix_ev = fix.get("evidence") or {}
+        joined = fix_ev.get("issue_type") == "joinable_table"
+        if (joined and fix_ev.get("recommendation") == "skip" and approval is not None
+                and approval["chosen"] in ("approve", "edit", "auto_approve")):
+            parts.append("The model recommended not joining this table.")  # M2.3b
         alt = _alternative_words(fix)
         if alt is not None:
             parts.append(f"Alternative the model suggested: {alt[0]} ({_bare(alt[1])}).")
@@ -218,7 +244,13 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
         elif execution is not None:
             parts.append(_effect(execution["evidence"]))
         lines.append(" ".join(parts))
-        if approval is not None and approval["chosen"] == "reject":
+        if approval is not None and approval["chosen"] == "reject" and joined:  # M2.3b: both reasons, in plain words
+            advice = "recommended against joining" if fix_ev.get("recommendation") == "skip" else "recommended joining"
+            reason = approval["rationale"]
+            given = f": {_bare(reason)}" if reason and reason != "no reason given" else " without giving a reason"
+            left.append(f"{fix_ev.get('right_table')} was not joined. The model {advice}: {_bare(fix['rationale'])}. "
+                        f"You rejected the join{given}.")
+        elif approval is not None and approval["chosen"] == "reject":
             ev = fix["evidence"]
             about = ev.get("description") or ", ".join(ev.get("affected_columns") or [])
             left.append(f"{ev['issue_type']} ({about}) was left unaddressed because: {approval['rationale']}")
@@ -236,22 +268,44 @@ def _described(record) -> str:
 _MAX_TABLE_LINES = 10
 
 
-def _tables_section(record):
-    """M2.1: the Tables section, or None for one table or none; at most 10 lines, the rest counted."""
+def _applied_joins(records) -> list:
+    """M2.3b: the evidence of every applied join of the current question, in order."""
+    return [r["evidence"] for r in records or [] if r.get("decision_point") == EXECUTION_POINT
+            and r.get("chosen") == "applied" and (r.get("evidence") or {}).get("op_type") == "join"]
+
+
+def _tables_section(record, records=None):
+    """M2.1: the Tables section, or None for one table or none; at most 10 lines, the rest counted. M2.3b: the
+    roles come from the stage-plan record (taken before cleaning); an applied join rewords the lines of the tables
+    it joined and adds a line for its result (a later join's left table is the previous result)."""
     tables = ((record or {}).get("evidence") or {}).get("tables") or []
     if len(tables) <= 1:
         return None
+    roles, results = {}, []
+    left = next((t["name"] for t in tables if t.get("role") == "analysis"), None)
+    for ev in _applied_joins(records):
+        params = ev.get("params") or {}
+        right, result = params.get("right_table"), params.get("result_name")
+        joined = f"joined with {right} into {result}"
+        if results and results[-1][0] == left:
+            results[-1][3] = f"main table after the join; {joined}"
+        else:
+            roles[left] = f"main table; {joined}"
+        roles[right] = f"joined into {result}"
+        results.append([result, ev.get("rows_after"), ev.get("columns_after"), "main table after the join"])
+        left = result
 
     def line(t):
-        role = "main table" if t.get("role") == "analysis" else "carried along; not used until joins arrive"
-        return f"{t['name']}: {t['rows']} rows, {t['columns']} columns ({role})"
+        role = "main table" if t.get("role") == "analysis" else "carried along; not joined"  # M2.3b: the wording
+        return f"{t['name']}: {t['rows']} rows, {t['columns']} columns ({roles.get(t['name'], role)})"
+    extra = [f"{name}: {rows} rows, {columns} columns ({role})" for name, rows, columns, role in results]
     main = [t for t in tables if t.get("role") == "analysis"]
     carried = [t for t in tables if t.get("role") != "analysis"]
     if len(tables) <= _MAX_TABLE_LINES:
-        return "\n".join(line(t) for t in tables)
+        return "\n".join([*(line(t) for t in tables), *extra])
     shown = main + carried[:_MAX_TABLE_LINES - 1]
     rest = len(carried) - (_MAX_TABLE_LINES - 1)
-    return "\n".join([*(line(t) for t in shown), f"and {rest} more carried tables"])
+    return "\n".join([*(line(t) for t in shown), f"and {rest} more carried tables", *extra])
 
 
 _MAX_LISTED = 8
@@ -335,7 +389,7 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
         used.add(scan["id"])
     sections = [{"heading": "Checked", "text": _checked(scan)}]
     plan_record = _latest(records, STAGE_PLAN_POINT)
-    tables_text = _tables_section(plan_record)
+    tables_text = _tables_section(plan_record, records)
     if tables_text is not None:
         sections.append({"heading": "Tables", "text": tables_text})
         used.add(plan_record["id"])

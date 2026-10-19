@@ -86,6 +86,10 @@ def scan_record(profile: ModelSafeView, issues) -> DecisionRecord:
             "numeric_text_columns": [{"column": str(i.affected_columns[0]), "parse_rate": i.evidence["parse_rate"],
                                       "unparseable_count": i.evidence["unparseable_count"]}
                                      for i in issues if i.issue_type == "numeric_as_text"],
+            # M2.3b: names only
+            "joinable_tables": [{"table": i.evidence["right_table"], "left_key": i.evidence["left_key"],
+                                 "right_key": i.evidence["right_key"]}
+                                for i in issues if i.issue_type == "joinable_table"],
         },
     )
 
@@ -147,6 +151,10 @@ def _fix_record_from_candidates(issue, operation: Operation, issue_index: int, c
             "preview": _plain(ev.get("preview")),
             "alternative_candidate_id": alt_id, "alternative_rejected_because": because,
             "proposal_retried": bool(ev.get("proposal_retried", False)),
+            # M2.3b: the model's recommendation ("apply" unless it recommended not joining), and a join's names
+            "recommendation": ev.get("recommendation", "apply"),
+            **({k: issue.evidence[k] for k in ("right_table", "left_key", "right_key")}
+               if issue.issue_type == "joinable_table" else {}),
         },
     )
 
@@ -219,8 +227,9 @@ def approval_record(operation: Operation, issue, decision: Optional[dict], auto_
         evidence["edited_params"] = _plain(ran)
     elif action == "reject":
         chosen, decided_by = "reject", "human"
-        rationale = decision.get("reason", "no reason given")
-        evidence["carried_forward_as_unaddressed"] = True
+        rationale = decision.get("reason") or "no reason given"
+        # M2.3b: a declined join is not a data-quality caveat, so it is not carried forward
+        evidence["carried_forward_as_unaddressed"] = issue.issue_type != "joinable_table"
     else:
         chosen, decided_by = "approve", "code_rule"
         rationale = f"action '{action}' is not one of approve, edit or reject; the node treats it as approval (G36)"

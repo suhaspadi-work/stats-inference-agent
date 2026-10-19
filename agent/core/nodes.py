@@ -31,7 +31,9 @@ from core.report import generate_report, check_for_causal_language, generate_des
 from core.report import CausalLanguageViolation, find_causal_violation, violation_feedback
 from core.report_fallback import MINIMAL_FALLBACK_TEXT, facts_fallback_report
 from core.report_records import report_narrative_record
-from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result, operation_named
+from core.capabilities import (
+    DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result, operation_named, run_transform,
+)
 from core.operation_candidates import enumerate_candidates, recompute_candidates
 from core.classifier import _validate_choices
 from core.routing import route_for_plan
@@ -226,6 +228,24 @@ def with_dataset(state, new_dataset, new_profile=None) -> dict:
     return update
 
 
+def with_tables(state, new_dataset, derived: dict, store: DatasetStore) -> dict:
+    """
+    M2.3b: the update after a join made new derived tables: tables gains every derived table and the final dataset,
+    the analysis table becomes the final dataset's table, and its profile is rebuilt, so dataset, profile, tables,
+    profiles and analysis_table stay in sync (as with_dataset keeps them for one table). The original tables stay.
+    """
+    tables = {**(state.get("tables") or {}), **derived, new_dataset.name: new_dataset}
+    profile = profile_dataset(new_dataset, store=store)
+    profiles = {**(state.get("profiles") or {}), new_dataset.name: profile}
+    return {"dataset": new_dataset, "tables": tables, "analysis_table": new_dataset.name, "profile": profile,
+            "profiles": profiles}
+
+
+def _join_inputs(state) -> dict:
+    """The tables, profiles and analysis table detect_all_issues needs to find join issues (None without them)."""
+    return {"tables": state.get("tables"), "profiles": state.get("profiles"), "analysis": state.get("analysis_table")}
+
+
 def _table_list(state) -> list:
     """The tables for the stage-plan record (never for a prompt): name, rows, columns and role."""
     profiles, analysis = state.get("profiles"), state.get("analysis_table")
@@ -244,7 +264,7 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     profile and the dataset are not changed. An unsupported question ends the run here (route_after_plan_stages).
     """
     def plan_stages_node(state: AgentState) -> dict:
-        issues = detect_all_issues(state["dataset"], state["profile"], store)
+        issues = detect_all_issues(state["dataset"], state["profile"], store, **_join_inputs(state))
         plan = build_stage_plan(state["classification"], state["profile"], issues)
         records = (stage_plan_record(plan, state["classification"], issues, tables=_table_list(state)),
                    *step_records(plan))
@@ -340,7 +360,7 @@ def _normalize_params(op_type: str, params: dict) -> dict:
 
 
 
-def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates) -> Operation:
+def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates, tables=None) -> Operation:
     """
     M2.3a: a pending Operation from the model's choice. The op_type and params come from the CHOSEN CANDIDATE
     (code-enumerated), never from the model; the model supplies the rationale and names the alternative candidate.
@@ -355,11 +375,16 @@ def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates) -
         evidence={**issue.evidence, "candidate_id": chosen["id"], "what_was_run": chosen["what_was_run"],
                   "preview": chosen["preview"], "alternative_candidate_id": alternative["id"],
                   # the proposal objects are only sorted, never rebuilt, so the flag of a corrected answer survives
-                  "proposal_retried": bool(getattr(proposal, "_retried", False))},
+                  "proposal_retried": bool(getattr(proposal, "_retried", False)),
+                  # M2.3b: the model's recommendation (meaningful for a join; "apply" otherwise)
+                  "recommendation": getattr(proposal, "recommendation", "apply") or "apply"},
     )
+    handles = (dataset.handle,)
+    if tables and chosen["op_type"] is not None and operation_named(chosen["op_type"]).multi_input:
+        handles = (dataset.handle, tables[chosen["params"]["right_table"]].handle)  # M2.3b: a join reads two tables
     return Operation(
         op_type=chosen["op_type"], session_id=dataset.session_id,
-        input_handles=(dataset.handle,), params=_normalize_params(chosen["op_type"], dict(chosen["params"])),
+        input_handles=handles, params=_normalize_params(chosen["op_type"], dict(chosen["params"])),
         approval_status=ApprovalStatus.PENDING, rationale=rationale,
     )
 
@@ -371,8 +396,10 @@ def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates) -
 # regardless of mode.
 _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
 
-# M2.3a step 2: the order the cleaning operations run in (an unknown issue type runs last)
-_EXECUTION_RANK = {"numeric_as_text": 0, "inconsistent_text": 1, "duplicate_rows": 2, "high_missingness": 3}
+# M2.3a step 2: the order the cleaning operations run in (an unknown issue type runs last); M2.3b: a join runs
+# after normalization and dedupe (so it matches on the cleaned keys) and before the missing-value fixes
+_EXECUTION_RANK = {"numeric_as_text": 0, "inconsistent_text": 1, "duplicate_rows": 2, "joinable_table": 3,
+                   "high_missingness": 4}
 
 
 def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_operations) -> Callable[[AgentState], dict]:
@@ -399,34 +426,38 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         profile = state["profile"]
         autonomy_mode = state.get("autonomy_mode", "analyst")
 
-        issues = detect_all_issues(dataset, profile, store)
+        issues = detect_all_issues(dataset, profile, store, **_join_inputs(state))
         scan = scan_record(profile, issues)
         if not issues:
             return {**with_dataset(state, dataset), "pending_wrangling": None, **log_update(scan)}
 
         # M2.3a: the code enumerates every candidate fix (with its dry-run preview); the model only chooses
         df = store.read(dataset.storage_key)
-        candidates = [enumerate_candidates(issue, dataset, profile, store, df) for issue in issues]
-        proposals = propose_fn(issues, candidates)
+        tables = state.get("tables") or {}
+        frames = {}  # M2.3b: the other tables a join reads, by name, read once
+        candidates = [enumerate_candidates(issue, dataset, profile, store, df, tables=tables, frames=frames)
+                      for issue in issues]
+        proposals = propose_fn(issues, candidates, state.get("request_text"))
         _validate_choices(proposals, issues, candidates)
         # the execution order: conversions and text normalization first ("East" and "east " rows can become exact
         # duplicates only after normalizing), then exact duplicates (so imputation statistics are not computed on
-        # repeated rows), then missing values; the operation index is the execution order. An issue that an earlier
-        # operation creates (duplicates after normalizing, missing values after a conversion) is detected only by
-        # the Stage 1 loop of M2.4.
+        # repeated rows), then joins, then missing values; the operation index is the execution order. An issue that
+        # an earlier operation creates (duplicates after normalizing, missing values after a conversion or from the
+        # unmatched rows of a join) is detected only by the Stage 1 loop of M2.4.
         proposals = sorted(proposals, key=lambda p: (_EXECUTION_RANK.get(issues[p.issue_index].issue_type, 4),
                                                      p.issue_index))
         # the previews, recomputed on the data as each operation will see it (after the chosen earlier operations)
         frame = df
         for n, p in enumerate(proposals):
             basis = "uploaded_data" if n == 0 else "after_earlier_operations"
-            candidates[p.issue_index] = recompute_candidates(candidates[p.issue_index], dataset, frame, basis)
+            candidates[p.issue_index] = recompute_candidates(candidates[p.issue_index], dataset, frame, basis, frames)
             chosen = next(c for c in candidates[p.issue_index] if c["id"] == p.candidate_id)
             try:
-                frame = operation_named(chosen["op_type"]).transform(frame, chosen["params"])[0]
+                frame = run_transform(chosen["op_type"], frame, chosen["params"], frames)[0]
             except ValueError:
                 pass  # the frame stays as it was; this operation will fail or be edited at review
-        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index], candidates[p.issue_index])
+        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index], candidates[p.issue_index],
+                                                     tables)
                       for p in proposals]
 
         auto_indices = set()
@@ -586,6 +617,8 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                         "index": i, "op_type": operations[i].op_type, "params": operations[i].params,
                         "rationale": operations[i].rationale.rationale,
                         "alternative": operations[i].rationale.alternatives[0].approach,
+                        # M2.3b: the model's recommendation ("apply" when it has none)
+                        "recommendation": (operations[i].rationale.evidence or {}).get("recommendation") or "apply",
                         # M2.3a: the chosen candidate, its impact before approval, and every candidate of the issue
                         **_candidate_payload(operations[i], (pending.get("candidates") or [None] * len(issues))[
                             issue_indices[i]]),
@@ -604,6 +637,7 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                 decisions_by_index[decision["index"]] = decision
 
         current_dataset = dataset
+        derived = {}  # M2.3b: the tables a join made in this review, by name (their latest version)
         unaddressed = ()
         records = []
         fix_ids = pending.get("fix_record_ids") or [None] * len(operations)
@@ -625,10 +659,12 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
             if action == "reject":
                 records.append(approval_record(op, issue, decision, None, fix_ids[idx]))
+                if issue.issue_type == "joinable_table":
+                    continue  # M2.3b: a declined join is not a data-quality caveat
                 unaddressed += (UnaddressedIssue(
                     issue_type=issue.issue_type, description=issue.description,
                     proposed_operation=f"{op.op_type}({op.params})",
-                    rejection_reason=decision.get("reason", "no reason given"),
+                    rejection_reason=decision.get("reason") or "no reason given",
                     affected_columns=issue.affected_columns,
                 ),)
                 continue
@@ -638,17 +674,28 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
             approval = approval_record(op, issue, decision, auto_rule if is_auto else None, fix_ids[idx],
                                        edited_params=params if action == "edit" else None)
             records.append(approval)
+            entry = operation_named(op.op_type)
+            tables_by_name = {**(state.get("tables") or {}), **derived}
+            right = tables_by_name.get(params.get("right_table")) if entry.multi_input else None
             op = Operation(
                 op_type=op.op_type, session_id=op.session_id,
-                input_handles=(current_dataset.handle,), params=params,
+                input_handles=(current_dataset.handle,) + ((right.handle,) if right is not None else ()), params=params,
                 approval_status=ApprovalStatus.PENDING, rationale=op.rationale,
             )
             approved_op = op.approve()
-            execute_fn = operation_named(op.op_type).execute
-            current_dataset, finished_op = execute_fn(current_dataset, store, approved_op)
+            if entry.multi_input:  # M2.3b: a join makes a new derived table; later operations run on it
+                current_dataset, finished_op = entry.execute(current_dataset, store, approved_op, tables_by_name)
+                if finished_op.approval_status != ApprovalStatus.FAILED:
+                    derived[current_dataset.name] = current_dataset
+            else:
+                current_dataset, finished_op = entry.execute(current_dataset, store, approved_op)
+                if current_dataset.name in derived:
+                    derived[current_dataset.name] = current_dataset
             records.append(execution_record(finished_op, approval.id))
 
-        result = {**with_dataset(state, current_dataset), "pending_wrangling": None, **log_update(*records)}
+        mirror = (with_tables(state, current_dataset, derived, store) if derived
+                  else with_dataset(state, current_dataset))
+        result = {**mirror, "pending_wrangling": None, **log_update(*records)}
         if unaddressed:
             result["pending_unaddressed_issues"] = unaddressed
         return result

@@ -69,7 +69,7 @@ def _sections(values):
 
 def _reversed(propose_fn):
     """The same choices, listed in reverse issue order (the missing-value issue first)."""
-    return lambda issues, candidates: list(reversed(propose_fn(issues, candidates)))
+    return lambda issues, candidates, request_text=None: list(reversed(propose_fn(issues, candidates, request_text)))  # M2.3b: and the question
 
 
 # --- (a) the operation is the chosen candidate --------------------------------------------------------------------------
@@ -163,7 +163,8 @@ def test_the_review_payload(fake_model, tmp_path, store):
     json.dumps(payload, allow_nan=False)
     (op,) = payload["proposed_operations"]
     assert set(op) == {"index", "op_type", "params", "rationale", "alternative", "candidate_id", "what_was_run",
-                       "impact_preview", "preview_basis", "candidates"}
+                       "impact_preview", "preview_basis", "candidates", "recommendation"}  # M2.3b: recommendation
+    assert op["recommendation"] == "apply"
     assert op["alternative"] == "Leave the data as it is."
     for c in op["candidates"]:
         assert set(c) == {"id", "what_was_run", "eligible", "reason", "preview"}

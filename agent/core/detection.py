@@ -20,6 +20,7 @@ class CandidateIssue:
     WHETHER an issue exists, using concrete thresholds against real numbers.
     """
     issue_type: str                      # "duplicate_rows" | "high_missingness" | "inconsistent_text" | "numeric_as_text"
+                                         # | "joinable_table" (M2.3b)
     description: str
     affected_columns: tuple[str, ...]
     evidence: dict = field(default_factory=dict)
@@ -128,8 +129,100 @@ def detect_numeric_as_text(df: pd.DataFrame) -> list[CandidateIssue]:
     return issues
 
 
-def detect_all_issues(dataset: Dataset, profile: ModelSafeView, store: DatasetStore) -> list[CandidateIssue]:
-    """The single entry point 7b's proposal step will call. The data is read once."""
+_MAX_LISTED_COLUMNS = 15
+
+
+def _oriented(link, analysis_name) -> dict | None:
+    """A computed link with the analysis table as the LEFT side (a and b swapped when needed), or None when the
+    analysis table is not one of its two tables."""
+    if link["table_a"] == analysis_name and link["table_b"] != analysis_name:
+        return dict(link)
+    if link["table_b"] != analysis_name or link["table_a"] == analysis_name:
+        return None
+    swapped = {}
+    for key, value in link.items():
+        if key.endswith("_a"):
+            swapped[key[:-2] + "_b"] = value
+        elif key.endswith("_b"):
+            swapped[key[:-2] + "_a"] = value
+        else:
+            swapped[key] = value
+    flip = {"one_to_many": "many_to_one", "many_to_one": "one_to_many"}
+    swapped["cardinality"] = flip.get(link["cardinality"], link["cardinality"])
+    return swapped
+
+
+def _column_list(profile) -> str:
+    names = [str(c.name) for c in profile.columns]
+    shown = ", ".join(names[:_MAX_LISTED_COLUMNS])
+    return shown + (f" and {len(names) - _MAX_LISTED_COLUMNS} more" if len(names) > _MAX_LISTED_COLUMNS else "")
+
+
+def _joined_names(analysis_name, tables: dict) -> set:
+    """M2.3b: the names of the tables already joined into the analysis table: its parents, and theirs through every
+    derived table among the given tables (a visited set keeps the walk finite). A handle is "name@vN"."""
+    joined, visited = set(), set()
+    start = tables.get(analysis_name)
+    stack = list(getattr(start, "parents", ()) or ())
+    while stack:
+        handle = stack.pop()
+        if handle in visited:
+            continue
+        visited.add(handle)
+        name = str(handle).split("@", 1)[0]
+        joined.add(name)
+        parent = tables.get(name)
+        if parent is not None and parent.parents:
+            stack.extend(parent.parents)
+    return joined
+
+
+def detect_join_issues(analysis_name, tables: dict, profiles: dict, store: DatasetStore) -> list[CandidateIssue]:
+    """
+    M2.3b: one joinable_table issue per carried table that has a usable link with the analysis table: its key is
+    unique in the carried table (so a join never multiplies rows) and at least one key matches (as given or after
+    trimming spaces and ignoring case). The best usable link per carried table (highest score, then names) is kept.
+    A carried table already joined into the analysis table (its lineage) is skipped; a rejection is not remembered.
+    Links between two carried tables, and links whose carried side repeats the key (one-to-many, many-to-many), raise
+    no issue: aggregate-then-join is the next step. The evidence holds names only: issue evidence reaches the
+    proposer's prompt, so no number from the link scan goes into it. scan_links reads each table at most once.
+    """
+    from core.table_links import scan_links
+    joined = _joined_names(analysis_name, tables)  # a table already joined in is not proposed again
+    best = {}
+    for link in scan_links(tables, profiles, store)["computed"]:
+        oriented = _oriented(link, analysis_name)
+        if oriented is None or not oriented["unique_b"]:
+            continue
+        if oriented["matched_distinct"] <= 0 and oriented["matched_distinct_normalized"] <= 0:
+            continue
+        right = oriented["table_b"]
+        if right in joined:
+            continue
+        rank = (-oriented["score"], str(oriented["column_a"]), str(oriented["column_b"]))
+        if right not in best or rank < best[right][0]:
+            best[right] = (rank, oriented)
+    issues = []
+    for right in profiles:  # the order of the profiles
+        if right == analysis_name or right not in best:
+            continue
+        link = best[right][1]
+        left_key, right_key = link["column_a"], link["column_b"]
+        key = f"'{left_key}'" if left_key == right_key else f"'{left_key}' (called '{right_key}' there)"
+        issues.append(CandidateIssue(
+            issue_type="joinable_table",
+            description=(f"The table '{right}' (columns: {_column_list(profiles[right])}) shares the key {key} "
+                         "with the analysis table."),
+            affected_columns=(left_key,),
+            evidence={"right_table": right, "left_key": left_key, "right_key": right_key},
+        ))
+    return issues
+
+
+def detect_all_issues(dataset: Dataset, profile: ModelSafeView, store: DatasetStore, tables=None, profiles=None,
+                      analysis=None) -> list[CandidateIssue]:
+    """The single entry point 7b's proposal step will call. The data is read once. M2.3b: with the tables, their
+    profiles and the analysis table's name (more than one table), the join issues are appended last."""
     df = store.read(dataset.storage_key)
     issues = []
     dup_issue = detect_duplicate_rows(dataset, store, df)
@@ -138,4 +231,6 @@ def detect_all_issues(dataset: Dataset, profile: ModelSafeView, store: DatasetSt
     issues.extend(detect_high_missingness(profile))
     issues.extend(detect_inconsistent_text(df))
     issues.extend(detect_numeric_as_text(df))
+    if tables is not None and profiles is not None and analysis is not None and len(tables) > 1:
+        issues.extend(detect_join_issues(analysis, tables, profiles, store))
     return issues

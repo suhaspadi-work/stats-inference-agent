@@ -111,7 +111,9 @@ def print_lineage_graph(state, log):
         return None
     applied = [e["evidence"] for e in log if e["decision_point"] == "stage1.clean.execution" and e["chosen"] == "applied"]
     graph = lineage_graph(edges_from_operations(applied))
-    uploaded = {f"{name}@v1" for name in tables}
+    # M2.3b: a table a join made is derived, never an uploaded root
+    derived = {e["params"].get("result_name") for e in applied if e.get("op_type") == "join"}
+    uploaded = {f"{name}@v1" for name in tables if name not in derived}
     problems = check_lineage(state["dataset"].handle, graph, uploaded)
     if not problems:
         print("   lineage graph: PASS")
@@ -185,7 +187,7 @@ def print_stage1_report(state, label):
     for e in entries:
         headings = ", ".join(s["heading"] for s in e["sections"])
         print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
-        if label in ("messy", "bundle", "normalize"):  # M2.1: the bundle run's report also lists its tables
+        if label in ("messy", "bundle", "normalize", "join"):  # M2.1: the bundle run's report also lists its tables
             for line in e["text"].split("\n"):
                 print(f"      | {line}")
 
@@ -330,7 +332,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
-    if label in ("messy", "bundle", "normalize"):  # M2.1: the bundle run is the messy run with a second table
+    if label in ("messy", "bundle", "normalize", "join"):  # M2.1: the bundle run is the messy run with a second table
         print_cleaning_lines(log)
         lineage = print_lineage(state, state_log)
         if lineage is not None:
@@ -418,6 +420,10 @@ def _resume_for(label, p, counts, question):
             return {"action": "run", "predictors": ["region", "customer_id"]}
         return {"action": "run"}
     if kind == "wrangling_approval":
+        if label == "bundle":  # M2.3b: the regions table is proposed as a join; this question does not need it
+            return {"decisions": [{"index": o["index"], "action": "reject",
+                                   "reason": "the question does not need the regions table"} if o["op_type"] == "join"
+                                  else {"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
         return {"decisions": [{"index": o["index"], "action": "approve"} for o in p["proposed_operations"]]}
     return question
 
@@ -459,6 +465,15 @@ def main():
     # M2.1: a second, small table carried along with the messy data (unused until joins arrive in M2.3)
     df_regions = pd.DataFrame({"region": ["East", "West"], "manager": ["Ana", "Ben"]})
 
+    # M2.3b: 300 orders (customers repeat) and a customers table with one row per customer; region is on customers
+    jrng = np.random.default_rng(29)
+    df_customers = pd.DataFrame({"customer_id": range(1, 151), "region": jrng.choice(["East", "West"], 150),
+                                 "tier": jrng.choice(["basic", "plus"], 150)})
+    order_customer = jrng.integers(1, 151, 300)
+    west = df_customers.set_index("customer_id").loc[order_customer, "region"].to_numpy() == "West"
+    df_orders = pd.DataFrame({"customer_id": order_customer,
+                              "total_spend": 50 + np.where(west, 10.0, 0.0) + jrng.normal(0, 5, 300)})
+
     store = LocalDiskStore(base_dir=Path("/tmp/live_capabilities_store"))
     events = Path(tempfile.mkdtemp(prefix="live_events_"))
     app = build_agent_graph(store, event_log_dir=events)
@@ -474,6 +489,9 @@ def main():
         ("bundle", {"live_bundle": df_messy, "regions": df_regions}, "Did West customers spend more than East customers?"),
         # M2.3a step 2: text normalization and a numeric conversion, then the same question and answers as messy
         ("normalize", df_normalize, "Did West customers spend more than East customers?"),
+        # M2.3b: region is only on the customers table, so the orders need the join; every decision is approve
+        ("join", {"orders": df_orders, "customers": df_customers},
+         "Did customers in the West region spend more than customers in the East region?"),
         # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
         ("mismatch", df3, "Did West customers spend more than East customers?"),
         # M1.3b: the boundary gate is answered "run", so an exploratory regression follows the comparison
@@ -528,6 +546,10 @@ def main():
                 final = store.read(result["dataset"].storage_key)
                 print(f"   normalize [{label}]: region levels after cleaning={final['region'].nunique()} "
                       f"tenure dtype after cleaning={final['tenure'].dtype}")
+            if label == "join":  # M2.3b: the analysis table after cleaning is the joined table
+                final = store.read(result["dataset"].storage_key)
+                print(f"   join [{label}]: analysis table={result.get('analysis_table')} "
+                      f"columns={', '.join(str(c) for c in final.columns)} rows={len(final)}")
         except Exception as e:
             message = str(e)
             print(f"[{label}] FAILED: {type(e).__name__}: {message[:500]}")

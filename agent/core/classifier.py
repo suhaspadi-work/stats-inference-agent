@@ -1,4 +1,6 @@
 from __future__ import annotations
+from typing import Literal
+
 from pydantic import BaseModel, Field, PrivateAttr
 from langchain.chat_models import init_chat_model
 
@@ -168,6 +170,10 @@ class _ProposedOperationOut(BaseModel):
     alternative_candidate_id: str = Field(description="The id of a different option of the same issue that was "
                                                       "considered and not chosen (leave_as_is is allowed)")
     alternative_rejected_because: str
+    # M2.3b: for a joinable_table issue, whether the question needs the other table; "apply" for every other issue
+    recommendation: Literal["apply", "skip"] = Field(
+        default="apply", description="For a joinable_table issue: 'apply' when the question needs the other table, "
+                                     "'skip' when it does not; 'apply' for every other issue")
     # M2.3a: True when this proposal came from the one corrected answer (not part of the schema the model sees)
     _retried: bool = PrivateAttr(default=False)
 
@@ -182,13 +188,15 @@ def _options(candidates) -> list:
 
 
 def propose_wrangling_operations(
-    issues: list[CandidateIssue], candidates: list, model_name: str = "openai/gpt-oss-120b"
+    issues: list[CandidateIssue], candidates: list, request_text: str | None = None,
+    model_name: str = "openai/gpt-oss-120b",
 ) -> list[_ProposedOperationOut]:
     """
     M2.3a: the code enumerates the candidate fixes of every issue; the model chooses one candidate per issue, in a
     single call, writes the rationale and names a different candidate as the alternative. The prompt holds the
     issues and each option's id with a plain description of the operation (no preview, no count, no fill value).
-    The choice is validated here.
+    The choice is validated here. M2.3b: the prompt also holds the user's question (when given), and a
+    joinable_table issue's description names the carried table's columns (names only, never a value).
     """
     if not issues:
         return []
@@ -199,6 +207,8 @@ def propose_wrangling_operations(
                for cands in candidates]
     assert_model_safe(issues, "issues")
     assert_model_safe(options, "options")
+    if request_text is not None:
+        assert_model_safe(request_text, "request_text")
     model = init_chat_model(model_name, model_provider="groq")
     structured_model = model.with_structured_output(_WranglingProposalsOut)
 
@@ -213,8 +223,12 @@ def propose_wrangling_operations(
         "exactly one of its listed options by its id (candidate_id) and explain why. Then name one different "
         "option id of the same issue as the alternative you considered and did not choose (alternative_candidate_id); "
         "'leave_as_is' (keep the data as it is) is also a valid alternative. Choose exactly one option per issue, "
-        "referencing its index. Copy each option id exactly as written, including every part of it.\n\n"
-        "Detected issues:\n" + "\n".join(blocks)
+        "referencing its index. Copy each option id exactly as written, including every part of it."
+        + (" For a joinable_table issue, say in 'recommendation' whether the question needs the other table "
+           "('apply') or not ('skip'), and in 'rationale' why; you must still choose the best join option so the user "
+           "can decide." if any(i.issue_type == "joinable_table" for i in issues) else "")
+        + (f"\n\nThe user's question: {request_text}" if request_text is not None else "")
+        + "\n\nDetected issues:\n" + "\n".join(blocks)
     )
 
     messages = [("system", system_prompt), ("human", "Choose a fix for each detected issue.")]

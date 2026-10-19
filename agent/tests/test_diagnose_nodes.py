@@ -26,7 +26,7 @@ from core.stage_reports import stage1_report
 from tests.test_bundle_run import (
     CARRIED_NAME, _app, _bundle, _bundle_state, _carried_df, _record, _sections, _single_state, _stage1,
 )
-from tests.test_decision_point_guard import must_not_propose
+from tests.test_decision_point_guard import must_not_propose, reject_joins
 from tests.test_exploratory_round import _frame
 from tests.test_prompt_canaries import _base_df, _with_duplicates, canary_hits, fake_model  # noqa: F401 (fixture)
 from tests.test_stage1_report import _answer, _drive, _messy_frame
@@ -169,7 +169,8 @@ def test_a_bundle_records_the_carried_tables_and_the_link(fake_model, tmp_path):
     main, carried = _frame(), _carried_df()
     tables = _bundle(tmp_path, store, {"main": main, CARRIED_NAME: carried})
     store.reads.clear()
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "bundle")
+    # M2.3b: the shared region key raises a join proposal, rejected here
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "bundle", wrangling_approval=reject_joins)
     (before,) = _snapshots(values, "before")
     assert before["evidence"]["carried"] == [{"name": CARRIED_NAME, "rows": len(carried), "columns": carried.shape[1],
                                              "columns_with_missing": 0}]
@@ -182,7 +183,9 @@ def test_a_bundle_records_the_carried_tables_and_the_link(fake_model, tmp_path):
     assert (c["orphan_rows_a"], c["orphan_rows_b"]) == (int((~main["region"].isin(carried["region"])).sum()), 0)
     assert c["inner_join_rows"] == len(main.merge(carried, on="region")) == int(counts.sum())
     carried_reads = store.reads.count(tables[CARRIED_NAME].storage_key)
-    assert carried_reads == 2  # its profile, and the link numbers; never cleaned or described
+    # its profile and the link numbers (as before); M2.3b: the link scans of the join detection at plan_stages and
+    # wrangle_propose, and the join candidates' read; never cleaned or described
+    assert carried_reads == 2 + 3
 
 
 # --- (e) the Stage 1 report text ----------------------------------------------------------------------------------------------
@@ -241,10 +244,11 @@ def test_the_links_lines(fake_model, tmp_path, store):
     main = _frame()
     carried = pd.DataFrame({"region": ["east", "West "], "manager": ["Ana", "Ben"]})  # differ by case and a space
     tables = _bundle(tmp_path, store, {"main": main, CARRIED_NAME: carried})
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "case")
+    # M2.3b: the keys match after normalizing, so a join is proposed (join_left_normalized), rejected here
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "case", wrangling_approval=reject_joins)
     entry = _stage1(values)
     assert [s["heading"] for s in entry["sections"]] == ["Checked", "Tables", "Data quality", "Links between tables",
-                                                         "Changed", "Described"]
+                                                         "Changed", "Left as is", "Described"]  # M2.3b: the rejected join
     (c,) = _record(values, LINKS_POINT)["evidence"]["computed"]
     assert (c["matched_distinct"], c["matched_distinct_normalized"], c["inner_join_rows"]) == (0, 2, 0)
     assert c["orphan_rows_a"] == len(main) and c["orphan_rows_b"] == 2
@@ -258,7 +262,8 @@ def test_more_candidates_than_computed(fake_model, tmp_path, store, monkeypatch)
     monkeypatch.setattr(table_links_module, "TOP_LINKS", 1)
     carried = pd.DataFrame({"region": ["East", "West"], "tier": ["basic", "plus"]})
     tables = _bundle(tmp_path, store, {"main": _frame(), CARRIED_NAME: carried})
-    values, _, _ = _drive(_app(store, propose_fn=must_not_propose), _bundle_state(tables), "more")
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "more",
+                          wrangling_approval=reject_joins)  # M2.3b: the proposed join is rejected
     ev = _record(values, LINKS_POINT)["evidence"]
     assert (ev["candidates_total"], len(ev["computed"]), ev["not_computed"]) == (2, 1, 1)
     lines = _sections(_stage1(values))["Links between tables"].split("\n")

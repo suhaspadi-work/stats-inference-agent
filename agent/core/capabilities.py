@@ -333,11 +333,14 @@ class OperationCapability:
     describe: Callable
     kind: str = "operation"
     guard_causal_language: bool = False
+    # M2.3b: an operation that reads other tables (a join): transform(df, params, frames) and
+    # execute(dataset, store, operation, tables)
+    multi_input: bool = False
 
 
-def _operation(name, transform, execute) -> OperationCapability:
+def _operation(name, transform, execute, multi_input=False) -> OperationCapability:
     return OperationCapability(name=name, stage=1, transform=transform, execute=execute,
-                               describe=wrangling.describe_operation)
+                               describe=wrangling.describe_operation, multi_input=multi_input)
 
 
 OPERATIONS = {op.name: op for op in (
@@ -348,6 +351,7 @@ OPERATIONS = {op.name: op for op in (
     _operation("drop_column", wrangling.transform_drop_column, wrangling.execute_drop_column),
     _operation("impute", wrangling.transform_impute, wrangling.execute_impute),
     _operation("normalize_text", wrangling.transform_normalize_text, wrangling.execute_normalize_text),
+    _operation("join", wrangling.transform_join, wrangling.execute_join, multi_input=True),
 )}
 
 
@@ -357,6 +361,14 @@ def operation_named(op_type: str) -> OperationCapability:
         return OPERATIONS[op_type]
     except KeyError:
         raise ValueError(f"No operation is registered for type '{op_type}'.")
+
+
+def run_transform(op_type: str, df, params: dict, frames=None):
+    """M2.3b: an operation's pure transform; a multi_input operation also gets frames (table name -> DataFrame)."""
+    operation = operation_named(op_type)
+    if operation.multi_input:
+        return operation.transform(df, params, frames or {})
+    return operation.transform(df, params)
 
 
 TWO_GROUP = Analysis(

@@ -28,7 +28,7 @@ class FakeProposer:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, issues, candidates):  # M2.3a: the model chooses a candidate id
+    def __call__(self, issues, candidates, request_text=None):  # M2.3b: and the question
         self.calls += 1
         proposals = []
         for i, issue in enumerate(issues):
