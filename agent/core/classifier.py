@@ -1,8 +1,9 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from langchain.chat_models import init_chat_model
 
 from core.plan import ClassificationDecision, AlternativeConsidered, QuestionType, CausalStatus
+from core.wrangling import describe_operation
 from core.model_safe_view import ModelSafeView, assert_model_safe
 from core.plan import OutcomeType
 from core.detection import CandidateIssue
@@ -160,62 +161,97 @@ def validate_draft_plan_fields(fields: _DraftPlanOut, profile: ModelSafeView) ->
             )
 
         
-_ALLOWED_OP_TYPES = {"cast", "rename", "filter", "dedupe"}
-
-
 class _ProposedOperationOut(BaseModel):
-    issue_index: int = Field(description="Index into the candidate issues list this operation addresses")
-    op_type: str = Field(description=f"One of: {sorted(_ALLOWED_OP_TYPES)}")
-    params: dict = Field(description="Parameters for this op_type, matching core.wrangling's propose_* function signatures")
-    rationale: str = Field(description="Why this operation is the right fix for this specific issue")
-    alternative_approach: str = Field(description="One concrete alternative that was considered and rejected")
+    issue_index: int = Field(description="Index into the detected issues list this choice addresses")
+    candidate_id: str = Field(description="The id of the chosen option for this issue, exactly as listed")
+    rationale: str = Field(description="Why this option is the right fix for this specific issue")
+    alternative_candidate_id: str = Field(description="The id of a different option of the same issue that was "
+                                                      "considered and not chosen (leave_as_is is allowed)")
     alternative_rejected_because: str
+    # M2.3a: True when this proposal came from the one corrected answer (not part of the schema the model sees)
+    _retried: bool = PrivateAttr(default=False)
 
 
 class _WranglingProposalsOut(BaseModel):
     proposals: list[_ProposedOperationOut]
 
 
+def _options(candidates) -> list:
+    """The options shown to the model: eligible candidates other than leave_as_is, as id and plain words only."""
+    return [c for c in candidates if c["eligible"] and c["id"] != "leave_as_is"]
+
+
 def propose_wrangling_operations(
-    issues: list[CandidateIssue], model_name: str = "openai/gpt-oss-120b"
+    issues: list[CandidateIssue], candidates: list, model_name: str = "openai/gpt-oss-120b"
 ) -> list[_ProposedOperationOut]:
     """
-    Given ALL detected issues at once, propose one operation per issue in a
-    single call -- not one call per issue. The model must only choose from
-    the existing operation whitelist (cast/rename/filter/dedupe); there is
-    no 'impute' operation, so a missingness issue should be proposed as a
-    filter (dropping rows with 'not_null') rather than something unsupported.
+    M2.3a: the code enumerates the candidate fixes of every issue; the model chooses one candidate per issue, in a
+    single call, writes the rationale and names a different candidate as the alternative. The prompt holds the
+    issues and each option's id with a plain description of the operation (no preview, no count, no fill value).
+    The choice is validated here.
     """
     if not issues:
         return []
+    if len(candidates) != len(issues):
+        raise ValueError("There must be one candidate list per issue.")
 
+    options = [[{"id": c["id"], "description": describe_operation(c["op_type"], c["params"])} for c in _options(cands)]
+               for cands in candidates]
     assert_model_safe(issues, "issues")
+    assert_model_safe(options, "options")
     model = init_chat_model(model_name, model_provider="groq")
     structured_model = model.with_structured_output(_WranglingProposalsOut)
 
-    issues_summary = "\n".join(
-        f"[{i}] {issue.issue_type}: {issue.description} (columns: {', '.join(issue.affected_columns)}, "
-        f"evidence: {issue.evidence})"
-        for i, issue in enumerate(issues)
-    )
-
+    blocks = []
+    for i, issue in enumerate(issues):
+        lines = [f"[{i}] {issue.issue_type}: {issue.description} (columns: {', '.join(issue.affected_columns)}, "
+                 f"evidence: {issue.evidence})", "    options:"]
+        lines += [f"      {o['id']}: {o['description']}" for o in options[i]]
+        blocks.append("\n".join(lines))
     system_prompt = (
-        "You are proposing data-cleaning operations for detected data-quality issues. "
-        f"You MUST choose op_type from exactly these options: {sorted(_ALLOWED_OP_TYPES)}. "
-        "There is no imputation operation available -- if missingness needs addressing, "
-        "propose a 'filter' with condition 'not_null' on the affected column to drop those rows. "
-        "For duplicate rows, propose a 'dedupe'. "
-        "Propose exactly one operation per issue listed below, referencing its index.\n\n"
-        f"Detected issues:\n{issues_summary}"
+        "You are choosing data-cleaning operations for detected data-quality issues. For each issue, choose "
+        "exactly one of its listed options by its id (candidate_id) and explain why. Then name one different "
+        "option id of the same issue as the alternative you considered and did not choose (alternative_candidate_id); "
+        "'leave_as_is' (keep the data as it is) is also a valid alternative. Choose exactly one option per issue, "
+        "referencing its index. Copy each option id exactly as written, including every part of it.\n\n"
+        "Detected issues:\n" + "\n".join(blocks)
     )
 
-    result = structured_model.invoke([
-        ("system", system_prompt),
-        ("human", "Propose a fix for each detected issue."),
-    ])
-
-    invalid = [p.op_type for p in result.proposals if p.op_type not in _ALLOWED_OP_TYPES]
-    if invalid:
-        raise ValueError(f"Model proposed unsupported operation type(s): {invalid}")
-
+    messages = [("system", system_prompt), ("human", "Choose a fix for each detected issue.")]
+    result = structured_model.invoke(messages)
+    try:
+        _validate_choices(result.proposals, issues, candidates)
+        return result.proposals
+    except ValueError as first:
+        # one correction: the error names only option ids and indexes (no value, no number from the data)
+        retry = messages + [("human", f"Your previous answer was rejected: {first}. Choose again for every issue, "
+                                      "copying each option id exactly as listed.")]
+    result = structured_model.invoke(retry)
+    try:
+        _validate_choices(result.proposals, issues, candidates)
+    except ValueError as second:
+        raise ValueError(f"{second} (the model was asked once to correct its choice and did not).") from second
+    for proposal in result.proposals:
+        proposal._retried = True
     return result.proposals
+
+
+def _validate_choices(proposals, issues, candidates) -> None:
+    seen = set()
+    for p in proposals:
+        if not isinstance(p.issue_index, int) or not 0 <= p.issue_index < len(issues):
+            raise ValueError(f"The model chose for issue index {p.issue_index}, which does not exist.")
+        if p.issue_index in seen:
+            raise ValueError(f"The model chose more than once for issue {p.issue_index}.")
+        seen.add(p.issue_index)
+        ids = {c["id"] for c in candidates[p.issue_index]}
+        eligible = {c["id"] for c in _options(candidates[p.issue_index])}
+        if p.candidate_id not in eligible:
+            raise ValueError(f"The model chose '{p.candidate_id}' for issue {p.issue_index}, which is not one of its "
+                             f"eligible options: {sorted(eligible)}.")
+        if p.alternative_candidate_id not in ids or p.alternative_candidate_id == p.candidate_id:
+            raise ValueError(f"The model's alternative '{p.alternative_candidate_id}' for issue {p.issue_index} must be "
+                             "a different option of the same issue.")
+    missing = sorted(set(range(len(issues))) - seen)
+    if missing:
+        raise ValueError(f"The model made no choice for issue(s) {missing}.")

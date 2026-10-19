@@ -31,7 +31,9 @@ from core.report import generate_report, check_for_causal_language, generate_des
 from core.report import CausalLanguageViolation, find_causal_violation, violation_feedback
 from core.report_fallback import MINIMAL_FALLBACK_TEXT, facts_fallback_report
 from core.report_records import report_narrative_record
-from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result
+from core.capabilities import DESCRIPTIVE, capability_for_plan, capability_named, analysis_for_result, operation_named
+from core.operation_candidates import enumerate_candidates, recompute_candidates
+from core.classifier import _validate_choices
 from core.routing import route_for_plan
 from core.model_boundary import prepare_for_model
 from core.rounds import make_round_entry, with_exploratory_note
@@ -322,8 +324,6 @@ def route_after_stage_plan_gate(state: AgentState) -> str:
         return END
     return "wrangle_propose"
 
-_EXECUTE_FNS = {"cast": execute_cast, "rename": execute_rename, "filter": execute_filter, "dedupe": execute_dedupe}
-
 def _normalize_params(op_type: str, params: dict) -> dict:
     """
     Translate model-proposed params into the shape Phase 4's execute_*
@@ -340,18 +340,26 @@ def _normalize_params(op_type: str, params: dict) -> dict:
 
 
 
-def _build_operation_from_proposal(dataset, proposal, issue) -> Operation:
-    """Build a pending Operation from one model proposal, using Phase 1's WranglingRationale."""
+def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates) -> Operation:
+    """
+    M2.3a: a pending Operation from the model's choice. The op_type and params come from the CHOSEN CANDIDATE
+    (code-enumerated), never from the model; the model supplies the rationale and names the alternative candidate.
+    """
+    by_id = {c["id"]: c for c in issue_candidates}
+    chosen, alternative = by_id[proposal.candidate_id], by_id[proposal.alternative_candidate_id]
     rationale = WranglingRationale(
         rationale=proposal.rationale,
         alternatives=(AlternativeApproachConsidered(
-            approach=proposal.alternative_approach, rejected_because=proposal.alternative_rejected_because,
+            approach=alternative["what_was_run"], rejected_because=proposal.alternative_rejected_because,
         ),),
-        evidence=issue.evidence,
+        evidence={**issue.evidence, "candidate_id": chosen["id"], "what_was_run": chosen["what_was_run"],
+                  "preview": chosen["preview"], "alternative_candidate_id": alternative["id"],
+                  # the proposal objects are only sorted, never rebuilt, so the flag of a corrected answer survives
+                  "proposal_retried": bool(getattr(proposal, "_retried", False))},
     )
     return Operation(
-        op_type=proposal.op_type, session_id=dataset.session_id,
-        input_handles=(dataset.handle,), params=_normalize_params(proposal.op_type, proposal.params),
+        op_type=chosen["op_type"], session_id=dataset.session_id,
+        input_handles=(dataset.handle,), params=_normalize_params(chosen["op_type"], dict(chosen["params"])),
         approval_status=ApprovalStatus.PENDING, rationale=rationale,
     )
 
@@ -393,8 +401,27 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         if not issues:
             return {**with_dataset(state, dataset), "pending_wrangling": None, **log_update(scan)}
 
-        proposals = propose_fn(issues)
-        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index]) for p in proposals]
+        # M2.3a: the code enumerates every candidate fix (with its dry-run preview); the model only chooses
+        df = store.read(dataset.storage_key)
+        candidates = [enumerate_candidates(issue, dataset, profile, store, df) for issue in issues]
+        proposals = propose_fn(issues, candidates)
+        _validate_choices(proposals, issues, candidates)
+        # exact duplicates first, so imputation statistics are not computed on repeated rows; the operation index
+        # is the execution order
+        proposals = sorted(proposals, key=lambda p: (0 if issues[p.issue_index].issue_type == "duplicate_rows" else 1,
+                                                     p.issue_index))
+        # the previews, recomputed on the data as each operation will see it (after the chosen earlier operations)
+        frame = df
+        for n, p in enumerate(proposals):
+            basis = "uploaded_data" if n == 0 else "after_earlier_operations"
+            candidates[p.issue_index] = recompute_candidates(candidates[p.issue_index], dataset, frame, basis)
+            chosen = next(c for c in candidates[p.issue_index] if c["id"] == p.candidate_id)
+            try:
+                frame = operation_named(chosen["op_type"]).transform(frame, chosen["params"])[0]
+            except ValueError:
+                pass  # the frame stays as it was; this operation will fail or be edited at review
+        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index], candidates[p.issue_index])
+                      for p in proposals]
 
         auto_indices = set()
         if autonomy_mode == "stakeholder":
@@ -402,7 +429,8 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
                 if issues[p.issue_index].issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES:
                     auto_indices.add(i)
 
-        fixes = [fix_record(issues[p.issue_index], op, p.issue_index) for p, op in zip(proposals, operations)]
+        fixes = [fix_record(issues[p.issue_index], op, p.issue_index, candidates[p.issue_index])
+                 for p, op in zip(proposals, operations)]
 
         return {"pending_wrangling": {
             "issues": issues,
@@ -410,6 +438,7 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
             "issue_indices": [p.issue_index for p in proposals],
             "auto_indices": sorted(auto_indices),
             "fix_record_ids": [f.id for f in fixes],
+            "candidates": candidates,
         }, **log_update(scan, *fixes)}
 
     return wrangle_propose_node
@@ -503,6 +532,17 @@ def make_stage1_report_node() -> Callable[[AgentState], dict]:
     return stage1_report_node
 
 
+def _candidate_payload(operation, issue_candidates) -> dict:
+    """The review payload's candidate keys for one proposed operation (plain JSON)."""
+    ev = (operation.rationale.evidence if operation.rationale is not None else None) or {}
+    # an edited operation keeps this preview; what actually ran is in its execution record
+    preview = ev.get("preview")
+    return {"candidate_id": ev.get("candidate_id"), "what_was_run": ev.get("what_was_run"),
+            "impact_preview": preview, "preview_basis": (preview or {}).get("basis"),
+            "candidates": [{"id": c["id"], "what_was_run": c["what_was_run"], "eligible": c["eligible"],
+                            "reason": c["reason"], "preview": c["preview"]} for c in issue_candidates or []]}
+
+
 def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     Present the proposed operations as a checklist interrupt, then execute
@@ -540,6 +580,9 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                         "index": i, "op_type": operations[i].op_type, "params": operations[i].params,
                         "rationale": operations[i].rationale.rationale,
                         "alternative": operations[i].rationale.alternatives[0].approach,
+                        # M2.3a: the chosen candidate, its impact before approval, and every candidate of the issue
+                        **_candidate_payload(operations[i], (pending.get("candidates") or [None] * len(issues))[
+                            issue_indices[i]]),
                     }
                     for i in needs_review_indices
                 ],
@@ -595,7 +638,7 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                 approval_status=ApprovalStatus.PENDING, rationale=op.rationale,
             )
             approved_op = op.approve()
-            execute_fn = _EXECUTE_FNS[op.op_type]
+            execute_fn = operation_named(op.op_type).execute
             current_dataset, finished_op = execute_fn(current_dataset, store, approved_op)
             records.append(execution_record(finished_op, approval.id))
 
@@ -605,6 +648,30 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
         return result
 
     return wrangle_review_node
+
+def _imputed_outcome_issues(state, outcome_name) -> list:
+    """M2.3a: one UnaddressedIssue per applied imputation of the outcome column in the current question."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
+    issues = []
+    for e in log[start + 1:]:
+        ev = e.get("evidence") or {}
+        if (e.get("decision_point") != "stage1.clean.execution" or e.get("chosen") != "applied"
+                or ev.get("op_type") != "impute" or (ev.get("params") or {}).get("column") != outcome_name):
+            continue
+        params = ev.get("params") or {}
+        strategy = params.get("strategy") + (f" of each {params['group_by']}" if params.get("group_by") else "")
+        # count-free on purpose (the description reaches the report prompts); the count is in the execution record
+        issues.append(UnaddressedIssue(
+            issue_type="outcome_imputed",
+            description=(f"The outcome '{outcome_name}' had missing values filled ({strategy}) before the "
+                         "analysis, which changes its distribution and the result."),
+            proposed_operation=f"impute({params})",
+            rejection_reason="the values were filled in Stage 1, before the outcome was chosen",
+            affected_columns=(outcome_name,),
+        ))
+    return issues
+
 
 def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], dict]:
     """
@@ -658,6 +725,9 @@ def make_draft_plan_node(draft_fn=draft_plan_fields) -> Callable[[AgentState], d
         if pending:
             for issue in pending:
                 plan = plan.record_unaddressed_issue(issue)
+        # M2.3a: an imputed outcome is a caveat; it travels on the plan like a rejected fix
+        for issue in _imputed_outcome_issues(state, plan.outcome_name):
+            plan = plan.record_unaddressed_issue(issue)
 
         update = {"plan": plan, "route": route, **log_update(*records)}
         if route["status"] == "unsupported":
@@ -740,6 +810,10 @@ def make_freeze_node(store: DatasetStore) -> Callable[[AgentState], dict]:
             "reselected": bool(selection and selection.get("supersedes")),
             # M1.4b: the Stage 1 report, composed by code from the records; None when none was built
             "stage1_report": ({k: stage1[k] for k in ("title", "text", "sections")} if stage1 is not None else None),
+            # M2.3a: every unaddressed issue of the plan (rejected fixes and the imputed-outcome caveat), plain JSON
+            "unaddressed_issues": [{"issue_type": i.issue_type, "description": i.description,
+                                    "affected_columns": [str(c) for c in i.affected_columns],
+                                    "reason": i.rejection_reason} for i in (plan.unaddressed_issues or ())],
         })
 
         action = decision.get("action")

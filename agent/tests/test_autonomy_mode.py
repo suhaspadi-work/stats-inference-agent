@@ -28,19 +28,19 @@ class FakeProposer:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, issues):
+    def __call__(self, issues, candidates):  # M2.3a: the model chooses a candidate id
         self.calls += 1
         proposals = []
         for i, issue in enumerate(issues):
             if issue.issue_type == "duplicate_rows":
-                op, params = "dedupe", {"subset": []}
+                choice = "dedupe_all"
             elif issue.issue_type == "high_missingness":
-                op, params = "filter", {"column": issue.affected_columns[0], "condition": "not_null", "value": None}
+                choice = "delete_rows"
             else:
                 raise AssertionError(f"no fake proposal for issue type {issue.issue_type!r}")
             proposals.append(_ProposedOperationOut(
-                issue_index=i, op_type=op, params=params, rationale="fake",
-                alternative_approach="leave the data as is", alternative_rejected_because="fake",
+                issue_index=i, candidate_id=choice, rationale="fake",
+                alternative_candidate_id="leave_as_is", alternative_rejected_because="fake",
             ))
         return proposals
 

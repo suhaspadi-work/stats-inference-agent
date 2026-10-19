@@ -56,6 +56,18 @@ class UnaddressedIssue:
     schema_version: int = 1
 
 
+# M2.3a: issue types that are caveats about a fix that WAS applied (not a rejected fix); they render as their
+# description alone, never as "... was left unaddressed because: ..."
+PLAIN_CAVEAT_TYPES = ("outcome_imputed",)
+
+
+def unaddressed_text(issue, verb: str = "was left unaddressed") -> str:
+    """One unaddressed issue as text: a plain caveat's description, or the rejected-fix sentence with the verb."""
+    if issue.issue_type in PLAIN_CAVEAT_TYPES:
+        return issue.description
+    return f"{issue.issue_type} ({issue.description}) {verb} because: {issue.rejection_reason}"
+
+
 @dataclass(frozen=True)
 class AlternativeConsidered:
     """One method that was considered at a decision point and not chosen, with the concrete reason."""

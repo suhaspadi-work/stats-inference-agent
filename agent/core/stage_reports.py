@@ -20,6 +20,7 @@ from core.draft_plan_records import PREDICTORS_POINT
 from core.execution_records import POST_HOC_POINT
 from core.freeze_records import PLAN_APPROVAL_POINT
 from core.method_glossary import GLOSSARY, render_glossary
+from core.plan import unaddressed_text
 from core.quality_records import LINKS_POINT, QUALITY_SNAPSHOT_POINT
 from core.report_records import REPORT_NARRATIVE_POINT
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
@@ -129,6 +130,34 @@ def _decision_text(approval) -> str:
     return text
 
 
+def _operation_words(fix, params, columns_scanned) -> str:
+    """M2.3a: the chosen candidate's plain words; an edited operation (other params) or an older record falls
+    back to the wording built from its op_type and params."""
+    ev = fix.get("evidence") or {}
+    if ev.get("what_was_run") and params == (ev.get("params") or {}):
+        return _bare(ev["what_was_run"])
+    return _what(ev.get("op_type") or fix["chosen"], params, columns_scanned)
+
+
+def _why_label(fix) -> str:
+    """M2.3a: the reason's label; it says when the model's choice needed its one correction."""
+    retried = (fix.get("evidence") or {}).get("proposal_retried")
+    return "Why (the model's reason, after one correction)" if retried else "Why (the model's reason)"
+
+
+def _alternative_words(fix):
+    """(what was run, because) of the model's alternative: from the record's evidence (M2.3a), else from an older
+    record's model-generated candidate."""
+    ev = fix.get("evidence") or {}
+    alt_id = ev.get("alternative_candidate_id")
+    if alt_id is not None:
+        candidate = next((c for c in fix.get("candidates") or [] if c.get("option") == alt_id), None)
+        words = ((candidate or {}).get("evidence") or {}).get("what_was_run") or alt_id
+        return _bare(words), ev.get("alternative_rejected_because") or ""
+    alt = _alternative(fix)
+    return (alt["option"], alt["reason"]) if alt is not None else None
+
+
 def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]:
     """The Changed section text and the Left as is lines; columns_scanned (from the scan) names a full-row dedupe."""
     fixes = [r for r in records if r.get("decision_point") == FIX_POINT]
@@ -148,11 +177,11 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
             used.add(execution["id"])
         # the params that ran (after an edit) when the operation ran, otherwise the proposed ones
         params = (execution or fix)["evidence"].get("params") or {}
-        parts = [f"{k}. {_what(fix['chosen'], params, columns_scanned)}.",
-                 f"Why (the model's reason): {_bare(fix['rationale'])}."]
-        alt = _alternative(fix)
+        parts = [f"{k}. {_operation_words(fix, params, columns_scanned)}.",
+                 f"{_why_label(fix)}: {_bare(fix['rationale'])}."]
+        alt = _alternative_words(fix)
         if alt is not None:
-            parts.append(f"Alternative the model suggested: {alt['option']} ({_bare(alt['reason'])}).")
+            parts.append(f"Alternative the model suggested: {alt[0]} ({_bare(alt[1])}).")
         parts.append(f"Your decision: {_decision_text(approval)}.")
         if execution is not None and execution["chosen"] == "failed":
             parts.append(f"Failed: {_bare(execution['evidence'].get('failure_reason'))}.")
@@ -599,7 +628,7 @@ def summary_report(records: list, rounds: list, request_text: str) -> dict:
     caveats = []
     last_plan = question_rounds[-1].get("plan") if question_rounds else None
     for issue in (getattr(last_plan, "unaddressed_issues", None) or ()):
-        caveats.append(f"{issue.issue_type} ({issue.description}) was left unaddressed because: {issue.rejection_reason}")
+        caveats.append(unaddressed_text(issue))  # M2.3a: a plain caveat (an imputed outcome) renders alone
     for r in narratives:
         used.add(r["id"])
         if r["chosen"] in _FALLBACKS:

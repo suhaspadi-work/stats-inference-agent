@@ -30,6 +30,7 @@ from core.multi_group import select_multi_group_method, execute_multi_group_test
 from core.regression import select_regression_method, execute_regression
 from core.descriptive import column_stats_to_dicts, compute_descriptive_stats
 from core.diagnostics import compute_diagnostics, diagnostics_to_dict
+from core import wrangling
 from core.report import (
     generate_report, generate_multi_group_report,
     generate_regression_report, generate_descriptive_report,
@@ -317,6 +318,44 @@ class Diagnostic:
     report: Optional[Callable[[AnalysisPlan, dict], str]] = None  # None: the result is not reported (diagnose)
     kind: str = "diagnostic"
     guard_causal_language: bool = False
+
+
+@dataclass(frozen=True)
+class OperationCapability:
+    """
+    M2.3a: the third registry kind (D8), a Stage 1 operation. transform is pure (df, params) -> (new_df, details,
+    warnings); execute wraps the same transform, so the dry-run preview and the execution are the same code.
+    """
+    name: str                        # the op_type
+    stage: int
+    transform: Callable
+    execute: Callable
+    describe: Callable
+    kind: str = "operation"
+    guard_causal_language: bool = False
+
+
+def _operation(name, transform, execute) -> OperationCapability:
+    return OperationCapability(name=name, stage=1, transform=transform, execute=execute,
+                               describe=wrangling.describe_operation)
+
+
+OPERATIONS = {op.name: op for op in (
+    _operation("cast", wrangling.transform_cast, wrangling.execute_cast),
+    _operation("rename", wrangling.transform_rename, wrangling.execute_rename),
+    _operation("filter", wrangling.transform_filter, wrangling.execute_filter),
+    _operation("dedupe", wrangling.transform_dedupe, wrangling.execute_dedupe),
+    _operation("drop_column", wrangling.transform_drop_column, wrangling.execute_drop_column),
+    _operation("impute", wrangling.transform_impute, wrangling.execute_impute),
+)}
+
+
+def operation_named(op_type: str) -> OperationCapability:
+    """The registry entry of an operation type; a ValueError names an unknown one."""
+    try:
+        return OPERATIONS[op_type]
+    except KeyError:
+        raise ValueError(f"No operation is registered for type '{op_type}'.")
 
 
 TWO_GROUP = Analysis(

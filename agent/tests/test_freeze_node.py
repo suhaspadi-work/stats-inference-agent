@@ -296,6 +296,7 @@ def test_pause_payload_keys_unchanged():
         "outcome_type", "candidate_predictors", "classification_rationale", "allowed_decisions",
         "refused", "method", "reselected",  # M1.3c: the previous refusal, the method shown, and whether re-selected
         "stage1_report",  # M1.4b: None here, since this state has no stage_reports
+        "unaddressed_issues",  # M2.3a: every unaddressed issue of the plan, plain JSON
     }
     assert payload["stage1_report"] is None  # M1.4b
     assert (payload["refused"], payload["method"], payload["reselected"]) == (None, "welch_t_test", False)

@@ -271,21 +271,26 @@ def fake_draft(predictors, outcome="total_spend"):
     return draft
 
 
-def fake_propose(issues):
-    proposals = []
-    for i, issue in enumerate(issues):
-        if issue.issue_type == "duplicate_rows":
-            op, params = "dedupe", {"subset": []}
-        else:
-            op, params = "filter", {"column": issue.affected_columns[0], "condition": "not_null", "value": None}
-        proposals.append(_ProposedOperationOut(
-            issue_index=i, op_type=op, params=params, rationale=f"fix {issue.issue_type}",
-            alternative_approach="leave the data as is", alternative_rejected_because="it would bias the result",
-        ))
-    return proposals
+def choose(mapping_or_function):
+    """
+    M2.3a: a fake proposer that picks candidate ids: a dict {issue_type: candidate_id} or a function
+    (issue, candidates) -> candidate_id. The alternative is leave_as_is with a fixed reason.
+    """
+    pick = mapping_or_function if callable(mapping_or_function) else (lambda issue, cands: mapping_or_function[issue.issue_type])
+
+    def propose(issues, candidates):
+        return [_ProposedOperationOut(issue_index=i, candidate_id=pick(issue, cands), rationale=f"fix {issue.issue_type}",
+                                      alternative_candidate_id="leave_as_is",
+                                      alternative_rejected_because="it would bias the result")
+                for i, (issue, cands) in enumerate(zip(issues, candidates))]
+    return propose
 
 
-def must_not_propose(issues):
+# M2.3a: the model chooses a code-enumerated candidate; this reproduces the old behaviour (a dedupe, a not-null filter)
+fake_propose = choose({"duplicate_rows": "dedupe_all", "high_missingness": "delete_rows"})
+
+
+def must_not_propose(issues, candidates=None):
     raise AssertionError("no issues were expected, so the proposer must not be called")
 
 

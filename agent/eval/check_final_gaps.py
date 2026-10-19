@@ -9,6 +9,7 @@ product-relevant and not yet tested.
    already executed -- does the dataset end up in a consistent, known
    state, or a half-cleaned limbo?
 """
+import dataclasses
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ from core.dataset import LocalDiskStore
 from core.ingestion import load_dataset
 from core.graph import build_agent_graph
 import core.nodes as nodes_module
+import core.capabilities as capabilities_module
 
 load_dotenv()
 
@@ -90,11 +92,10 @@ def check_classify_and_wrangle_together():
 
 # ---------------------------------------------------------------------------
 # Check B: transient failure MID-wrangle, after some operations already ran.
-# Simulated by patching the _EXECUTE_FNS dispatch dict in core.nodes (where
-# the dedupe/filter functions are actually called from), not core.wrangling
-# itself -- the dict is built once at import time with direct references,
-# so patching the source module's attribute never affects an already-bound
-# dict entry.
+# Simulated by patching the filter entry of the operation registry
+# (core.capabilities.OPERATIONS, which the review node looks up at run time;
+# M2.3a), not core.wrangling itself -- the registry holds direct references,
+# so patching the source module's attribute never affects an entry.
 # ---------------------------------------------------------------------------
 
 def check_partial_mid_wrangle_failure():
@@ -132,7 +133,7 @@ def check_partial_mid_wrangle_failure():
         print(f"INCONCLUSIVE: expected 2 operations to test a mid-sequence failure, got {len(proposed)}.")
         return
 
-    original_execute_filter = nodes_module._EXECUTE_FNS["filter"]
+    original_execute_filter = capabilities_module.OPERATIONS["filter"].execute
     call_count = {"n": 0}
 
     def flaky_execute_filter(*args, **kwargs):
@@ -143,7 +144,9 @@ def check_partial_mid_wrangle_failure():
 
     decisions = [{"index": op["index"], "action": "approve"} for op in proposed]
 
-    with patch.dict(nodes_module._EXECUTE_FNS, {"filter": flaky_execute_filter}):
+    # M2.3a: the executors are looked up in the operation registry (core.capabilities.OPERATIONS)
+    flaky_entry = dataclasses.replace(capabilities_module.OPERATIONS["filter"], execute=flaky_execute_filter)
+    with patch.dict(capabilities_module.OPERATIONS, {"filter": flaky_entry}):
         try:
             result = app.invoke(Command(resume={"decisions": decisions}), config)
             print("UNEXPECTED: the run completed without the simulated failure actually triggering.")

@@ -107,7 +107,45 @@ def _runnable_options(issue) -> list[tuple[str, str]]:
     return [("leave_as_is", "keeps the data as is; the issue is carried forward as unaddressed")]
 
 
-def fix_record(issue, operation: Operation, issue_index: int) -> DecisionRecord:
+def _fix_record_from_candidates(issue, operation: Operation, issue_index: int, candidates) -> DecisionRecord:
+    """M2.3a: the record's candidates are the code-enumerated ones; chosen is the chosen candidate's id."""
+    rationale = operation.rationale
+    ev = (rationale.evidence if rationale is not None else None) or {}
+    chosen = ev.get("candidate_id") or operation.op_type
+    alternative = rationale.alternatives[0] if rationale is not None and rationale.alternatives else None
+    alt_id = ev.get("alternative_candidate_id")
+    because = alternative.rejected_because if alternative is not None else None
+    records = []
+    for c in candidates:
+        if c["id"] == chosen:
+            reason = f"chosen: {c['reason']}"
+        elif not c["eligible"]:
+            reason = f"not eligible: {c['reason']}"
+        elif c["id"] == alt_id:  # for readers only; the evidence holds the alternative's id and reason
+            reason = f"the model's alternative, not chosen because: {because}"
+        else:
+            reason = f"eligible; not chosen: {c['reason']}"
+        records.append(Candidate(option=c["id"], eligible=bool(c["eligible"]), reason=reason,
+                                 evidence=_plain({"what_was_run": c["what_was_run"], "preview": c["preview"]})))
+    return DecisionRecord(
+        decision_point=FIX_POINT, chosen=chosen, decided_by="model",
+        candidates=tuple(records),
+        rationale=rationale.rationale if rationale is not None else "",
+        evidence={
+            "issue_index": int(issue_index), "issue_type": issue.issue_type,
+            "affected_columns": [str(c) for c in issue.affected_columns],
+            "params": _plain(operation.params), "issue_evidence": _plain(issue.evidence),
+            "op_type": operation.op_type, "candidate_id": chosen, "what_was_run": ev.get("what_was_run"),
+            "preview": _plain(ev.get("preview")),
+            "alternative_candidate_id": alt_id, "alternative_rejected_because": because,
+            "proposal_retried": bool(ev.get("proposal_retried", False)),
+        },
+    )
+
+
+def fix_record(issue, operation: Operation, issue_index: int, candidates=None) -> DecisionRecord:
+    if candidates is not None:
+        return _fix_record_from_candidates(issue, operation, issue_index, candidates)
     chosen = operation.op_type
     candidates = []
     options = _runnable_options(issue)
@@ -214,5 +252,7 @@ def execution_record(finished_operation: Operation, approval_record_id: Optional
             "columns_before": cols_before, "columns_after": cols_after,
             "warnings": list(impact.warnings) if impact else [],
             "approval_record_id": approval_record_id,
+            # M2.3a: the transform's numbers (impute, drop_column); the four earlier operations have none
+            **({"details": _plain(impact.details)} if impact and impact.details else {}),
         },
     )

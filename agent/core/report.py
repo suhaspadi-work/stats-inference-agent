@@ -5,7 +5,7 @@ from core.report_facts import two_group_facts
 from core.report_facts import multi_group_facts, regression_facts
 
 from core.ingestion import HIGH_CARDINALITY_THRESHOLD
-from core.plan import AnalysisPlan
+from core.plan import PLAIN_CAVEAT_TYPES, AnalysisPlan, unaddressed_text
 
 # A deliberately narrow, high-precision list -- catching obvious causal
 # claims, not every possible phrasing. False negatives are more acceptable
@@ -67,6 +67,33 @@ def violation_feedback(violation) -> str:
             "with'. Do not use the words cause, drive, lead to or result in.")
 
 
+_LONG_TAIL = (" You MUST mention this plainly in your "
+              "summary and note that the results should be interpreted with this caveat in mind. "
+              "Do not omit this or bury it -- a reader should not come away with more confidence "
+              "in the result than is warranted given this known, unaddressed issue.")
+_SHORT_TAIL = " You MUST mention this plainly."
+
+
+def _unaddressed_constraint(plan, tail: str) -> str:
+    """
+    The prompt text for the plan's unaddressed issues. Rejected fixes keep the wording they always had (a user
+    decision); a plain caveat (M2.3a: an imputed outcome) gets its own sentence that does not claim a user decision.
+    Without plain caveats the text is exactly what it was before M2.3a.
+    """
+    rejected = [i for i in plan.unaddressed_issues if i.issue_type not in PLAIN_CAVEAT_TYPES]
+    plain = [i for i in plan.unaddressed_issues if i.issue_type in PLAIN_CAVEAT_TYPES]
+    text = ""
+    if rejected:
+        issues_text = "; ".join(unaddressed_text(i, "was identified but left unaddressed") for i in rejected)
+        text = ("\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
+                f"by explicit user decision: {issues_text}." + tail)
+    if plain:
+        caveats = "; ".join(i.description.rstrip(".") for i in plain)
+        text += ("\n\nAlso state this caveat plainly, in your own words, and do not describe it as something the user "
+                 f"chose not to fix: {caveats}.")
+    return text
+
+
 def check_for_causal_language(report_text: str, plan: AnalysisPlan) -> None:
     """
     Independent guard on the FINAL TEXT, separate from the plan-level
@@ -107,19 +134,7 @@ def generate_report(plan: AnalysisPlan, test_result: dict, model_name: str = "op
         else "This data comes from a randomized experiment, so causal language is appropriate here."
     )
 
-    unaddressed_constraint = ""
-    if plan.unaddressed_issues:
-        issues_text = "; ".join(
-            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
-            for i in plan.unaddressed_issues
-        )
-        unaddressed_constraint = (
-            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
-            f"by explicit user decision: {issues_text}. You MUST mention this plainly in your "
-            "summary and note that the results should be interpreted with this caveat in mind. "
-            "Do not omit this or bury it -- a reader should not come away with more confidence "
-            "in the result than is warranted given this known, unaddressed issue."
-        )
+    unaddressed_constraint = _unaddressed_constraint(plan, _LONG_TAIL)
 
     system_prompt = (
         "You write brief, plain-language summaries of statistical analyses for a "
@@ -218,16 +233,7 @@ def generate_multi_group_report(plan: AnalysisPlan, test_result: dict, model_nam
         else "This data comes from a randomized experiment, so causal language is appropriate here."
     )
 
-    unaddressed_constraint = ""
-    if plan.unaddressed_issues:
-        issues_text = "; ".join(
-            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
-            for i in plan.unaddressed_issues
-        )
-        unaddressed_constraint = (
-            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
-            f"by explicit user decision: {issues_text}. You MUST mention this plainly."
-        )
+    unaddressed_constraint = _unaddressed_constraint(plan, _SHORT_TAIL)
 
     system_prompt = (
         "You write brief, plain-language summaries of a multi-group statistical comparison for a "
@@ -268,16 +274,7 @@ def generate_regression_report(plan: AnalysisPlan, test_result: dict, model_name
         else "This data comes from a randomized experiment, so causal language is appropriate here."
     )
 
-    unaddressed_constraint = ""
-    if plan.unaddressed_issues:
-        issues_text = "; ".join(
-            f"{i.issue_type} ({i.description}) was identified but left unaddressed because: {i.rejection_reason}"
-            for i in plan.unaddressed_issues
-        )
-        unaddressed_constraint = (
-            "\n\nIMPORTANT: The following data-quality issue(s) were identified but NOT fixed, "
-            f"by explicit user decision: {issues_text}. You MUST mention this plainly."
-        )
+    unaddressed_constraint = _unaddressed_constraint(plan, _SHORT_TAIL)
 
     system_prompt = (
         "You write brief, plain-language summaries of a multiple linear regression for a non-technical "

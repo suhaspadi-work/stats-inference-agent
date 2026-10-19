@@ -525,7 +525,10 @@ def test_a_comparison_with_cleaning_approved(fake_model, tmp_path, store):
     entry = _stage1(values)
     text = entry["text"]
     assert text.startswith(STAGE1_TITLE + "\n\nChecked\n")
-    assert "Removed duplicate rows" in text and "Kept rows where tenure has a value" in text
+    # M2.3a: the operations are worded from the chosen candidates (what_was_run), with the run's own numbers
+    dupes, gone = int(df.duplicated().sum()), int(deduped["tenure"].isna().sum())
+    assert f"1. Remove {dupes} exact duplicate rows (all columns). Why" in text
+    assert f"2. Keep only rows where tenure has a value (removes {gone} rows). Why" in text
     assert f"Effect: {len(df)} to {len(deduped)} rows." in text
     assert f"Effect: {len(deduped)} to {len(final)} rows." in text
     assert len(store.read(values["dataset"].storage_key)) == len(final)
@@ -609,7 +612,8 @@ def test_a_second_question_on_the_same_thread_gets_its_own_report(fake_model, tm
     values, _, _ = _drive(app, _start(_frame(seed=62), tmp_path, store, "q2"), "thread")
     first, second = [e for e in values["stage_reports"] if e["stage"] == "stage1"]  # M1.4b step 2b: only the stage1 entries
     assert (first["stage"], second["stage"]) == ("stage1", "stage1")
-    assert "Removed duplicate rows" in first["text"]
+    # M2.3a: worded from the chosen candidate, with the first question's own duplicate count
+    assert f"1. Remove {int(_messy_frame().duplicated().sum())} exact duplicate rows (all columns). Why" in first["text"]
     assert _sections(second)["Changed"] == "No changes were proposed."
     log = values["decision_log"]
     starts = [i for i, r in enumerate(log) if r["decision_point"] == "planner.stage_plan"]
@@ -630,7 +634,11 @@ def test_no_canary_reaches_a_stage_report(fake_model, tmp_path, store):
                                                                 "session_id": "s", "dataset": ds}, "canary")
     assert "wrangling_approval" in pauses
     entry = _stage1(values)
-    assert "Removed duplicate rows" in entry["text"] and "Kept rows where notes has a value" in entry["text"]
+    # M2.3a: worded from the chosen candidates, with the run's own numbers
+    df = _with_duplicates(_base_df())
+    deduped = df.drop_duplicates()
+    assert f"Remove {int(df.duplicated().sum())} exact duplicate rows (all columns)." in entry["text"]
+    assert f"Keep only rows where notes has a value (removes {int(deduped['notes'].isna().sum())} rows)." in entry["text"]
     text = entry["text"] + "\n" + json.dumps(entry["sections"])
     assert canary_hits([{"stage": "stage1_report", "text": text}]) == []
 

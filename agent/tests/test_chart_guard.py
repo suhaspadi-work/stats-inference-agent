@@ -25,6 +25,7 @@ from core.ingestion import load_dataset, profile_dataset
 from core.model_boundary import plan_for_model, prepare_for_model, result_for_model
 from core.model_safe_view import ColumnSummary, ModelSafeView, assert_model_safe
 from core.nodes import make_report_node
+from core.operation_candidates import enumerate_candidates
 from core.plan import AnalysisPlan, CausalStatus, MethodDecision, OutcomeType, QuestionType
 from core.visualization import RAW_VALUE_CHART_TYPES, SUMMARY_CHART_TYPES, is_raw_value_chart
 
@@ -346,7 +347,7 @@ def test_draft_plan_fields_rejects_a_chart_before_the_model(no_model):
 
 def test_propose_wrangling_operations_rejects_a_chart_before_the_model(no_model):
     with pytest.raises(ValueError, match="chart payload"):
-        propose_wrangling_operations([{"chart_type": "bar_chart", "data": {}}])
+        propose_wrangling_operations([{"chart_type": "bar_chart", "data": {}}], [[]])  # M2.3a: with candidates
 
 
 def test_real_inputs_pass_the_tripwire_and_reach_the_model(no_model, tmp_path, store):
@@ -356,5 +357,6 @@ def test_real_inputs_pass_the_tripwire_and_reach_the_model(no_model, tmp_path, s
         draft_plan_fields("x", profile_dataset(ds, store=store))
     issues = [CandidateIssue(issue_type="duplicate_rows", description="d", affected_columns=("id",),
                              evidence={"duplicate_row_count": 1, "total_rows": 3})]
+    candidates = [enumerate_candidates(issues[0], ds, profile_dataset(ds, store=store), store)]  # M2.3a: real candidates
     with pytest.raises(AssertionError, match="model must not be created"):
-        propose_wrangling_operations(issues)
+        propose_wrangling_operations(issues, candidates)

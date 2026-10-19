@@ -243,9 +243,9 @@ def _points(values):
 def test_gate_pauses_before_any_cleaning_or_model_call(tmp_path, store):
     allowed = {"after_gate": False}
 
-    def propose(issues):
+    def propose(issues, candidates):  # M2.3a: the candidates come with the issues
         assert allowed["after_gate"], "the proposer ran before the gate was answered"
-        return fake_propose(issues)
+        return fake_propose(issues, candidates)
 
     def draft(request_text, profile):
         assert allowed["after_gate"], "the draft ran before the gate was answered"

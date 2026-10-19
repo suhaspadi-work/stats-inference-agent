@@ -77,7 +77,7 @@ def print_cleaning_lines(log):
         ev = e.get("evidence") or {}
         detail = ""
         if point == "stage1.clean.fix":
-            detail = f" params={ev.get('params')}"
+            detail = f" params={ev.get('params')} candidate={ev.get('candidate_id')}"  # M2.3a
         elif point == "stage1.clean.approval":
             detail = f" received_action={ev.get('received_action')!r}"
         elif point == "stage1.clean.execution":

@@ -63,17 +63,19 @@ class FakeChat:
                                  unit_of_analysis="customer", candidate_predictors=list(self.config["predictors"]),
                                  rationale="fake")
         if schema is _WranglingProposalsOut:
-            proposals = []
-            for index, issue_type, columns in re.findall(r"^\[(\d+)\] (\w+):.*\(columns: ([^,)]*)", text, re.M):
-                if issue_type == "duplicate_rows":
-                    op, params = "dedupe", {"subset": []}
-                elif issue_type == "high_missingness":
-                    op, params = "filter", {"column": columns.strip(), "condition": "not_null", "value": None}
-                else:
-                    raise AssertionError(f"the fake has no proposal for issue type {issue_type!r}")
-                proposals.append(_ProposedOperationOut(
-                    issue_index=int(index), op_type=op, params=params, rationale="fake",
-                    alternative_approach="leave the data as is", alternative_rejected_because="fake"))
+            # M2.3a: pick the first listed option of each issue; the alternative is leave_as_is
+            options, current = {}, None
+            for line in text.splitlines():
+                issue = re.match(r"^\[(\d+)\] \w+:", line)
+                if issue:
+                    current = int(issue.group(1))
+                    continue
+                option = re.match(r"^      (\S+): ", line)
+                if option and current is not None:
+                    options.setdefault(current, []).append(option.group(1))
+            proposals = [_ProposedOperationOut(issue_index=i, candidate_id=ids[0], rationale="fake",
+                                               alternative_candidate_id="leave_as_is", alternative_rejected_because="fake")
+                         for i, ids in sorted(options.items())]
             return _WranglingProposalsOut(proposals=proposals)
         raise AssertionError(f"unexpected schema {schema.__name__}")
 

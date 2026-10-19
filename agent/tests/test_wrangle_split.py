@@ -43,10 +43,11 @@ def build_graph(store, propose_fn):
     return graph.compile(checkpointer=InMemorySaver())
 
 
-def _proposal(index, op_type, params, rationale):
+def _proposal(index, candidate_id, rationale):
+    # M2.3a: the model chooses a candidate id; the code supplies the operation
     return _ProposedOperationOut(
-        issue_index=index, op_type=op_type, params=params, rationale=rationale,
-        alternative_approach="leave the data as is", alternative_rejected_because="it would bias the result",
+        issue_index=index, candidate_id=candidate_id, rationale=rationale,
+        alternative_candidate_id="leave_as_is", alternative_rejected_because="it would bias the result",
     )
 
 
@@ -58,19 +59,17 @@ class CountingProposer:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, issues):
+    def __call__(self, issues, candidates):  # M2.3a: the candidates come with the issues
         self.calls += 1
         proposals = []
         for i, issue in enumerate(issues):
-            if self.calls > 1:
-                proposals.append(_proposal(i, "filter", {"column": "id", "condition": "equals", "value": 1},
+            if self.calls > 1:  # a different choice from a second call (a duplicate issue has only dedupe_all)
+                proposals.append(_proposal(i, "dedupe_all" if issue.issue_type == "duplicate_rows" else "drop_column",
                                            "a different proposal from a second call"))
             elif issue.issue_type == "duplicate_rows":
-                proposals.append(_proposal(i, "dedupe", {"subset": []}, "remove exact duplicate rows"))
+                proposals.append(_proposal(i, "dedupe_all", "remove exact duplicate rows"))
             else:
-                proposals.append(_proposal(i, "filter", {"column": issue.affected_columns[0],
-                                                         "condition": "not_null", "value": None},
-                                           "drop rows missing this column"))
+                proposals.append(_proposal(i, "delete_rows", "drop rows missing this column"))
         return proposals
 
 
@@ -123,12 +122,28 @@ def test_the_operation_that_runs_is_the_one_from_the_first_call(tmp_path, store)
 def test_pause_payload_has_the_old_shape(tmp_path, store):
     app = build_graph(store, CountingProposer())
     payload = _start(app, make_dataset(_dupes_df(), tmp_path, store), store, "t3")["__interrupt__"][0].value
+    # M2.3a: the old keys keep their meaning; the alternative is the leave_as_is candidate's words, and each entry
+    # gains the chosen candidate, its preview (4 rows, 1 exact duplicate) and every candidate of the issue
+    preview = {"rows_before": 4, "rows_after": 3, "columns_before": 2, "columns_after": 2, "rows_changed": 1,
+               "share_changed": 0.25, "columns_affected": ["id", "region"], "cells_changed": 2, "shift": None,
+               "warnings": [], "basis": "uploaded_data"}
+    leave = {"rows_before": 4, "rows_after": 4, "columns_before": 2, "columns_after": 2, "rows_changed": 0,
+             "share_changed": 0.0, "columns_affected": [], "cells_changed": 0, "shift": None, "warnings": [],
+             "basis": "uploaded_data"}
     assert payload == {
         "type": "wrangling_approval",
         "question": "Review the proposed data-cleaning operations before they run.",
         "proposed_operations": [{
             "index": 0, "op_type": "dedupe", "params": {"subset": None},
-            "rationale": "remove exact duplicate rows", "alternative": "leave the data as is",
+            "rationale": "remove exact duplicate rows", "alternative": "Leave the data as it is.",
+            "candidate_id": "dedupe_all", "what_was_run": "Remove 1 exact duplicate rows (all columns).",
+            "impact_preview": preview, "preview_basis": "uploaded_data",
+            "candidates": [
+                {"id": "dedupe_all", "what_was_run": "Remove 1 exact duplicate rows (all columns).", "eligible": True,
+                 "reason": "exact duplicate rows were found", "preview": preview},
+                {"id": "leave_as_is", "what_was_run": "Leave the data as it is.", "eligible": True,
+                 "reason": "keep the rows as they are; repeated events can be legitimate", "preview": leave},
+            ],
         }],
         "allowed_decisions": ["approve", "edit", "reject"],
     }
@@ -251,7 +266,7 @@ def test_records_at_the_pause_are_scan_and_fix(tmp_path, store):
     app = build_graph(store, CountingProposer())
     paused = _start(app, make_dataset(_dupes_df(), tmp_path, store), store, "r1")
     assert _points(paused["decision_log"]) == [
-        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe")]
+        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe_all")]  # M2.3a: chosen is the candidate id
 
 
 def test_records_after_approve_link_fix_approval_execution_and_dataset(tmp_path, store):
@@ -260,7 +275,7 @@ def test_records_after_approve_link_fix_approval_execution_and_dataset(tmp_path,
     final = _resume(app, "r2", [{"index": 0, "action": "approve"}])
     log = final["decision_log"]
     assert _points(log) == [
-        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe"),
+        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe_all"),  # M2.3a: chosen is the candidate id
         ("stage1.clean.approval", "approve"), ("stage1.clean.execution", "applied")]
     fix, approval, execution = log[1], log[2], log[3]
     assert approval["decided_by"] == "human"
@@ -290,7 +305,7 @@ def test_records_for_a_reject(tmp_path, store):
     _start(app, make_dataset(_dupes_df(), tmp_path, store), store, "r4")
     final = _resume(app, "r4", [{"index": 0, "action": "reject", "reason": "they are real repeat orders"}])
     assert _points(final["decision_log"]) == [
-        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe"),
+        ("stage1.clean.scan", "propose_fixes"), ("stage1.clean.fix", "dedupe_all"),  # M2.3a: chosen is the candidate id
         ("stage1.clean.approval", "reject")]
     assert final["decision_log"][2]["rationale"] == "they are real repeat orders"
     assert final["decision_log"][2]["evidence"]["carried_forward_as_unaddressed"] is True
@@ -303,7 +318,7 @@ def test_records_when_only_the_second_operation_gets_a_decision(tmp_path, store)
     final = _resume(app, "r4b", [{"index": 1, "action": "approve"}])
     log = final["decision_log"]
     fixes = log[1:3]
-    assert [f["chosen"] for f in fixes] == ["dedupe", "filter"]
+    assert [f["chosen"] for f in fixes] == ["dedupe_all", "delete_rows"]  # M2.3a: the chosen candidate ids
     assert _points(log[3:]) == [
         ("stage1.clean.approval", "no_decision"),
         ("stage1.clean.approval", "approve"),
@@ -322,7 +337,7 @@ def test_records_in_stakeholder_mode_follow_index_order(tmp_path, store):
     log = _resume(app, "r5", [{"index": 1, "action": "approve"}])["decision_log"]
     assert _points(log) == [
         ("stage1.clean.scan", "propose_fixes"),
-        ("stage1.clean.fix", "dedupe"), ("stage1.clean.fix", "filter"),
+        ("stage1.clean.fix", "dedupe_all"), ("stage1.clean.fix", "delete_rows"),  # M2.3a: chosen is the candidate id
         ("stage1.clean.approval", "auto_approve"), ("stage1.clean.execution", "applied"),
         ("stage1.clean.approval", "approve"), ("stage1.clean.execution", "applied")]
     assert log[3]["decided_by"] == "code_rule"
