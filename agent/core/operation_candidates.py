@@ -50,6 +50,13 @@ def _dry_run(dataset, store_or_frame, op_type: str, params: dict) -> dict:
                      "std_after": _float(details["std_after"])}
     elif op_type == "drop_column":
         rows_changed, cells, affected = 0, rows_before, [params["column"]]  # every cell of the dropped column
+    elif op_type == "normalize_text":
+        rows_changed = cells = int(details["cells_changed"])
+        affected = [params["column"]]
+    elif op_type == "cast" and params.get("to_type") == "numeric":
+        rows_changed, cells, affected = 0, int(details["non_missing_before"]), [params["column"]]
+        if details["became_missing"]:
+            warnings = (f"{details['became_missing']} value(s) that are not numbers become missing",)
     elif op_type == "cast":
         column = params["column"]
         old, new = df[column], new_df[column]
@@ -165,6 +172,33 @@ def _missingness_candidates(df, dataset, column) -> list:
     return out
 
 
+def _changes(df, dataset, op_type, params) -> bool:
+    return _dry_run(dataset, df, op_type, params)["cells_changed"] > 0
+
+
+def _text_candidates(df, dataset, column) -> list:
+    trim = {"column": column, "lowercase": False}
+    lower = {"column": column, "lowercase": True}
+    trims, lowers = _changes(df, dataset, "normalize_text", trim), _changes(df, dataset, "normalize_text", lower)
+    return [
+        _candidate(df, dataset, LEAVE, None, {}, True, "keep the values as they are"),
+        _candidate(df, dataset, "trim_text", "normalize_text", trim, trims,
+                   "removes extra spaces" if trims else "no value has extra spaces"),
+        _candidate(df, dataset, "trim_and_lowercase", "normalize_text", lower, lowers,
+                   "removes extra spaces and treats upper and lower case as the same" if lowers else "no value changes"),
+    ]
+
+
+def _numeric_text_candidates(df, dataset, column) -> list:
+    codes = df[column].dropna().astype(str).str.strip().str.match(r"^[-+]?0\d").any()
+    return [
+        _candidate(df, dataset, LEAVE, None, {}, True, "keep the values as they are"),
+        _candidate(df, dataset, "convert_to_number", "cast", {"column": column, "to_type": "numeric"}, not codes,
+                   "values with leading zeros look like codes, not numbers" if codes
+                   else "the values that are numbers are converted; the others become missing"),
+    ]
+
+
 def enumerate_candidates(issue, dataset, profile, store, df=None) -> list:
     """Every candidate fix for one issue, JSON-clean; reads the data at most once (pass df to read none)."""
     df = df if df is not None else store.read(dataset.storage_key)
@@ -175,6 +209,10 @@ def enumerate_candidates(issue, dataset, profile, store, df=None) -> list:
         ]
     if issue.issue_type == "high_missingness":
         return _missingness_candidates(df, dataset, issue.affected_columns[0])
+    if issue.issue_type == "inconsistent_text":
+        return _text_candidates(df, dataset, issue.affected_columns[0])
+    if issue.issue_type == "numeric_as_text":
+        return _numeric_text_candidates(df, dataset, issue.affected_columns[0])
     return [_candidate(df, dataset, LEAVE, None, {}, True, "no fix is registered for this issue type")]
 
 

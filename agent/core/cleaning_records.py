@@ -78,6 +78,14 @@ def scan_record(profile: ModelSafeView, issues) -> DecisionRecord:
             "duplicate_row_count": duplicate_count,
             "columns_above_missing_threshold": missing_columns,
             "missing_threshold": MISSINGNESS_THRESHOLD,
+            # M2.3a step 2: counts only, never a level or a cell value
+            "text_issues": [{"column": str(i.affected_columns[0]), "levels_before": i.evidence["levels_before"],
+                             "levels_after": i.evidence["levels_after"],
+                             "cells_changed_trim": i.evidence["cells_changed_trim"]}
+                            for i in issues if i.issue_type == "inconsistent_text"],
+            "numeric_text_columns": [{"column": str(i.affected_columns[0]), "parse_rate": i.evidence["parse_rate"],
+                                      "unparseable_count": i.evidence["unparseable_count"]}
+                                     for i in issues if i.issue_type == "numeric_as_text"],
         },
     )
 

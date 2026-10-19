@@ -371,6 +371,9 @@ def _build_operation_from_proposal(dataset, proposal, issue, issue_candidates) -
 # regardless of mode.
 _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
 
+# M2.3a step 2: the order the cleaning operations run in (an unknown issue type runs last)
+_EXECUTION_RANK = {"numeric_as_text": 0, "inconsistent_text": 1, "duplicate_rows": 2, "high_missingness": 3}
+
 
 def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_operations) -> Callable[[AgentState], dict]:
     """
@@ -406,9 +409,12 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         candidates = [enumerate_candidates(issue, dataset, profile, store, df) for issue in issues]
         proposals = propose_fn(issues, candidates)
         _validate_choices(proposals, issues, candidates)
-        # exact duplicates first, so imputation statistics are not computed on repeated rows; the operation index
-        # is the execution order
-        proposals = sorted(proposals, key=lambda p: (0 if issues[p.issue_index].issue_type == "duplicate_rows" else 1,
+        # the execution order: conversions and text normalization first ("East" and "east " rows can become exact
+        # duplicates only after normalizing), then exact duplicates (so imputation statistics are not computed on
+        # repeated rows), then missing values; the operation index is the execution order. An issue that an earlier
+        # operation creates (duplicates after normalizing, missing values after a conversion) is detected only by
+        # the Stage 1 loop of M2.4.
+        proposals = sorted(proposals, key=lambda p: (_EXECUTION_RANK.get(issues[p.issue_index].issue_type, 4),
                                                      p.issue_index))
         # the previews, recomputed on the data as each operation will see it (after the chosen earlier operations)
         frame = df

@@ -28,7 +28,8 @@ from tests.test_testing import make_dataset
 NAMES = ("NORMALITY_ALPHA", "EQUAL_VARIANCE_ALPHA", "HETEROSKEDASTICITY_ALPHA", "OMNIBUS_ALPHA", "POST_HOC_ALPHA")
 # M2.3a: the cleaning-candidate cut-offs, with their values
 CLEANING = {"IMPUTE_MAX_MISSING_PCT": 0.40, "IMPUTE_MIN_OBSERVED": 10, "DISCRETE_MAX_DISTINCT": 20, "GROUP_MAX_LEVELS": 12,
-            "GROUP_MIN_OBSERVED": 5, "MAX_GROUP_COLUMNS": 3}
+            "GROUP_MIN_OBSERVED": 5, "MAX_GROUP_COLUMNS": 3,
+            "NUMERIC_TEXT_PARSE_RATE": 0.95}  # M2.3a step 2: the numeric-text cut-off
 
 
 @pytest.fixture
@@ -74,7 +75,7 @@ def _clear_ranks():
 
 def test_the_constants():
     public = sorted(n for n in vars(thresholds) if n.isupper())
-    assert public == sorted([*NAMES, *CLEANING])  # M2.3a: and the six cleaning cut-offs
+    assert public == sorted([*NAMES, *CLEANING])  # M2.3a: and the seven cleaning cut-offs
     assert {n: getattr(thresholds, n) for n in CLEANING} == CLEANING
     for name in NAMES:
         value = getattr(thresholds, name)

@@ -347,6 +347,7 @@ OPERATIONS = {op.name: op for op in (
     _operation("dedupe", wrangling.transform_dedupe, wrangling.execute_dedupe),
     _operation("drop_column", wrangling.transform_drop_column, wrangling.execute_drop_column),
     _operation("impute", wrangling.transform_impute, wrangling.execute_impute),
+    _operation("normalize_text", wrangling.transform_normalize_text, wrangling.execute_normalize_text),
 )}
 
 

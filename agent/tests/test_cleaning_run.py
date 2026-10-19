@@ -114,6 +114,13 @@ def test_duplicates_run_first_and_previews_equal_the_impact(fake_model, tmp_path
     assert second["what_was_run"] == f"Fill the missing values of tenure with the median ({df.drop_duplicates()['tenure'].median():.4g})."
 
 
+def _impute_effect(df, column):
+    """M2.3a step 2: the Effect line of a median fill, computed independently (the sample standard deviation)."""
+    observed, filled = df[column].dropna(), df[column].fillna(df[column].median())
+    return (f"Effect: {int(df[column].isna().sum())} value(s) filled; the mean of {column} moves from "
+            f"{observed.mean():.4g} to {filled.mean():.4g} and its spread from {observed.std():.4g} to {filled.std():.4g}.")
+
+
 # --- (c) the first operation rejected ----------------------------------------------------------------------------------------
 
 def _reject_first(payload):
@@ -128,7 +135,7 @@ def test_a_rejected_first_operation(fake_model, tmp_path, store):
     (execution,) = _records(values, "stage1.clean.execution")
     ev = execution["evidence"]
     assert (ev["op_type"], ev["rows_before"], ev["rows_after"], ev["details"]["cells_filled"]) == ("impute", len(df), len(df), 30)
-    assert f"Effect: {len(df)} to {len(df)} rows." in _sections(values)["Changed"]
+    assert _impute_effect(df, "tenure") in _sections(values)["Changed"]  # M2.3a step 2: the executed numbers
 
 
 # --- (d) an edit, and a bad edit -----------------------------------------------------------------------------------------------
@@ -201,7 +208,7 @@ def test_the_stage1_report_of_an_imputation(fake_model, tmp_path, store):
     assert _sections(values)["Changed"] == (
         f"1. Fill the missing values of tenure with the median ({median:.4g}). Why (the model's reason): fix "
         "high_missingness. Alternative the model suggested: Leave the data as it is (it would bias the result). "
-        f"Your decision: approved. Effect: {len(df)} to {len(df)} rows.")
+        f"Your decision: approved. {_impute_effect(df, 'tenure')}")  # M2.3a step 2: the executed numbers
     assert "Missing values after cleaning: none." in _sections(values)["Data quality"].split("\n")
 
 

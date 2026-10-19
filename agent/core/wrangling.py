@@ -7,6 +7,7 @@ details carry numbers and column names only (plus an aggregate fill value or a c
 from __future__ import annotations
 
 import math
+import re
 
 import pandas as pd
 
@@ -68,12 +69,52 @@ def _run(dataset: Dataset, store: DatasetStore, operation: Operation, transform)
 
 def transform_cast(df: pd.DataFrame, params: dict):
     column, to_type = params["column"], params["to_type"]
+    if to_type == "numeric":
+        return _cast_numeric(df, column)
     new_df = df.copy()
     try:
         new_df[column] = new_df[column].astype(to_type)
     except (ValueError, TypeError) as e:
         raise ValueError(f"Cast failed: {e}") from e
     return new_df, {}, ()
+
+
+def _cast_numeric(df: pd.DataFrame, column):
+    """M2.3a step 2: a lenient conversion to numbers; a value that is not a number becomes missing (never raises)."""
+    if column not in df.columns:
+        raise ValueError(f"Cast failed: column not found: {column}")
+    new_df = df.copy()
+    series = df[column]
+    present = series.notna()
+    converted = pd.to_numeric(series[present].astype(str).str.strip(), errors="coerce")
+    new_df[column] = pd.to_numeric(converted.reindex(series.index), errors="coerce")
+    details = {"column": str(column), "to_type": "numeric", "non_missing_before": int(present.sum()),
+               "became_missing": int(converted.isna().sum())}
+    return new_df, details, ()
+
+
+_SPACES = re.compile(r"\s+")
+
+
+def transform_normalize_text(df: pd.DataFrame, params: dict):
+    """M2.3a step 2: trim spaces (and runs of spaces) in a text column, and optionally ignore case."""
+    column, lowercase = params.get("column"), bool(params.get("lowercase", False))
+    if column not in df.columns:
+        raise ValueError(f"Cannot normalize — column not found: {column}")
+    series = df[column]
+    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+        raise ValueError(f"normalize_text needs a text column; {column} is numeric.")
+    present = series.notna()
+    before = series[present].astype(str)
+    after = before.map(lambda v: _SPACES.sub(" ", v.strip()))
+    if lowercase:
+        after = after.str.lower()
+    new_df = df.copy()
+    new_df[column] = new_df[column].astype(object)
+    new_df.loc[present, column] = after
+    details = {"column": str(column), "lowercase": lowercase, "levels_before": int(before.nunique()),
+               "levels_after": int(after.nunique()), "cells_changed": int((after != before).sum())}
+    return new_df, details, ()
 
 
 def transform_rename(df: pd.DataFrame, params: dict):
@@ -262,7 +303,18 @@ def describe_operation(op_type, params, details=None) -> str:
             text += f" and add a {column}_was_missing indicator column"
         return text + "."
     if op_type == "cast":
+        if params.get("to_type") == "numeric":
+            lost = details.get("became_missing")
+            return (f"Convert {params.get('column')} to numbers ({lost} value(s) that are not numbers become missing)."
+                    if lost else f"Convert {params.get('column')} to numbers.")
         return f"Change the type of {params.get('column')} to {params.get('to_type')}."
+    if op_type == "normalize_text":
+        text = (f"Trim spaces and ignore case in {params.get('column')}" if params.get("lowercase")
+                else f"Trim spaces in {params.get('column')}")
+        before, after = details.get("levels_before"), details.get("levels_after")
+        if before is not None and after is not None and before != after:
+            text += f" ({before} distinct values become {after})"
+        return text + "."
     if op_type == "rename":
         mapping = params.get("mapping") or {}
         return "Rename the columns: " + ", ".join(f"{a} to {b}" for a, b in mapping.items()) + "."
@@ -320,3 +372,7 @@ def execute_drop_column(dataset: Dataset, store: DatasetStore, operation: Operat
 
 def execute_impute(dataset: Dataset, store: DatasetStore, operation: Operation) -> tuple[Dataset, Operation]:
     return _run(dataset, store, operation, transform_impute)
+
+
+def execute_normalize_text(dataset: Dataset, store: DatasetStore, operation: Operation) -> tuple[Dataset, Operation]:
+    return _run(dataset, store, operation, transform_normalize_text)

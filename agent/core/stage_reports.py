@@ -74,6 +74,12 @@ def _checked(scan) -> str:
         lines.append(f"Found {duplicates} exact duplicate rows.")
     for col in ev.get("columns_above_missing_threshold") or []:
         lines.append(f"{col['column']}: {col['missing_pct']:.1%} missing (threshold {ev['missing_threshold']:.0%}).")
+    for t in ev.get("text_issues") or []:  # M2.3a step 2: counts only, never a level
+        lines.append(f"{t['column']}: {t['levels_before']} distinct values reduce to {t['levels_after']} after trimming "
+                     "spaces and ignoring case." if t["levels_after"] < t["levels_before"] else
+                     f"{t['column']}: {t['cells_changed_trim']} value(s) have extra spaces.")
+    for t in ev.get("numeric_text_columns") or []:
+        lines.append(f"{t['column']}: stored as text, but {t['parse_rate']:.1%} of its values are numbers.")
     if len(lines) == 1:
         lines.append("No data-quality issues found.")
     return "\n".join(lines)
@@ -128,6 +134,30 @@ def _decision_text(approval) -> str:
     if approval["decided_by"] == "code_rule" and chosen != "no_decision":
         text += " automatically"
     return text
+
+
+def _effect(ev) -> str:
+    """M2.3a step 2: the Effect line from the executed numbers; an operation without details keeps the row counts."""
+    d, op = ev.get("details") or {}, ev.get("op_type")
+    if op == "impute" and d:
+        text = f"Effect: {d['cells_filled']} value(s) filled"
+        if d.get("mean_before") is not None and d.get("mean_after") is not None:
+            text += f"; the mean of {d['column']} moves from {d['mean_before']:.4g} to {d['mean_after']:.4g}"
+            if d.get("std_before") is not None and d.get("std_after") is not None:
+                text += f" and its spread from {d['std_before']:.4g} to {d['std_after']:.4g}"
+        text += "."
+        if d.get("fallback_cells"):
+            text += f" {d['fallback_cells']} cell(s) used the overall value because their group had no observed value."
+        return text
+    if op == "drop_column" and d:
+        return f"Effect: the column {d['column']} was removed."
+    if op == "normalize_text" and d:
+        return (f"Effect: {d['levels_before']} distinct values became {d['levels_after']}; "
+                f"{d['cells_changed']} value(s) changed.")
+    if op == "cast" and d.get("to_type") == "numeric":
+        return (f"Effect: {d['became_missing']} value(s) that were not numbers became missing." if d["became_missing"]
+                else "Effect: every value was converted.")
+    return f"Effect: {ev['rows_before']} to {ev['rows_after']} rows."
 
 
 def _operation_words(fix, params, columns_scanned) -> str:
@@ -186,7 +216,7 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
         if execution is not None and execution["chosen"] == "failed":
             parts.append(f"Failed: {_bare(execution['evidence'].get('failure_reason'))}.")
         elif execution is not None:
-            parts.append(f"Effect: {execution['evidence']['rows_before']} to {execution['evidence']['rows_after']} rows.")
+            parts.append(_effect(execution["evidence"]))
         lines.append(" ".join(parts))
         if approval is not None and approval["chosen"] == "reject":
             ev = fix["evidence"]

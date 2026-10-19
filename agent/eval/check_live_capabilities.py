@@ -185,7 +185,7 @@ def print_stage1_report(state, label):
     for e in entries:
         headings = ", ".join(s["heading"] for s in e["sections"])
         print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
-        if label in ("messy", "bundle"):  # M2.1: the bundle run's report also lists its tables
+        if label in ("messy", "bundle", "normalize"):  # M2.1: the bundle run's report also lists its tables
             for line in e["text"].split("\n"):
                 print(f"      | {line}")
 
@@ -330,7 +330,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
-    if label in ("messy", "bundle"):  # M2.1: the bundle run is the messy run with a second table
+    if label in ("messy", "bundle", "normalize"):  # M2.1: the bundle run is the messy run with a second table
         print_cleaning_lines(log)
         lineage = print_lineage(state, state_log)
         if lineage is not None:
@@ -445,6 +445,17 @@ def main():
                              "tenure": m_tenure, "total_spend": m_spend})
     df_messy = pd.concat([df_messy, df_messy.iloc[[5, 40, 120, 250]]], ignore_index=True)
 
+    # M2.3a step 2: inconsistent text (a trailing space and mixed case) and numbers stored as text
+    nrng = np.random.default_rng(23)
+    k = 200
+    n_region = np.array(["East", "east ", "West", "WEST"] * (k // 4))
+    n_spend = 50 + np.where(np.isin(n_region, ["West", "WEST"]), 10.0, 0.0) + nrng.normal(0, 5, k)
+    n_tenure = [f"{max(1.0, v):.1f}" for v in nrng.normal(24, 8, k)]
+    for i in (7, 51, 99, 150):
+        n_tenure[i] = "unknown"  # keeps the column text after a CSV round trip
+    df_normalize = pd.DataFrame({"customer_id": range(1, k + 1), "region": n_region, "tenure": n_tenure,
+                                 "total_spend": n_spend})
+
     # M2.1: a second, small table carried along with the messy data (unused until joins arrive in M2.3)
     df_regions = pd.DataFrame({"region": ["East", "West"], "manager": ["Ana", "Ben"]})
 
@@ -461,6 +472,8 @@ def main():
         ("messy", df_messy, "Did West customers spend more than East customers?"),
         # M2.1: the messy run as a two-file bundle; the messy table is the analysis table, regions is carried
         ("bundle", {"live_bundle": df_messy, "regions": df_regions}, "Did West customers spend more than East customers?"),
+        # M2.3a step 2: text normalization and a numeric conversion, then the same question and answers as messy
+        ("normalize", df_normalize, "Did West customers spend more than East customers?"),
         # M0.3: a two-group question on the three-region data (expected to be reconciled to multi-group)
         ("mismatch", df3, "Did West customers spend more than East customers?"),
         # M1.3b: the boundary gate is answered "run", so an exploratory regression follows the comparison
@@ -511,6 +524,10 @@ def main():
 
             outcome["problems"] += report_event_log(app, cfg, label, events, all_points, failed=False,
                                                     outcome=outcome)
+            if label == "normalize":  # M2.3a step 2: what the cleaning did to region and tenure
+                final = store.read(result["dataset"].storage_key)
+                print(f"   normalize [{label}]: region levels after cleaning={final['region'].nunique()} "
+                      f"tenure dtype after cleaning={final['tenure'].dtype}")
         except Exception as e:
             message = str(e)
             print(f"[{label}] FAILED: {type(e).__name__}: {message[:500]}")
