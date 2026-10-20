@@ -9,6 +9,7 @@ from core.nodes import (
     classify_node, clarify_node, reclassify_node, route_after_classify,
     make_profile_node, make_plan_stages_node, make_wrangle_propose_node, make_wrangle_review_node, route_after_wrangle_propose,
     make_describe_node, make_stage1_report_node, route_after_cleaning, make_diagnose_node, make_rediagnose_node,
+    route_after_rediagnose, make_replan_node,
     route_after_plan_stages, stage_plan_gate_node, route_after_stage_plan_gate,
     route_after_report, make_stage_gate_node, route_after_stage_gate, make_start_round_node, make_summary_node,
     make_draft_plan_node,
@@ -67,6 +68,10 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
       -> wrangle_propose (detect issues, one model call for fixes)
          -> if any issues: wrangle_review (checklist interrupt, then execute) -> rediagnose (M2.2: re-profile and the
             "after" snapshot when an operation changed the data)
+            (M2.4a: the Stage 1 loop: when the changed table has issues no earlier round proposed, another round runs:
+             rediagnose -> wrangle_propose -> wrangle_review -> rediagnose, at most MAX_STAGE1_ROUNDS rounds; the
+             answer can say finish; a round that applied nothing ends the loop)
+         -> replan (M2.4a: the stage plan recomputed from the table the loop left; planner.stage_replan)
       -> describe (M1.2: when the stage plan says run and the question is not descriptive; no model call)
       -> stage1_report (M1.4b: the Stage 1 report, composed by code from the records; shown at plan approval)
       -> draft_plan
@@ -111,6 +116,7 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     add_node("wrangle_review", make_wrangle_review_node(store))
     add_node("diagnose", make_diagnose_node(store))
     add_node("rediagnose", make_rediagnose_node(store))
+    add_node("replan", make_replan_node(store))
     add_node("describe", make_describe_node(store))
     add_node("stage1_report", make_stage1_report_node())
     if draft_fn is None:
@@ -140,7 +146,9 @@ def build_agent_graph(store: DatasetStore, *, classify_fn=None, draft_fn=None, p
     graph.add_conditional_edges("wrangle_propose", route_after_wrangle_propose,
                                 {"wrangle_review": "wrangle_review", "describe": "describe", "stage1_report": "stage1_report"})
     graph.add_edge("wrangle_review", "rediagnose")
-    graph.add_conditional_edges("rediagnose", route_after_cleaning,
+    graph.add_conditional_edges("rediagnose", route_after_rediagnose,
+                                {"wrangle_propose": "wrangle_propose", "replan": "replan"})
+    graph.add_conditional_edges("replan", route_after_cleaning,
                                 {"describe": "describe", "stage1_report": "stage1_report"})
     graph.add_edge("describe", "stage1_report")
     graph.add_edge("stage1_report", "draft_plan")

@@ -314,4 +314,4 @@ def test_a_wide_text_column_is_not_examined(fake_model, tmp_path, store):
 # --- (j) the registry ------------------------------------------------------------------------------------------------
 
 def test_the_registry_is_unchanged():
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)

@@ -268,7 +268,7 @@ def test_graph_edges(tmp_path):
 
 
 def test_registry():
-    assert len(registered_points()) == 31 and len(DECISION_NODES) == 17  # M2.2: diagnose and rediagnose
+    assert len(registered_points()) == 32 and len(DECISION_NODES) == 18  # M2.4a: replan (planner.stage_replan)
     assert DECISION_NODES["stage_gate"] == (STAGE_GATE_POINT,)
     assert DECISION_NODES["start_round"] == (ROUND_START_POINT,)
     assert NODE_STAGES["stage_gate"] == NODE_STAGES["start_round"] == "analysis"

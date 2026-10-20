@@ -528,7 +528,7 @@ def test_graph_edges_and_registry(tmp_path):
     assert edges[("summary", "__end__")] is False
     assert ("report", "__end__") not in edges and ("stage_gate", "__end__") not in edges
     assert "summary" in NON_CHOOSING_NODES and "summary" not in DECISION_NODES and NODE_STAGES["summary"] == "report"
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)  # M2.2: diagnose and rediagnose
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)
 
 
 def test_the_routers_go_to_the_summary():

@@ -535,4 +535,4 @@ def test_thirty_tables(fake_model, tmp_path, store):
 # --- (o) the registry --------------------------------------------------------------------------------------------
 
 def test_the_registry_is_unchanged():
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)

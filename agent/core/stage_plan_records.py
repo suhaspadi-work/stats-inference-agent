@@ -5,9 +5,11 @@ core.nodes. The plan comes from core.stage_plan.build_stage_plan.
   planner.stage_plan        which steps the run takes, with every step as a candidate
   planner.step.<step>       run or skip, one record per step (none for an unsupported plan)
   planner.stage_plan_approval  the human's answer at the stage-plan gate (M1.3a)
+  planner.stage_replan      the plan recomputed after the Stage 1 loop (M2.4a)
 """
 from __future__ import annotations
 
+from core.capabilities import is_numeric_dtype_name
 from core.decision_record import Candidate, DecisionRecord
 from core.stage_plan import plan_steps
 from core.stage_plan_gate import adjustable_steps, changed_steps
@@ -144,5 +146,35 @@ def stage_plan_approval_record(plan_before: dict, decision: dict, overrides: dic
             "exploratory_offers": [s["step"] for s in steps if s["state"] == "offered" and s["exploratory"]],
             "received_action": action,
             **extra_evidence,
+        },
+    )
+
+
+STAGE_REPLAN_POINT = "planner.stage_replan"
+
+
+def stage_replan_record(changed: list, rounds: int, ended_by, profile) -> DecisionRecord:
+    """
+    M2.4a: the stage plan recomputed after the Stage 1 loop (core.stage_plan.replan_stage_plan). A record of its own,
+    never another planner.stage_plan: a question's records start at the last planner.stage_plan. changed is
+    [{"step", "before_state", "after_state", "reason"}]; counts and step names only.
+    """
+    names = ", ".join(c["step"] for c in changed)
+    chosen = "changed" if changed else "unchanged"
+    reason_changed = f"the table Stage 1 left changes {names}" if changed else "the table Stage 1 left changes no step"
+    return DecisionRecord(
+        decision_point=STAGE_REPLAN_POINT, chosen=chosen, decided_by="code_rule",
+        candidates=(
+            Candidate(option="changed", eligible=bool(changed), reason=reason_changed),
+            Candidate(option="unchanged", eligible=not changed,
+                      reason="every step stays as planned" if not changed else f"not eligible: {reason_changed}"),
+        ),
+        rationale=(f"after {rounds} cleaning round(s) the plan was recomputed from the analysis table: "
+                   + (names + " changed" if changed else "no step changed")),
+        evidence={
+            "rounds": int(rounds), "ended_by": ended_by,
+            "changed_steps": [dict(c) for c in changed],
+            "column_count": int(profile.column_count),
+            "numeric_column_count": sum(1 for c in profile.columns if is_numeric_dtype_name(c.dtype)),
         },
     )

@@ -17,7 +17,7 @@ from core.regression import execute_regression, select_regression_method
 from dataclasses import asdict
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
-from core.detection import detect_all_issues
+from core.detection import detect_all_issues, issue_key
 from core.classifier import propose_wrangling_operations
 from core.operation import Operation, ApprovalStatus, WranglingRationale, AlternativeApproachConsidered
 from core.plan import UnaddressedIssue
@@ -52,14 +52,19 @@ from core.classification_records import (
 )
 from core.decision_log import log_update
 from core.draft_plan_records import draft_plan_records, PREDICTORS_POINT
-from core.cleaning_records import scan_record, fix_record, approval_record, execution_record
+from core.cleaning_records import (
+    EXECUTION_POINT as CLEAN_EXECUTION_POINT, NOT_CARRIED_FORWARD_TYPES, SCAN_POINT, scan_record, fix_record,
+    approval_record, execution_record,
+)
 from core.freeze_records import (
     PLAN_APPROVAL_POINT, edited_predictors_record, plan_approval_record, refused_plan_approval_record,
 )
 from core.routing_records import skipped_draft_record, route_record
 from core.selection_records import TEST_SELECTION_POINT, REGRESSION_METHOD_POINT
-from core.stage_plan import build_stage_plan, plan_steps
-from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, step_records
+from core.stage_plan import build_stage_plan, plan_steps, replan_stage_plan
+from core.stage_plan_records import stage_plan_approval_record, stage_plan_record, stage_replan_record, step_records
+from core import thresholds
+from core.wrangling import describe_operation
 from core.stage_plan_gate import apply_gate_decision, changed_steps, check_run_overrides, gate_needed, gate_payload
 from core.describe_records import describe_execution_record
 from core.quality import profile_numbers, quality_snapshot
@@ -241,9 +246,33 @@ def with_tables(state, new_dataset, derived: dict, store: DatasetStore) -> dict:
             "profiles": profiles}
 
 
-def _join_inputs(state) -> dict:
-    """The tables, profiles and analysis table detect_all_issues needs to find join issues (None without them)."""
-    return {"tables": state.get("tables"), "profiles": state.get("profiles"), "analysis": state.get("analysis_table")}
+def _question_log(state) -> list:
+    """The decision records of the current question: after the last planner.stage_plan (the whole log without one)."""
+    log = state.get("decision_log") or []
+    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
+    return list(log[start + 1:])
+
+
+def _applied_aggregate_joins(state) -> list:
+    """M2.4a: the evidence of the applied aggregate-join executions of the current question, in order."""
+    return [e["evidence"] for e in _question_log(state)
+            if e.get("decision_point") == CLEAN_EXECUTION_POINT and e.get("chosen") == "applied"
+            and (e.get("evidence") or {}).get("op_type") == "join"
+            and ((e.get("evidence") or {}).get("params") or {}).get("aggregate")]
+
+
+def _join_inputs(state, joins: bool = True) -> dict:
+    """The tables, profiles and analysis table detect_all_issues needs to find join issues (None without them). M2.4a:
+    and the applied aggregate joins of the current question (joins=False before the question's stage plan exists,
+    when the log after the last planner.stage_plan belongs to the previous question)."""
+    return {"tables": state.get("tables"), "profiles": state.get("profiles"), "analysis": state.get("analysis_table"),
+            "join_records": _applied_aggregate_joins(state) if joins else None}
+
+
+def _fresh_issues(state, issues) -> list:
+    """M2.4a: the issues not proposed in an earlier round of this question (by core.detection.issue_key)."""
+    seen = state.get("stage1_seen_keys") or []
+    return [i for i in issues if issue_key(i) not in seen]
 
 
 def _table_list(state) -> list:
@@ -264,13 +293,16 @@ def make_plan_stages_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     profile and the dataset are not changed. An unsupported question ends the run here (route_after_plan_stages).
     """
     def plan_stages_node(state: AgentState) -> dict:
-        issues = detect_all_issues(state["dataset"], state["profile"], store, **_join_inputs(state))
+        issues = detect_all_issues(state["dataset"], state["profile"], store, **_join_inputs(state, joins=False))
         plan = build_stage_plan(state["classification"], state["profile"], issues)
         records = (stage_plan_record(plan, state["classification"], issues, tables=_table_list(state)),
                    *step_records(plan))
         # M1.3b: a new question on the same thread starts outside any exploratory round.
         update = {"stage_plan": plan, "exploratory_round": False, "next_round": None, "stage_gate_refusal": None,
                   "stage_plan_refusal": None, "plan_approval_refusal": None, "reselect_after_edit": None,
+                  # M2.4a: the Stage 1 loop is per question; a rejected fix of an earlier question is not this one's
+                  "stage1_round": 0, "stage1_seen_keys": [], "stage1_finish": False, "stage1_finish_reason": None,
+                  "stage1_continue": False, "stage1_end_reason": None, "pending_unaddressed_issues": (),
                   **log_update(*records)}
         if plan["status"] == "unsupported":
             update["clarification_needed"] = plan["message"]
@@ -399,7 +431,8 @@ _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES = {"duplicate_rows"}
 # M2.3a step 2: the order the cleaning operations run in (an unknown issue type runs last); M2.3b: a join runs
 # after normalization and dedupe (so it matches on the cleaned keys) and before the missing-value fixes
 _EXECUTION_RANK = {"numeric_as_text": 0, "inconsistent_text": 1, "duplicate_rows": 2, "joinable_table": 3,
-                   "aggregatable_table": 3, "high_missingness": 4}  # M2.3b step 2: an aggregate join runs with the joins
+                   "aggregatable_table": 3, "high_missingness": 4,  # M2.3b step 2: an aggregate join runs with the joins
+                   "join_missing": 4}  # M2.4a: the unmatched rows of an aggregate join, with the missing values
 
 
 def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_operations) -> Callable[[AgentState], dict]:
@@ -426,10 +459,13 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         profile = state["profile"]
         autonomy_mode = state.get("autonomy_mode", "analyst")
 
-        issues = detect_all_issues(dataset, profile, store, **_join_inputs(state))
-        scan = scan_record(profile, issues)
+        # M2.4a: a round proposes only the issues no earlier round of this question proposed
+        round_number = (state.get("stage1_round") or 0) + 1
+        issues = _fresh_issues(state, detect_all_issues(dataset, profile, store, **_join_inputs(state)))
+        scan = scan_record(profile, issues, round=round_number)
         if not issues:
-            return {**with_dataset(state, dataset), "pending_wrangling": None, **log_update(scan)}
+            return {**with_dataset(state, dataset), "pending_wrangling": None, "stage1_round": round_number,
+                    **log_update(scan)}
 
         # M2.3a: the code enumerates every candidate fix (with its dry-run preview); the model only chooses
         df = store.read(dataset.storage_key)
@@ -476,7 +512,10 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
             "auto_indices": sorted(auto_indices),
             "fix_record_ids": [f.id for f in fixes],
             "candidates": candidates,
-        }, **log_update(scan, *fixes)}
+            "round": round_number,
+        }, "stage1_round": round_number,
+            "stage1_seen_keys": list(state.get("stage1_seen_keys") or []) + [issue_key(i) for i in issues],
+            **log_update(scan, *fixes)}
 
     return wrangle_propose_node
 
@@ -521,10 +560,19 @@ def make_diagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
 
 def _latest_before_snapshot(state):
     """The latest "before" snapshot record of the current question (after the last planner.stage_plan)."""
-    log = state.get("decision_log") or []
-    start = max((i for i, e in enumerate(log) if e.get("decision_point") == "planner.stage_plan"), default=-1)
-    return next((e for e in reversed(log[start + 1:])
+    return next((e for e in reversed(_question_log(state))
                  if e.get("decision_point") == QUALITY_SNAPSHOT_POINT and e.get("chosen") == "before"), None)
+
+
+def _first_before_snapshot(state):
+    """M2.4a: the first "before" snapshot record of the current question."""
+    return next((e for e in _question_log(state)
+                 if e.get("decision_point") == QUALITY_SNAPSHOT_POINT and e.get("chosen") == "before"), None)
+
+
+def _latest_snapshot(state):
+    """M2.4a: the latest quality snapshot record of the current question, before or after."""
+    return next((e for e in reversed(_question_log(state)) if e.get("decision_point") == QUALITY_SNAPSHOT_POINT), None)
 
 
 def make_rediagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -532,17 +580,79 @@ def make_rediagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     M2.2: after cleaning. When an operation changed the analysis table, re-profile it (mirrored through
     with_dataset, so profile is no longer the pre-cleaning one: G68) and take the "after" snapshot; when nothing
     changed, write nothing. No model call.
+    M2.4a: the comparison is with the latest snapshot of the question (the previous round's), and the node decides
+    whether another cleaning round runs: only when the changed table has issues no earlier round proposed, the review
+    did not end the loop and the round limit is not reached (stage1_continue, stage1_end_reason).
     """
     def rediagnose_node(state: AgentState) -> dict:
-        before = _latest_before_snapshot(state)
+        latest = _latest_snapshot(state)
         dataset = state["dataset"]
-        if before is None or before["evidence"].get("handle") == dataset.handle:
-            return {}
+        finish_reason = state.get("stage1_finish_reason") if state.get("stage1_finish") else None
+        if latest is None or latest["evidence"].get("handle") == dataset.handle:
+            return {"stage1_continue": False, "stage1_end_reason": finish_reason or "no_new_issues"}
         analysis = state.get("analysis_table") or dataset.name
         new_profile = profile_dataset(dataset, store=store)
         snapshot = quality_snapshot(dataset, store, analysis)
-        return {**with_dataset(state, dataset, new_profile), **log_update(quality_snapshot_record("after", snapshot))}
+        update = {**with_dataset(state, dataset, new_profile), **log_update(quality_snapshot_record("after", snapshot))}
+        if finish_reason is not None:
+            return {**update, "stage1_continue": False, "stage1_end_reason": finish_reason}
+        # the detection runs on the updated table and profile; the log already holds this round's joins
+        updated = {**state, **{k: v for k, v in update.items() if k != "decision_log"}}
+        fresh = _fresh_issues(state, detect_all_issues(dataset, new_profile, store, **_join_inputs(updated)))
+        if not fresh:
+            return {**update, "stage1_continue": False, "stage1_end_reason": "no_new_issues"}
+        if (state.get("stage1_round") or 1) >= thresholds.MAX_STAGE1_ROUNDS:  # read at call time
+            return {**update, "stage1_continue": False, "stage1_end_reason": "round_limit"}
+        return {**update, "stage1_continue": True, "stage1_end_reason": None}
     return rediagnose_node
+
+
+def route_after_rediagnose(state: AgentState) -> str:
+    """M2.4a: another cleaning round when rediagnose found new issues, otherwise the plan is recomputed."""
+    return "wrangle_propose" if state.get("stage1_continue") else "replan"
+
+
+def _changed_plan_steps(before: dict, after: dict) -> list:
+    """M2.4a: the steps whose state or run flag differ between two stage plans, in plan order (an evidence change, such
+    as describe's refreshed counts, is not a change)."""
+    old = {s["step"]: s for s in plan_steps(before)}
+    out = []
+    for s in plan_steps(after):
+        o = old.get(s["step"])
+        if o is None or any(o[k] != s[k] for k in ("state", "run")):
+            out.append({"step": s["step"], "before_state": o["state"] if o else None, "after_state": s["state"],
+                        "reason": s["reason"]})
+    return out
+
+
+def make_replan_node(store: DatasetStore) -> Callable[[AgentState], dict]:
+    """
+    M2.4a: after the Stage 1 loop, the stage plan recomputed from the analysis table as cleaning left it
+    (core.stage_plan.replan_stage_plan: the modeling step of a comparison and the describe step's counts; the user's
+    choices and every other step are kept; G77). A planner.stage_replan record (never another planner.stage_plan)
+    is written when the plan changed, when the loop ran more than one round, or when it ended by the user's finish or
+    the round limit; a change of evidence only (describe's counts) updates the plan silently, with no record. Nothing
+    changed and one round or fewer: no record, no update. No model call.
+    """
+    def replan_node(state: AgentState) -> dict:
+        plan = state.get("stage_plan")
+        if plan is None:
+            return {}
+        rounds = state.get("stage1_round") or 0
+        before = _first_before_snapshot(state)
+        unchanged = before is None or before["evidence"].get("handle") == state["dataset"].handle
+        if unchanged and rounds <= 1:
+            return {}
+        new_plan = replan_stage_plan(plan, state["profile"])
+        changed = _changed_plan_steps(plan, new_plan)
+        ended_by = state.get("stage1_end_reason")
+        update = {}
+        if new_plan != plan:  # a state or run change, or only refreshed evidence
+            update["stage_plan"] = new_plan
+        if changed or rounds > 1 or ended_by in ("finished", "round_limit"):
+            update.update(log_update(stage_replan_record(changed, rounds, ended_by, state["profile"])))
+        return update
+    return replan_node
 
 
 def make_describe_node(store: DatasetStore) -> Callable[[AgentState], dict]:
@@ -580,6 +690,36 @@ def _candidate_payload(operation, issue_candidates) -> dict:
                             "reason": c["reason"], "preview": c["preview"]} for c in issue_candidates or []]}
 
 
+def _executed_words(ev) -> str:
+    """M2.4a: the plain-words sentence of an applied operation, from its execution record's evidence."""
+    details = dict(ev.get("details") or {})
+    if ev.get("op_type") in ("dedupe", "filter") and ev.get("rows_before") is not None:
+        details["rows_removed"] = ev["rows_before"] - ev["rows_after"]
+    return describe_operation(ev.get("op_type"), ev.get("params") or {}, details)
+
+
+def _since_last_round(state, round_number) -> dict:
+    """
+    M2.4a: what the previous round did, for the review pause of round 2 and later: the plain words of the operations
+    it APPLIED (in order) and the numbers of the latest quality snapshot of this question (None without one).
+    """
+    applied, current = [], 1
+    for e in _question_log(state):
+        if e.get("decision_point") == SCAN_POINT:
+            current = (e.get("evidence") or {}).get("round") or 1
+        elif (e.get("decision_point") == CLEAN_EXECUTION_POINT and e.get("chosen") == "applied"
+              and current == round_number - 1):
+            applied.append(_executed_words(e["evidence"]))
+    snapshot = next((e for e in reversed(_question_log(state)) if e.get("decision_point") == QUALITY_SNAPSHOT_POINT),
+                    None)
+    quality = None
+    if snapshot is not None:
+        ev = snapshot["evidence"]
+        quality = {"rows": ev.get("rows"), "duplicate_rows": ev.get("duplicate_rows"),
+                   "columns_with_missing": ev.get("columns_with_missing")}
+    return {"round": round_number - 1, "applied": applied, "quality": quality}
+
+
 def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict]:
     """
     Present the proposed operations as a checklist interrupt, then execute
@@ -602,6 +742,8 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
         auto_indices = set(pending["auto_indices"])
 
         needs_review_indices = [i for i in range(len(operations)) if i not in auto_indices]
+        round_number = pending.get("round") or 1  # M2.4a
+        finish = False
 
         decisions_by_index = {}
         for i in auto_indices:
@@ -626,7 +768,11 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                     for i in needs_review_indices
                 ],
                 "allowed_decisions": ["approve", "edit", "reject"],
+                # M2.4a: the cleaning round; from round 2 on, what the previous round did
+                "round": round_number,
             }
+            if round_number >= 2:
+                review_payload["since_last_round"] = _since_last_round(state, round_number)
             if auto_indices:
                 review_payload["auto_approved_note"] = (
                     f"{len(auto_indices)} additional operation(s) were auto-approved under "
@@ -635,8 +781,10 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
             human_decisions = interrupt(review_payload)
             for decision in human_decisions.get("decisions", []):
                 decisions_by_index[decision["index"]] = decision
+            finish = bool(human_decisions.get("finish"))  # M2.4a: the user ends the Stage 1 loop
 
         current_dataset = dataset
+        applied = 0  # M2.4a: the operations this round applied
         derived = {}  # M2.3b: the tables a join made in this review, by name (their latest version)
         unaddressed = ()
         records = []
@@ -659,8 +807,9 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
             if action == "reject":
                 records.append(approval_record(op, issue, decision, None, fix_ids[idx]))
-                if issue.issue_type in ("joinable_table", "aggregatable_table"):
-                    continue  # M2.3b: a declined join (or aggregate join) is not a data-quality caveat
+                if issue.issue_type in NOT_CARRIED_FORWARD_TYPES:
+                    continue  # M2.3b: a declined join (or aggregate join) is not a data-quality caveat; M2.4a: nor
+                    # the declined fix of an aggregate join's unmatched rows (the Stage 1 report states it)
                 unaddressed += (UnaddressedIssue(
                     issue_type=issue.issue_type, description=issue.description,
                     proposed_operation=f"{op.op_type}({op.params})",
@@ -692,12 +841,17 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                 if current_dataset.name in derived:
                     derived[current_dataset.name] = current_dataset
             records.append(execution_record(finished_op, approval.id))
+            if finished_op.approval_status != ApprovalStatus.FAILED:
+                applied += 1
 
         mirror = (with_tables(state, current_dataset, derived, store) if derived
                   else with_dataset(state, current_dataset))
-        result = {**mirror, "pending_wrangling": None, **log_update(*records)}
-        if unaddressed:
-            result["pending_unaddressed_issues"] = unaddressed
+        # M2.4a: the loop ends when the answer says finish, or when this round applied nothing
+        finish_reason = "finished" if finish else "declined_all" if applied == 0 else None
+        result = {**mirror, "pending_wrangling": None, "stage1_finish": finish_reason is not None,
+                  "stage1_finish_reason": finish_reason, "stage1_applied": applied, **log_update(*records)}
+        if unaddressed:  # M2.4a: accumulated across the rounds of the question, never overwritten
+            result["pending_unaddressed_issues"] = tuple(state.get("pending_unaddressed_issues") or ()) + unaddressed
         return result
 
     return wrangle_review_node

@@ -197,7 +197,7 @@ def test_the_fix_record(fake_model, tmp_path, store):
     ev = fix["evidence"]
     assert (ev["candidate_id"], ev["what_was_run"], ev["preview"]) == ("impute_median", op["what_was_run"], op["impact_preview"])
     assert (ev["alternative_candidate_id"], ev["alternative_rejected_because"]) == ("leave_as_is", "it would bias the result")
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)
 
 
 # --- (h) the Stage 1 report of an imputation -----------------------------------------------------------------------------------

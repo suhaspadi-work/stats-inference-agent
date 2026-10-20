@@ -42,7 +42,14 @@ def _op_text(op_type: str, params: dict) -> str:
 
 # ------------------------------------------------------------------------- scan
 
-def scan_record(profile: ModelSafeView, issues) -> DecisionRecord:
+_JOIN_TYPES = ("joinable_table", "aggregatable_table")
+# M2.4a: the issue types whose rejection is not a data-quality caveat (a declined join; the unmatched rows of an
+# aggregate join, whose missing values are stated in the Stage 1 report)
+NOT_CARRIED_FORWARD_TYPES = _JOIN_TYPES + ("join_missing",)
+
+
+def scan_record(profile: ModelSafeView, issues, round=None) -> DecisionRecord:
+    """round (M2.4a): the cleaning round this scan belongs to; the key is left out when None."""
     duplicate_count = 0
     missing_columns = []
     parts = []
@@ -94,6 +101,10 @@ def scan_record(profile: ModelSafeView, issues) -> DecisionRecord:
             "aggregatable_tables": [{"table": i.evidence["right_table"], "left_key": i.evidence["left_key"],
                                      "right_key": i.evidence["right_key"]}
                                     for i in issues if i.issue_type == "aggregatable_table"],
+            # M2.4a: names only
+            "join_missing_tables": [{"table": i.evidence["right_table"], "columns": list(i.evidence["columns"])}
+                                    for i in issues if i.issue_type == "join_missing"],
+            **({"round": int(round)} if round is not None else {}),
         },
     )
 
@@ -158,7 +169,8 @@ def _fix_record_from_candidates(issue, operation: Operation, issue_index: int, c
             # M2.3b: the model's recommendation ("apply" unless it recommended not joining), and a join's names
             "recommendation": ev.get("recommendation", "apply"),
             **({k: issue.evidence[k] for k in ("right_table", "left_key", "right_key")}
-               if issue.issue_type in ("joinable_table", "aggregatable_table") else {}),
+               if issue.issue_type in _JOIN_TYPES else {}),
+            **({"right_table": issue.evidence["right_table"]} if issue.issue_type == "join_missing" else {}),  # M2.4a
         },
     )
 
@@ -232,8 +244,8 @@ def approval_record(operation: Operation, issue, decision: Optional[dict], auto_
     elif action == "reject":
         chosen, decided_by = "reject", "human"
         rationale = decision.get("reason") or "no reason given"
-        # M2.3b: a declined join is not a data-quality caveat, so it is not carried forward
-        evidence["carried_forward_as_unaddressed"] = issue.issue_type not in ("joinable_table", "aggregatable_table")
+        # M2.3b: a declined join is not a data-quality caveat, so it is not carried forward (M2.4a: nor join_missing)
+        evidence["carried_forward_as_unaddressed"] = issue.issue_type not in NOT_CARRIED_FORWARD_TYPES
     else:
         chosen, decided_by = "approve", "code_rule"
         rationale = f"action '{action}' is not one of approve, edit or reject; the node treats it as approval (G36)"

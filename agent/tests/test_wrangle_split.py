@@ -147,6 +147,7 @@ def test_pause_payload_has_the_old_shape(tmp_path, store):
             ],
         }],
         "allowed_decisions": ["approve", "edit", "reject"],
+        "round": 1,  # M2.4a: the cleaning round (round 1 has no since_last_round)
     }
 
 
@@ -253,7 +254,8 @@ def test_full_graph_wrangle_edges(tmp_path):
     assert edges[("wrangle_propose", "wrangle_review")] is True
     assert edges[("wrangle_propose", "stage1_report")] is True  # M1.4b: it was draft_plan
     assert edges[("wrangle_review", "rediagnose")] is False  # M2.2: then rediagnose routes on
-    assert edges[("rediagnose", "stage1_report")] is True  # M1.2: conditional, through route_after_cleaning; M1.4b; M2.2
+    assert edges[("replan", "stage1_report")] is True  # M1.2: conditional, through route_after_cleaning; M1.4b; M2.2; M2.4a: from replan
+    assert ("rediagnose", "stage1_report") not in edges and edges[("rediagnose", "replan")] is True  # M2.4a
     assert "wrangle" not in {node for pair in edges for node in pair}
 
 

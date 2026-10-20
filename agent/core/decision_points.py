@@ -29,7 +29,7 @@ from core.report_records import REPORT_NARRATIVE_POINT
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.routing_records import DRAFT_PLAN_POINT, ROUTE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
-from core.stage_plan_records import STAGE_PLAN_APPROVAL_POINT, STAGE_PLAN_POINT, STEP_POINTS
+from core.stage_plan_records import STAGE_PLAN_APPROVAL_POINT, STAGE_PLAN_POINT, STAGE_REPLAN_POINT, STEP_POINTS
 
 # Each choosing graph node and the decision points it may emit.
 DECISION_NODES: dict[str, tuple[str, ...]] = {
@@ -43,6 +43,7 @@ DECISION_NODES: dict[str, tuple[str, ...]] = {
     "wrangle_review": (CLEAN_APPROVAL_POINT, CLEAN_EXECUTION_POINT),
     "diagnose": (QUALITY_SNAPSHOT_POINT, LINKS_POINT),  # M2.2: the before snapshot; links with several tables
     "rediagnose": (QUALITY_SNAPSHOT_POINT,),  # M2.2: the after snapshot, when cleaning changed the data
+    "replan": (STAGE_REPLAN_POINT,),  # M2.4a: the stage plan recomputed after the Stage 1 loop
     "describe": (DESCRIBE_EXECUTION_POINT,),
     "draft_plan": (DRAFT_PLAN_POINT, OUTCOME_POINT, OUTCOME_TYPE_POINT, PREDICTORS_POINT, UNIT_POINT, ROUTE_POINT),
     "select_method": (TEST_SELECTION_POINT, REGRESSION_METHOD_POINT, ENCODING_POINT),
@@ -70,6 +71,7 @@ NODE_STAGES: dict[str, str] = {
     "classify": "intake", "clarify": "intake", "reclassify": "intake", "profile": "intake", "plan_stages": "intake",
     "stage_plan_gate": "intake",
     "wrangle_propose": "stage1", "wrangle_review": "stage1", "diagnose": "stage1", "rediagnose": "stage1",
+    "replan": "stage1",
     "describe": "stage1", "eda": "stage1",
     "stage1_report": "stage1",
     "draft_plan": "analysis", "select_method": "analysis", "freeze": "analysis", "execute": "analysis",

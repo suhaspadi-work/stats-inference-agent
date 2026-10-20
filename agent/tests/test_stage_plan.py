@@ -280,10 +280,16 @@ def test_plan_stages_node(tmp_path, store):
     assert "clarification_needed" not in update
     assert set(update) == {"stage_plan", "decision_log", "exploratory_round", "next_round",
                            "stage_gate_refusal", "stage_plan_refusal", "plan_approval_refusal",
-                           "reselect_after_edit"}  # M1.3b: the round flags are reset (step 2b, M1.3c: the refusals too)
+                           "reselect_after_edit",  # M1.3b: the round flags are reset (step 2b, M1.3c: the refusals too)
+                           # M2.4a: the Stage 1 loop is per question, and a rejected fix is not inherited
+                           "stage1_round", "stage1_seen_keys", "stage1_finish", "stage1_finish_reason",
+                           "stage1_continue", "stage1_end_reason", "pending_unaddressed_issues"}
     assert (update["exploratory_round"], update["next_round"], update["stage_gate_refusal"]) == (False, None, None)
     assert (update["stage_plan_refusal"], update["plan_approval_refusal"], update["reselect_after_edit"]) == (
         None, None, None)
+    assert ([update[k] for k in ("stage1_round", "stage1_seen_keys", "stage1_finish", "stage1_finish_reason",
+                                 "stage1_continue", "stage1_end_reason", "pending_unaddressed_issues")]
+            == [0, [], False, None, False, None, ()])  # M2.4a: the reset values
     assert {k: state[k] for k in ("dataset", "profile", "classification")} == before
     assert store.read(state["dataset"].storage_key).equals(stored)
 

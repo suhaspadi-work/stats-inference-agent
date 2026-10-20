@@ -11,6 +11,7 @@ Each step's state is planned (the question needs it), offered (the question does
 chooses; "run" is the default choice), unavailable (it would apply but is not built yet) or not_applicable.
 """
 from __future__ import annotations
+import copy
 
 from core.capabilities import is_numeric_dtype_name
 from core.model_safe_view import ModelSafeView
@@ -109,6 +110,24 @@ def build_stage_plan(classification: ClassificationDecision, profile: ModelSafeV
             {"stage": 3, "name": "data modeling", "steps": [modeling]},
         ],
     }
+
+
+def replan_stage_plan(plan: dict, profile: ModelSafeView) -> dict:
+    """
+    M2.4a: the stage plan recomputed from the analysis table as Stage 1 left it: a NEW plan (the input is not mutated)
+    in which only the steps that depend on the table change: the modeling step of a comparison question (recomputed;
+    its run flag is kept) and the describe step's row and column counts. Every other step, every run flag the user
+    chose and the plan's other fields are kept.
+    """
+    new_plan = copy.deepcopy(plan)
+    for stage in new_plan["stages"]:
+        for i, step in enumerate(stage["steps"]):
+            if step["step"] == "describe":
+                step["evidence"] = {**step["evidence"], "row_count": profile.row_count,
+                                    "column_count": profile.column_count}
+            elif step["step"] == "modeling" and new_plan.get("question_type") in _COMPARISON_TYPES:
+                stage["steps"][i] = {**_modeling_for_comparison(profile), "run": step["run"]}
+    return new_plan
 
 
 def plan_steps(plan: dict) -> list[dict]:

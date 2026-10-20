@@ -405,5 +405,5 @@ def test_through_the_graph(texts, chosen, monkeypatch, tmp_path, store):
 # --- registry -----------------------------------------------------------------------------------------------------------------------
 
 def test_registry():
-    assert len(registered_points()) == 31 and len(DECISION_NODES) == 17  # M2.2: diagnose and rediagnose
+    assert len(registered_points()) == 32 and len(DECISION_NODES) == 18  # M2.4a: replan (planner.stage_replan)
     assert DECISION_NODES["report"] == (REPORT_NARRATIVE_POINT,) and "report" not in NON_CHOOSING_NODES

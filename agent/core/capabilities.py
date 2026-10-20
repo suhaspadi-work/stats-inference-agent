@@ -352,6 +352,7 @@ OPERATIONS = {op.name: op for op in (
     _operation("impute", wrangling.transform_impute, wrangling.execute_impute),
     _operation("normalize_text", wrangling.transform_normalize_text, wrangling.execute_normalize_text),
     _operation("join", wrangling.transform_join, wrangling.execute_join, multi_input=True),
+    _operation("fill_unmatched", wrangling.transform_fill_unmatched, wrangling.execute_fill_unmatched),  # M2.4a
 )}
 
 

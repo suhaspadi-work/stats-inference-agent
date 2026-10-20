@@ -179,7 +179,8 @@ def test_default_graph_has_the_same_nodes(tmp_path):
                      "stage_gate", "start_round",
                      "stage1_report",  # M1.4b: the Stage 1 report, between cleaning or describe and draft_plan
                      "summary",  # M1.4b step 2b: the overall summary after the last report
-                     "diagnose", "rediagnose"}  # M2.2: the quality snapshots before and after cleaning
+                     "diagnose", "rediagnose",  # M2.2: the quality snapshots before and after cleaning
+                     "replan"}  # M2.4a: the stage plan recomputed after the Stage 1 loop
 
 
 # ------------------------------------------------------------------ negative tests
@@ -495,6 +496,19 @@ def scenario_runs(tmp_path_factory):
         {"decisions": [{"index": 0, "action": "reject", "reason": "the question does not need this table"}]},
         {"action": "approve"}])
 
+    # S13 (M2.4a): a two-column orders table and a customers table joined on customer_id: the join adds columns, so
+    # the modeling step changes from not_applicable to offered and replan writes planner.stage_replan
+    orders_rng = np.random.default_rng(13)
+    s13_orders = _dataset(pd.DataFrame({"customer_id": orders_rng.integers(1, 41, 120),
+                                        "total_spend": orders_rng.normal(50, 5, 120)}), tmp, store, "s13_orders")
+    s13_customers = _dataset(pd.DataFrame({"customer_id": range(1, 41), "region": ["East", "West"] * 20,
+                                           "tier": ["basic", "basic", "plus", "plus"] * 10}), tmp, store, "s13_customers")
+    app = build_agent_graph(store, classify_fn=confident(QuestionType.TWO_GROUP_COMPARISON),
+                            draft_fn=fake_draft(["region"]), propose_fn=fake_propose)
+    runs["S13"] = drive(app, {"request_text": "Did West spend more?", "session_id": "session-abc",
+                              "datasets": [s13_orders, s13_customers]}, "s13", [
+        {"decisions": [{"index": 0, "action": "approve"}]}, {"action": "approve"}])
+
     return runs, emitted
 
 
@@ -519,6 +533,7 @@ EXPECTED_PAUSES = {
     "S10": [GATE],
     "S11": [GATE, "plan_approval", "stage_gate", "plan_approval"],  # M1.3b: the exploratory round
     "S12": [GATE, "wrangling_approval", "plan_approval"],  # M2.2: a two-table bundle; M2.3b: its join proposal
+    "S13": [GATE, "wrangling_approval", "plan_approval"],  # M2.4a: an approved join that changes the modeling step
 }
 ENDS_WITHOUT_STOP = {"S3", "S8", "S10", "S11"}  # runs that end at END rather than at the stop before report
 
@@ -562,6 +577,12 @@ def test_each_node_emits_exactly_its_declared_points(emitted_by_node):
     assert "intake.question_type" in emitted_by_node["reclassify"]
 
 
+def test_replan_is_declared_and_the_registry_counts():
+    # M2.4a: replan emits only planner.stage_replan; join_missing adds no decision point
+    assert DECISION_NODES["replan"] == ("planner.stage_replan",)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)
+
+
 def test_execute_logs_a_record_only_for_multi_group(scenario_logs):
     execute_points = set(DECISION_NODES["execute"])
     counts = {name: sum(e["decision_point"] in execute_points for e in scenario_logs[name][0]["decision_log"])
@@ -599,5 +620,13 @@ def test_scenario_specifics(scenario_logs):
     (s12_approval,) = [e for e in s12 if e["decision_point"] == "stage1.clean.approval"]
     assert s12_approval["chosen"] == "reject" and s12_approval["evidence"]["carried_forward_as_unaddressed"] is False
     assert "stage1.clean.execution" not in points("S12")
+    # M2.4a: S13's join adds columns, so replan records the modeling step's change (one record, after the after
+    # snapshot); join_missing reuses the fix, approval and execution points (no new point)
+    s13 = points("S13")
+    assert s13.count("planner.stage_replan") == 1 and s13.count("planner.stage_plan") == 1
+    assert s13.index("planner.stage_replan") == s13.index("stage1.quality.snapshot", s13.index("stage1.clean.execution")) + 1
+    (s13_replan,) = [e for e in scenario_logs["S13"][0]["decision_log"] if e["decision_point"] == "planner.stage_replan"]
+    assert s13_replan["chosen"] == "changed" and [c["step"] for c in s13_replan["evidence"]["changed_steps"]] == [
+        "modeling"]
     s10_route = scenario_logs["S10"][0]["decision_log"][-1]
     assert (s10_route["decision_point"], s10_route["chosen"]) == ("planner.route", "unsupported")

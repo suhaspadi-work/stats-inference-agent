@@ -79,8 +79,10 @@ def test_only_the_new_link_is_proposed(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"orders": _orders(customers), "customers": customers, "regions": REGIONS})
     app = _app(store)
-    first, pauses = _run(app, _state(tables), "b")
-    assert _proposed(pauses) == ["customers"]  # the orders have no region yet, so regions has no link
+    # M2.4a: round 2 of the first question proposes regions (the joined table gained region); it is rejected there
+    first, pauses = _run(app, _state(tables), "b", wrangling_approval=_reject_table("regions"))
+    assert [p["round"] for p in pauses if p["type"] == "wrangling_approval"] == [1, 2]
+    assert _proposed(pauses) == ["customers", "regions"]  # the orders have no region yet, so round 1 has no link
     second, pauses = _run(app, _again(first), "b", wrangling_approval=_reject_table("regions"))
     assert _proposed(pauses) == ["regions"]  # region came from customers; customers itself is not proposed again
 
@@ -94,8 +96,10 @@ def test_a_chain_of_joins(fake_model, tmp_path, store):
     tables = _bundle(tmp_path, store, {"orders": orders, "customers": customers, "products": products,
                                        "regions": REGIONS})
     app = _app(store)
-    first, pauses = _run(app, _state(tables), "c")
-    assert _proposed(pauses) == ["customers", "products"] and first["analysis_table"] == "orders_products"
+    # M2.4a: round 2 of the first question proposes regions (the region column came with customers); rejected there
+    first, pauses = _run(app, _state(tables), "c", wrangling_approval=_reject_table("regions"))
+    assert [p["round"] for p in pauses if p["type"] == "wrangling_approval"] == [1, 2]
+    assert _proposed(pauses) == ["customers", "products", "regions"] and first["analysis_table"] == "orders_products"
     assert first["dataset"].parents == ("orders_customers@v1", "products@v1")
     second, pauses = _run(app, _again(first), "c", wrangling_approval=_reject_table("regions"))
     assert _proposed(pauses) == ["regions"]  # neither customers nor products, but the fourth table still

@@ -269,6 +269,7 @@ def transform_rename(df: pd.DataFrame, params: dict):
 
 
 def transform_filter(df: pd.DataFrame, params: dict):
+    # M2.4a: an optional "unmatched_of" (a carried table name) only words the operation; the filter ignores it
     column, condition, value = params["column"], params["condition"], params.get("value")
     if column not in df.columns:
         raise ValueError(f"Column not found: {column}")
@@ -404,6 +405,36 @@ def transform_impute(df: pd.DataFrame, params: dict):
     return new_df, details, warnings
 
 
+def transform_fill_unmatched(df: pd.DataFrame, params: dict):
+    """
+    M2.4a: fill the given (sum) columns with params["value"] for the rows of an aggregate join whose key has no rows
+    in the carried table (the count column is 0): an empty sum is 0. A row with a count above 0 is never touched, so a
+    sum that is missing because all its values were missing stays missing. The row count never changes.
+    """
+    count_column, columns, value = params.get("count_column"), list(params.get("columns") or []), params.get("value", 0)
+    for column in columns:
+        if column not in df.columns:
+            raise ValueError(f"Cannot fill — column not found: {column}")
+        if not _is_numeric(df[column]):
+            raise ValueError(f"Cannot fill — {column} is not numeric.")
+    if count_column not in df.columns:
+        raise ValueError(f"Cannot fill — column not found: {count_column}")
+    if not _is_numeric(df[count_column]):
+        raise ValueError(f"Cannot fill — {count_column} is not numeric.")
+    new_df = df.copy()
+    unmatched = df[count_column] == 0
+    filled_rows = pd.Series(False, index=df.index)
+    cells = 0
+    for column in columns:
+        fill = unmatched & df[column].isna()
+        new_df.loc[fill, column] = value
+        filled_rows |= fill
+        cells += int(fill.sum())
+    details = {"count_column": str(count_column), "columns": [str(c) for c in columns], "value": value,
+               "rows_filled": int(filled_rows.sum()), "cells_filled": cells}
+    return new_df, details, ()
+
+
 # --- plain words ------------------------------------------------------------------------------------------------------
 
 _FILTER_WORDS = {"equals": "equals {value}", "not_equals": "does not equal {value}",
@@ -427,6 +458,9 @@ def describe_operation(op_type, params, details=None) -> str:
         scope = "all columns" if not subset else "comparing " + ", ".join(str(c) for c in subset)
         count = f"{removed} " if removed is not None else ""
         return f"Remove {count}exact duplicate rows ({scope})."
+    if op_type == "filter" and params.get("unmatched_of"):  # M2.4a: the unmatched rows of an aggregate join
+        text = f"Remove the rows that have no rows in {params['unmatched_of']}"
+        return text + (f" ({removed} removed)." if removed is not None else ".")
     if op_type == "filter":
         words = _FILTER_WORDS.get(params.get("condition"), str(params.get("condition")))
         text = f"Keep only rows where {params.get('column')} " + words.format(value=params.get("value"))
@@ -491,6 +525,14 @@ def describe_operation(op_type, params, details=None) -> str:
             shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
             text += f" Adds {len(names)} column(s): {shown}." if names else " Adds no column."
         return text
+    if op_type == "fill_unmatched":  # M2.4a: without details no column name (the proposer sees these words)
+        right = params.get("right_table")
+        if not details:
+            return f"Fill the empty sums with zero for the rows that have no rows in {right}."
+        columns = details.get("columns", params.get("columns") or [])
+        text = f"Fill {', '.join(str(c) for c in columns)} with zero for the rows that have no rows in {right}"
+        cells = details.get("cells_filled")
+        return text + (f" ({cells} value(s) filled)." if cells is not None else ".")
     if op_type == "rename":
         mapping = params.get("mapping") or {}
         return "Rename the columns: " + ", ".join(f"{a} to {b}" for a, b in mapping.items()) + "."
@@ -552,6 +594,10 @@ def execute_impute(dataset: Dataset, store: DatasetStore, operation: Operation) 
 
 def execute_normalize_text(dataset: Dataset, store: DatasetStore, operation: Operation) -> tuple[Dataset, Operation]:
     return _run(dataset, store, operation, transform_normalize_text)
+
+
+def execute_fill_unmatched(dataset: Dataset, store: DatasetStore, operation: Operation) -> tuple[Dataset, Operation]:
+    return _run(dataset, store, operation, transform_fill_unmatched)
 
 
 def execute_join(dataset: Dataset, store: DatasetStore, operation: Operation, tables: dict) -> tuple[Dataset, Operation]:

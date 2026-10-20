@@ -26,7 +26,8 @@ from core.report_records import REPORT_NARRATIVE_POINT
 from core.wrangling import describe_operation
 from core.round_records import ROUND_START_POINT, STAGE_GATE_POINT
 from core.selection_records import ENCODING_POINT, REGRESSION_METHOD_POINT, TEST_SELECTION_POINT
-from core.stage_plan_records import STAGE_PLAN_POINT
+from core.stage_plan_records import STAGE_PLAN_POINT, STAGE_REPLAN_POINT
+from core import thresholds
 
 STAGE1_TITLE = "Stage 1: prepare and describe"
 
@@ -69,7 +70,15 @@ def _checked(scan) -> str:
     if scan is None:
         return "No data-quality scan was recorded."
     ev = scan["evidence"]
-    lines = [f"Checked {ev['rows']} rows and {ev['columns_scanned']} columns."]
+    lines = [f"Checked {ev['rows']} rows and {ev['columns_scanned']} columns.", *_issue_lines(ev)]
+    if len(lines) == 1:
+        lines.append("No data-quality issues found.")
+    return "\n".join(lines)
+
+
+def _issue_lines(ev) -> list:
+    """The issue lines of a scan record's evidence (the Checked wording, without its first line)."""
+    lines = []
     duplicates = ev.get("duplicate_row_count") or 0
     if duplicates > 0:
         lines.append(f"Found {duplicates} exact duplicate rows.")
@@ -86,8 +95,31 @@ def _checked(scan) -> str:
     for t in ev.get("aggregatable_tables") or []:  # M2.3b step 2
         lines.append(f"{t['table']}: has several rows for each {t['left_key']}; it can be summarized and joined to the "
                      "analysis table.")
-    if len(lines) == 1:
-        lines.append("No data-quality issues found.")
+    return lines
+
+
+def _end_words(ended_by):
+    """M2.4a: how the Stage 1 loop ended, in words (the round limit is read at call time); None for an unknown end."""
+    return {"no_new_issues": "no new issues were found.", "finished": "you finished Stage 1.",
+            "declined_all": "you declined every proposal of the last round.",
+            "round_limit": f"the limit of {thresholds.MAX_STAGE1_ROUNDS} rounds was reached."}.get(ended_by)
+
+
+def _rounds_section(scans: list, replan) -> str:
+    """M2.4a: the Rounds section: what each later round found, how Stage 1 ended and what the replan changed."""
+    lines = []
+    for scan in scans[1:]:
+        ev = scan["evidence"]
+        found = _issue_lines(ev) + [
+            f"{t['table']}: the columns the join added are missing for the rows that have no rows in {t['table']}."
+            for t in ev.get("join_missing_tables") or []]
+        lines.append(f"Round {ev.get('round') or len(lines) + 2} found: " + (" ".join(found) or "no new issues."))
+    if replan is not None:
+        ev = replan["evidence"]
+        if _end_words(ev.get("ended_by")) is not None:
+            lines.append(f"Stage 1 ended after {ev['rounds']} round(s): {_end_words(ev['ended_by'])}")
+        for c in ev.get("changed_steps") or []:
+            lines.append(f"The plan was updated: {c['step']} is now {c['after_state']}.")
     return "\n".join(lines)
 
 
@@ -163,6 +195,8 @@ def _effect(ev) -> str:
     if op == "cast" and d.get("to_type") == "numeric":
         return (f"Effect: {d['became_missing']} value(s) that were not numbers became missing." if d["became_missing"]
                 else "Effect: every value was converted.")
+    if op == "fill_unmatched" and d:  # M2.4a
+        return f"Effect: {d['rows_filled']} row(s) had their sums filled with 0 ({d['cells_filled']} value(s))."
     if op == "join" and d:  # M2.3b
         added = len(d.get("columns_added") or [])
         if d.get("how") == "inner":
@@ -222,6 +256,11 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
     lines, left = [], []
     for k, fix in enumerate(fixes, start=1):
         used.add(fix["id"])
+        # M2.4a: an operation of a later cleaning round is tagged with its round (the nearest preceding scan's)
+        at = next(i for i, r in enumerate(records) if r is fix)
+        scan = next((r for r in reversed(records[:at]) if r.get("decision_point") == SCAN_POINT), None)
+        round_number = ((scan or {}).get("evidence") or {}).get("round") or 1
+        number = f"{k}. (round {round_number}) " if round_number >= 2 else f"{k}. "
         approval = next((r for r in records if r.get("decision_point") == APPROVAL_POINT
                          and r["evidence"].get("fix_record_id") == fix["id"]), None)
         execution = None
@@ -234,7 +273,7 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
         # the params that ran (after an edit) when the operation ran, otherwise the proposed ones
         params = (execution or fix)["evidence"].get("params") or {}
         ran = execution if execution is not None and execution["chosen"] == "applied" else None
-        parts = [f"{k}. {_operation_words(fix, params, columns_scanned, ran)}.",
+        parts = [f"{number}{_operation_words(fix, params, columns_scanned, ran)}.",
                  f"{_why_label(fix)}: {_bare(fix['rationale'])}."]
         fix_ev = fix.get("evidence") or {}
         joined = fix_ev.get("issue_type") in ("joinable_table", "aggregatable_table")  # M2.3b (step 2)
@@ -264,6 +303,11 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
             else:
                 left.append(f"{fix_ev.get('right_table')} was not joined. The model {advice}: {_bare(fix['rationale'])}. "
                             f"You rejected the join{given}.")
+        elif approval is not None and approval["chosen"] == "reject" and fix_ev.get("issue_type") == "join_missing":
+            table, reason = fix_ev.get("right_table"), approval["rationale"]  # M2.4a: not a data-quality caveat
+            given = f": {_bare(reason)}" if reason and reason != "no reason given" else " without giving a reason"
+            left.append(f"{table}: the columns the join added stay missing for the rows that have no rows in {table}. "
+                        f"You rejected the fix{given}.")
         elif approval is not None and approval["chosen"] == "reject":
             ev = fix["evidence"]
             about = ev.get("description") or ", ".join(ev.get("affected_columns") or [])
@@ -394,11 +438,17 @@ def _quality_record(records, label):
                  if r.get("decision_point") == QUALITY_SNAPSHOT_POINT and r.get("chosen") == label), None)
 
 
+def _first_quality_record(records, label):
+    return next((r for r in records
+                 if r.get("decision_point") == QUALITY_SNAPSHOT_POINT and r.get("chosen") == label), None)
+
+
 def stage1_report(records: list, stage_plan: dict) -> dict:
     """{"sections": [{"heading", "text"}], "source_records": [ids]} from the records of this question only."""
     records = copy.deepcopy(list(records))
     used = set()
-    scan = _latest(records, SCAN_POINT)
+    scans = [r for r in records if r.get("decision_point") == SCAN_POINT]
+    scan = scans[0] if scans else None  # M2.4a: Checked is the FIRST scan; later rounds are in Rounds
     if scan is not None:
         used.add(scan["id"])
     sections = [{"heading": "Checked", "text": _checked(scan)}]
@@ -407,7 +457,8 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if tables_text is not None:
         sections.append({"heading": "Tables", "text": tables_text})
         used.add(plan_record["id"])
-    before, after = _quality_record(records, "before"), _quality_record(records, "after")
+    # M2.4a: the first before and the last after snapshot of the question
+    before, after = _first_quality_record(records, "before"), _quality_record(records, "after")
     if after is not None and before is not None and after["evidence"].get("handle") == before["evidence"].get("handle"):
         after = None
     if before is not None:
@@ -420,6 +471,10 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if links is not None and (links["evidence"].get("candidates_total") or several):
         sections.append({"heading": "Links between tables", "text": _links_section(links)})
         used.add(links["id"])
+    replan = _latest(records, STAGE_REPLAN_POINT)
+    if len(scans) > 1 or replan is not None:  # M2.4a
+        sections.append({"heading": "Rounds", "text": _rounds_section(scans, replan)})
+        used.update(r["id"] for r in scans[1:] + ([replan] if replan is not None else []))
     columns_scanned = scan["evidence"].get("columns_scanned") if scan is not None else None
     changed, left = _changed(records, used, columns_scanned)
     sections.append({"heading": "Changed", "text": changed})

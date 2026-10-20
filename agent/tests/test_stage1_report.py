@@ -163,10 +163,13 @@ def test_checked_without_a_scan_record():
     assert _section(composed, "Changed") == "No changes were proposed."
 
 
-def test_the_latest_scan_is_used():
+def test_the_first_scan_is_used_for_checked():
+    # M2.4a: Checked reads the FIRST scan of the question (it was the latest); the later scan appears under Rounds
     old, new = scan_record(_profile(10, 2), []), scan_record(_profile(), [_dup_issue()])
     composed = stage1_report(_dicts(old, new), COMPARISON)
-    assert _section(composed, "Checked").startswith("Checked 300 rows") and composed["source_records"] == [new.id]
+    assert _section(composed, "Checked") == "Checked 10 rows and 2 columns.\nNo data-quality issues found."
+    assert _section(composed, "Rounds") == "Round 2 found: Found 4 exact duplicate rows."
+    assert composed["source_records"] == [old.id, new.id]
 
 
 # --- Changed ----------------------------------------------------------------------------------------------------------
@@ -392,10 +395,14 @@ def test_sections_come_in_order():
 def test_source_records_are_the_used_ids_in_log_order():
     log = _full_log()
     unrelated = {"decision_point": "planner.outcome", "id": "unrelated", "evidence": {}}
-    mixed = [log[0], unrelated, *log[1:], copy.deepcopy(log[0])]  # the scan again at the end: the latest is used
+    # M2.4a: the first scan is used for Checked; the later scan is a source record only because Rounds is shown
+    assert "Rounds" not in _headings(stage1_report(log, COMPARISON))
+    assert stage1_report(log, COMPARISON)["source_records"] == [r["id"] for r in log]
+    mixed = [log[0], unrelated, *log[1:], copy.deepcopy(log[0])]  # the scan again at the end: a later round
     mixed[-1]["id"] = "later-scan"
     composed = stage1_report(mixed, COMPARISON)
-    expected = [r["id"] for r in log[1:]] + ["later-scan"]
+    assert "Rounds" in _headings(composed)
+    expected = [r["id"] for r in log] + ["later-scan"]
     assert composed["source_records"] == expected
     assert len(set(composed["source_records"])) == len(composed["source_records"])
 
@@ -650,11 +657,13 @@ def test_graph_edges_and_registry(tmp_path):
              for e in build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().edges}
     for target in ("wrangle_review", "describe", "stage1_report"):
         assert edges[("wrangle_propose", target)] is True, target
-    assert edges[("rediagnose", "describe")] is True and edges[("rediagnose", "stage1_report")] is True  # M2.2
+    assert edges[("rediagnose", "wrangle_propose")] is True and edges[("rediagnose", "replan")] is True  # M2.4a
+    assert edges[("replan", "describe")] is True and edges[("replan", "stage1_report")] is True  # M2.4a: was rediagnose
+    assert ("rediagnose", "describe") not in edges and ("rediagnose", "stage1_report") not in edges  # M2.4a
     assert edges[("wrangle_review", "rediagnose")] is False  # M2.2: the after snapshot follows cleaning
     assert edges[("describe", "stage1_report")] is False
     assert edges[("stage1_report", "draft_plan")] is False
     assert ("describe", "draft_plan") not in edges
     assert "stage1_report" in NON_CHOOSING_NODES and "stage1_report" not in DECISION_NODES
     assert NODE_STAGES["stage1_report"] == "stage1"
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)  # M2.2: diagnose and rediagnose
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)

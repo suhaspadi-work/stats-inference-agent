@@ -326,16 +326,18 @@ def test_graph_edges(tmp_path):
     assert edges[("plan_stages", "diagnose")] is True and edges[("stage_plan_gate", "diagnose")] is True
     assert edges[("diagnose", "wrangle_propose")] is False
     assert edges[("wrangle_review", "rediagnose")] is False
-    assert edges[("rediagnose", "describe")] is True and edges[("rediagnose", "stage1_report")] is True
+    assert edges[("rediagnose", "wrangle_propose")] is True and edges[("rediagnose", "replan")] is True  # M2.4a
+    assert edges[("replan", "describe")] is True and edges[("replan", "stage1_report")] is True  # M2.4a: was rediagnose
+    assert ("rediagnose", "describe") not in edges and ("rediagnose", "stage1_report") not in edges  # M2.4a
     assert ("wrangle_review", "describe") not in edges and ("wrangle_review", "stage1_report") not in edges
     for target in ("wrangle_review", "describe", "stage1_report"):
         assert edges[("wrangle_propose", target)] is True, target
 
 
 def test_the_registry(tmp_path):
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)
     assert DECISION_NODES["diagnose"] == (QUALITY_SNAPSHOT_POINT, LINKS_POINT)
     assert DECISION_NODES["rediagnose"] == (QUALITY_SNAPSHOT_POINT,)
     assert NODE_STAGES["diagnose"] == NODE_STAGES["rediagnose"] == "stage1"
     nodes = build_agent_graph(LocalDiskStore(base_dir=tmp_path)).get_graph().nodes
-    assert len([n for n in nodes if not n.startswith("__")]) == 21
+    assert len([n for n in nodes if not n.startswith("__")]) == 22  # M2.4a: replan

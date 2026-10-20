@@ -38,6 +38,7 @@ EXPECTED_STAGES = {
     "report": "report",
     "summary": "report",  # M1.4b step 2b
     "diagnose": "stage1", "rediagnose": "stage1",  # M2.2: the quality snapshots
+    "replan": "stage1",  # M2.4a: the stage plan recomputed after the Stage 1 loop
 }
 RUNNABLE = (QuestionType.TWO_GROUP_COMPARISON, QuestionType.AB_TEST, QuestionType.MULTI_GROUP_COMPARISON,
             QuestionType.DRIVER_ANALYSIS)
@@ -165,8 +166,10 @@ def test_graph_edges(tmp_path):
         assert edges[("wrangle_propose", target)] is True, target
     # M2.2: wrangle_review -> rediagnose (plain), and rediagnose routes on with route_after_cleaning
     assert edges[("wrangle_review", "rediagnose")] is False
-    assert edges[("rediagnose", "describe")] is True
-    assert edges[("rediagnose", "stage1_report")] is True  # M1.4b
+    assert edges[("replan", "describe")] is True  # M2.4a: replan routes on with route_after_cleaning
+    assert edges[("replan", "stage1_report")] is True  # M1.4b; M2.4a: from replan
+    assert edges[("rediagnose", "wrangle_propose")] is True and edges[("rediagnose", "replan")] is True  # M2.4a
+    assert ("rediagnose", "describe") not in edges and ("rediagnose", "stage1_report") not in edges  # M2.4a
     assert edges[("describe", "stage1_report")] is False  # M1.4b: describe -> stage1_report -> draft_plan
 
 

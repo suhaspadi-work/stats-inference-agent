@@ -20,7 +20,7 @@ class CandidateIssue:
     WHETHER an issue exists, using concrete thresholds against real numbers.
     """
     issue_type: str                      # "duplicate_rows" | "high_missingness" | "inconsistent_text" | "numeric_as_text"
-                                         # | "joinable_table" | "aggregatable_table" (M2.3b)
+                                         # | "joinable_table" | "aggregatable_table" (M2.3b) | "join_missing" (M2.4a)
     description: str
     affected_columns: tuple[str, ...]
     evidence: dict = field(default_factory=dict)
@@ -227,18 +227,80 @@ def detect_join_issues(analysis_name, tables: dict, profiles: dict, store: Datas
     return issues
 
 
+def issue_key(issue: CandidateIssue) -> list:
+    """M2.4a: what makes an issue the same issue in a later round (JSON-clean): its type, its sorted affected columns
+    and its carried table (None for an issue of the analysis table alone). A join_missing issue is keyed by its table
+    only, so a join's structural missing values are offered once per question whatever columns are still missing."""
+    if issue.issue_type == "join_missing":
+        return ["join_missing", [], issue.evidence.get("right_table")]
+    return [issue.issue_type, sorted(str(c) for c in issue.affected_columns), issue.evidence.get("right_table")]
+
+
+def _aggregate_joins(join_records) -> list:
+    """The applied aggregate joins among join_records: (params, details, count_column, the added non-count columns)."""
+    out = []
+    for ev in join_records or []:
+        params, details = ev.get("params") or {}, ev.get("details") or {}
+        if ev.get("op_type") != "join" or not params.get("aggregate"):
+            continue
+        count_column = (details.get("aggregate") or {}).get("count_column")
+        columns = [str(c) for c in details.get("columns_added") or [] if str(c) != str(count_column)]
+        out.append((params, details, count_column, columns))
+    return out
+
+
+def detect_join_missing(df: pd.DataFrame, join_records) -> list[CandidateIssue]:
+    """
+    M2.4a: the missing values an AGGREGATE join made: a row whose key has no rows in the carried table gets a count of
+    0 and missing values in the other added columns. join_records are the evidence dicts of the applied join
+    executions of the current question; one issue per aggregate join whose count column is still in df, with at least
+    one row of count 0 and at least one kept added column missing somewhere. Names only (the evidence reaches the
+    proposer's prompt).
+    """
+    issues = []
+    for params, details, count_column, columns in _aggregate_joins(join_records):
+        if count_column is None or count_column not in df.columns:
+            continue
+        kept = [c for c in columns if c in df.columns]
+        if not kept or not bool((df[count_column] == 0).any()):
+            continue
+        affected = [c for c in kept if bool(df[c].isna().any())]
+        if not affected:
+            continue
+        right = params.get("right_table")
+        stats = (details.get("aggregate") or {}).get("stats") or []
+        shown = ", ".join(affected[:_MAX_LISTED_COLUMNS])
+        if len(affected) > _MAX_LISTED_COLUMNS:
+            shown += f" and {len(affected) - _MAX_LISTED_COLUMNS} more"
+        issues.append(CandidateIssue(
+            issue_type="join_missing",
+            description=(f"The columns {shown} that the join of '{right}' added are missing for the rows that have no "
+                         f"rows in '{right}'."),
+            affected_columns=tuple(affected),
+            evidence={"right_table": right, "count_column": count_column, "columns": list(affected),
+                      "sum_columns": [c for c in affected if "sum" in stats and c.endswith("_sum")],
+                      "result_table": params.get("result_name")},
+        ))
+    return issues
+
+
 def detect_all_issues(dataset: Dataset, profile: ModelSafeView, store: DatasetStore, tables=None, profiles=None,
-                      analysis=None) -> list[CandidateIssue]:
+                      analysis=None, join_records=None) -> list[CandidateIssue]:
     """The single entry point 7b's proposal step will call. The data is read once. M2.3b: with the tables, their
-    profiles and the analysis table's name (more than one table), the join issues are appended last."""
+    profiles and the analysis table's name (more than one table), the join issues are appended last. M2.4a: with
+    join_records (the applied joins of the question), the join_missing issues follow them, and the added non-count
+    columns of an aggregate join raise no high_missingness issue (their missing values have a known cause)."""
     df = store.read(dataset.storage_key)
     issues = []
     dup_issue = detect_duplicate_rows(dataset, store, df)
     if dup_issue:
         issues.append(dup_issue)
-    issues.extend(detect_high_missingness(profile))
+    structural = {c for _, _, _, columns in _aggregate_joins(join_records) for c in columns}
+    issues.extend(i for i in detect_high_missingness(profile) if str(i.affected_columns[0]) not in structural)
     issues.extend(detect_inconsistent_text(df))
     issues.extend(detect_numeric_as_text(df))
     if tables is not None and profiles is not None and analysis is not None and len(tables) > 1:
         issues.extend(detect_join_issues(analysis, tables, profiles, store))
+    if join_records is not None:
+        issues.extend(detect_join_missing(df, join_records))
     return issues

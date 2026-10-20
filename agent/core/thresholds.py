@@ -19,3 +19,6 @@ GROUP_MIN_OBSERVED = 5         # observed values of the target column needed in 
 MAX_GROUP_COLUMNS = 3          # group-wise candidates are offered for at most this many group columns
 NUMERIC_TEXT_PARSE_RATE = 0.95  # the share of non-missing values that must parse as numbers before a text column is flagged
 MAX_AGG_COLUMNS = 5            # the numeric columns of a carried table that an aggregate-then-join summarizes
+
+# --- the Stage 1 loop (M2.4a) -----------------------------------------------------------------------------------------
+MAX_STAGE1_ROUNDS = 3  # the most cleaning rounds one question runs; a round only starts when the previous one created new issues

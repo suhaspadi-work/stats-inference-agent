@@ -70,6 +70,23 @@ def _warnings(c):
 
 ADDED = ["rows_in_orders", "amount_mean", "amount_sum", "quantity_mean", "quantity_sum"]
 
+JOIN_MISSING_IDS = ("delete_unmatched_rows", "fill_empty_sums_with_zero")
+JOIN_MISSING_REASON = "the unmatched customers stay as they are"
+
+
+def _is_join_missing_fix(op) -> bool:
+    """M2.4a: an operation proposed for a join_missing issue (by its candidate id, or its op_type and params)."""
+    return (op.get("candidate_id") in JOIN_MISSING_IDS or op["op_type"] == "fill_unmatched"
+            or (op["op_type"] == "filter" and "unmatched_of" in (op.get("params") or {})))
+
+
+def reject_join_missing(payload):
+    """M2.4a: the wrangling answers that reject every fix of an aggregate join's unmatched rows (round 2) and approve
+    the rest, so a test keeps the aggregate join's own result; a join-only run is answered as before (approve)."""
+    return {"decisions": [{"index": op["index"], "action": "reject", "reason": JOIN_MISSING_REASON}
+                          if _is_join_missing_fix(op) else {"index": op["index"], "action": "approve"}
+                          for op in payload["proposed_operations"]]}
+
 
 # --- (a) an approved aggregate-then-join -------------------------------------------------------------------------
 
@@ -88,7 +105,8 @@ def test_an_approved_aggregate_join(fake_model, tmp_path, store):
     assert [x["id"] for x in op["candidates"]] == ["leave_as_is", "aggregate_left_summary", "aggregate_left_count",
                                                    "aggregate_left_normalized"]
 
-    values, checked = _drive_checking_mirror(_app(store), _state(tables), "a")
+    # M2.4a: round 2 proposes a fix of the 8 unmatched customers; rejecting it keeps the aggregate join's own result
+    values, checked = _drive_checking_mirror(_app(store), _state(tables), "a", wrangling_approval=reject_join_missing)
     assert {"profile", "wrangle_review", "rediagnose"} <= set(checked)
     assert values["analysis_table"] == "customers_orders" and set(values["tables"]) == {"customers", "orders",
                                                                                         "customers_orders"}
@@ -213,7 +231,7 @@ def test_the_stage1_report(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
     c = _counts(store, tables)
-    values, _, _ = _drive(_app(store), _state(tables), "d")
+    values, _, _ = _drive(_app(store), _state(tables), "d", wrangling_approval=reject_join_missing)  # M2.4a: round 2
     sections = _sections(values)
     assert sections["Checked"].split("\n") == [
         "Checked 40 rows and 4 columns.",
@@ -227,7 +245,17 @@ def test_the_stage1_report(fake_model, tmp_path, store):
         "1. Summarize orders per customer_id (a row count, and the mean and sum of amount and quantity), then join the "
         f"summary to the analysis table, keeping every row. Adds 5 column(s): {', '.join(ADDED)}. Why (the model's "
         f"reason): fix aggregatable_table. {ALTERNATIVE} Your decision: approved. Effect: 40 rows stay 40; 5 column(s) "
-        f"added; {4 * c['unmatched']} new missing value(s) from {c['unmatched']} row(s) with no match. Notes: {notes}.")
+        f"added; {4 * c['unmatched']} new missing value(s) from {c['unmatched']} row(s) with no match. Notes: {notes}."
+        # M2.4a: the rejected round-2 fix of the unmatched rows, numbered across rounds and tagged
+        f"\n2. (round 2) Remove the rows that have no rows in orders ({c['unmatched']} removed). Why (the model's "
+        f"reason): fix join_missing. {ALTERNATIVE} Your decision: rejected: {JOIN_MISSING_REASON}.")
+    assert sections["Rounds"].split("\n") == [  # M2.4a: the second round, and how Stage 1 ended
+        "Round 2 found: orders: the columns the join added are missing for the rows that have no rows in orders.",
+        "Stage 1 ended after 2 round(s): you declined every proposal of the last round."]
+    assert sections["Left as is"] == ("orders: the columns the join added stay missing for the rows that have no rows "
+                                      f"in orders. You rejected the fix: {JOIN_MISSING_REASON}.")  # M2.4a
+    assert list(sections) == ["Checked", "Tables", "Data quality", "Links between tables", "Rounds", "Changed",
+                              "Left as is", "Described"]  # M2.4a: Rounds before Changed
     assert notes == ("3 exact duplicate row(s) in orders are counted again in the summary; amount is "
                      f"{c['share']:.1%} missing in orders: its mean and sum use only the rows that have a value")
 
@@ -235,9 +263,10 @@ def test_the_stage1_report(fake_model, tmp_path, store):
 def test_no_notes_for_a_clean_carried_table(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers, clean=True)})
-    values, _, _ = _drive(_app(store), _state(tables), "d-clean")
-    changed = _sections(values)["Changed"]
+    values, _, _ = _drive(_app(store), _state(tables), "d-clean", wrangling_approval=reject_join_missing)  # M2.4a
+    changed, rejected = _sections(values)["Changed"].split("\n")  # M2.4a: line 2 is the rejected round-2 fix
     assert "Notes:" not in changed and changed.endswith("new missing value(s) from 8 row(s) with no match.")
+    assert rejected.startswith("2. (round 2) Remove the rows that have no rows in orders (8 removed).")
 
 
 # --- (e) the execution order -------------------------------------------------------------------------------------
@@ -249,7 +278,8 @@ def test_the_execution_order_and_every_preview(fake_model, tmp_path, store):
     messy = pd.concat([customers, customers.iloc[[3, 5]]], ignore_index=True)  # 2 exact duplicates
     tables = _bundle(tmp_path, store, {"customers": messy, "orders": _orders(customers)})
     pick = {"inconsistent_text": "trim_and_lowercase", "duplicate_rows": "dedupe_all", "high_missingness": "impute_median"}
-    values, pauses, _ = _drive(_app(store, choose(pick)), _state(tables), "e")
+    values, pauses, _ = _drive(_app(store, choose(pick)), _state(tables), "e",
+                               wrangling_approval=reject_join_missing)  # M2.4a: round 2 is rejected
     ops = _wrangling(pauses)["proposed_operations"]
     executions = _records(values, "stage1.clean.execution")
     assert [o["op_type"] for o in ops] == [e["evidence"]["op_type"] for e in executions] == [
@@ -276,9 +306,11 @@ def test_stakeholder_mode_always_interrupts(fake_model, tmp_path, store):
     customers = _customers()
     messy = pd.concat([customers, customers.iloc[[0]]], ignore_index=True)
     tables = _bundle(tmp_path, store, {"customers": messy, "orders": _orders(customers)})
-    values, pauses, _ = _drive(_app(store), _state(tables, autonomy_mode="stakeholder"), "f")
+    values, pauses, _ = _drive(_app(store), _state(tables, autonomy_mode="stakeholder"), "f",
+                               wrangling_approval=reject_join_missing)  # M2.4a: round 2 is rejected
     assert [o["candidate_id"] for o in _wrangling(pauses)["proposed_operations"]] == ["aggregate_left_summary"]
-    assert [a["chosen"] for a in _records(values, "stage1.clean.approval")] == ["auto_approve", "approve"]
+    # M2.4a: the third approval is the rejected round-2 fix of the unmatched rows (it interrupted too)
+    assert [a["chosen"] for a in _records(values, "stage1.clean.approval")] == ["auto_approve", "approve", "reject"]
 
 
 # --- (g) privacy -------------------------------------------------------------------------------------------------
@@ -371,7 +403,8 @@ def test_missing_keys_and_a_repeating_left_key(fake_model, tmp_path, store):
     keys = [f"c{k:02d}" for k in range(1, 20)] + ["c01"] + [None] * 4
     visits = pd.DataFrame({"customer_id": keys, "minutes": rng.normal(5, 1, len(keys))})
     tables = _bundle(tmp_path, store, {"orders": orders, "visits": visits})
-    values, _, _ = _drive(_app(store, outcome="amount"), _state(tables), "j")
+    values, _, _ = _drive(_app(store, outcome="amount"), _state(tables), "j",
+                          wrangling_approval=reject_join_missing)  # M2.4a: round 2 (c20 has no visits) is rejected
     (execution,) = _records(values, "stage1.clean.execution")
     assert execution["evidence"]["details"]["aggregate"]["rows_summarized"] == len(visits)
     assert len(_store_frame(store, values["dataset"])) == len(orders) == execution["evidence"]["rows_after"]
@@ -382,4 +415,4 @@ def test_missing_keys_and_a_repeating_left_key(fake_model, tmp_path, store):
 # --- (k) the registry --------------------------------------------------------------------------------------------
 
 def test_the_registry_is_unchanged():
-    assert (len(registered_points()), len(DECISION_NODES)) == (31, 17)
+    assert (len(registered_points()), len(DECISION_NODES)) == (32, 18)  # M2.4a: replan (planner.stage_replan)

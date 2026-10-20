@@ -51,6 +51,14 @@ class AgentState(TypedDict, total=False):
     report: Optional[str]
 
     pending_unaddressed_issues: tuple  # set by wrangle_review if issues exist before the plan is created
+    # M2.4a: the Stage 1 loop; per question (plan_stages resets them for every new question)
+    stage1_round: int              # the number of the current cleaning round (1 for the first)
+    stage1_seen_keys: list         # core.detection.issue_key of every issue proposed in a round of this question
+    stage1_finish: bool            # the last review ended the loop (the answer said finish, or nothing was applied)
+    stage1_finish_reason: Optional[str]  # "finished" or "declined_all" when stage1_finish, else None
+    stage1_applied: int            # the operations the last review applied
+    stage1_continue: bool          # set by rediagnose: another round runs
+    stage1_end_reason: Optional[str]  # why the loop ended: no_new_issues, finished, declined_all or round_limit
     # Held between wrangle_propose and wrangle_review: the detected issues, the proposed
     # Operations (dataclasses, the G4 caveat), each operation's issue index and the
     # auto-approved indices. None once resolved.

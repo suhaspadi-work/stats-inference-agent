@@ -192,6 +192,18 @@ def print_stage1_report(state, label):
                 print(f"      | {line}")
 
 
+def print_stage1_rounds(log, label):
+    """M2.4a: the Stage 1 loop of a run with more than one cleaning scan or a planner.stage_replan record."""
+    scans = [e for e in log if e["decision_point"] == "stage1.clean.scan"]
+    replan = next((e for e in reversed(log) if e["decision_point"] == "planner.stage_replan"), None)
+    if len(scans) <= 1 and replan is None:
+        return
+    ev = (replan or {}).get("evidence") or {}
+    rounds = ev.get("rounds", max(((s.get("evidence") or {}).get("round") or 1) for s in scans))
+    changed = ", ".join(f"{c['step']}:{c['after_state']}" for c in ev.get("changed_steps") or []) or "none"
+    print(f"   stage1 rounds [{label}]: rounds={rounds} ended_by={ev.get('ended_by')} changed={changed}")
+
+
 def print_analysis_reports(state, label):
     """M1.4b step 2b: each analysis round's "how this was chosen" entry (collapsed sections marked *) and the
     summary; for the two_group run, also their full text."""
@@ -319,6 +331,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_describe(log, label)
     print_quality(log, label)
     print_stage1_report(state, label)
+    print_stage1_rounds(log, label)
     print_analysis_reports(state, label)
     if not failed:
         explanation = print_explanation(state, label)

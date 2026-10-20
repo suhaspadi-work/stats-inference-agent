@@ -58,6 +58,9 @@ def _dry_run(dataset, store_or_frame, op_type: str, params: dict, frames=None) -
     elif op_type == "join":  # M2.3b: rows removed by an inner join; the cells left missing by unmatched rows
         rows_changed = rows_before - rows_after
         cells, affected = int(details["new_missing_cells"]), list(details["columns_added"])
+    elif op_type == "fill_unmatched":  # M2.4a: the sums filled with 0 for the rows without carried rows
+        rows_changed, cells = int(details["rows_filled"]), int(details["cells_filled"])
+        affected = list(params.get("columns") or [])
     elif op_type == "cast" and params.get("to_type") == "numeric":
         rows_changed, cells, affected = 0, int(details["non_missing_before"]), [params["column"]]
         if details["became_missing"]:
@@ -301,6 +304,30 @@ def _aggregate_candidates(df, dataset, issue, tables, frames) -> list:
     ]
 
 
+def _join_missing_candidates(df, dataset, issue) -> list:
+    """
+    M2.4a: the candidates of one join_missing issue (the missing values an aggregate join made for the rows whose key
+    has no rows in the carried table): leave them, delete those rows (the count column is 0 there), or fill the sums
+    with 0 (an empty sum is 0; a mean stays missing).
+    """
+    ev = issue.evidence
+    right, count_column, sums = ev["right_table"], ev["count_column"], list(ev.get("sum_columns") or [])
+    has_count = count_column in df.columns
+    return [
+        _candidate(df, dataset, LEAVE, None, {}, True,
+                   "keep the missing values; the analysis leaves those rows out where it needs the column"),
+        _candidate(df, dataset, "delete_unmatched_rows", "filter",
+                   {"column": count_column, "condition": "greater_than", "value": 0, "unmatched_of": right}, has_count,
+                   f"removes the rows that have no rows in {right}" if has_count
+                   else f"the column {count_column} is not in the analysis table"),
+        _candidate(df, dataset, "fill_empty_sums_with_zero", "fill_unmatched",
+                   {"count_column": count_column, "columns": sums, "value": 0, "right_table": right},
+                   bool(sums),
+                   "fills the sums of those rows with 0 (an empty sum is 0); the means stay missing" if sums
+                   else "none of the added columns is a sum"),
+    ]
+
+
 def enumerate_candidates(issue, dataset, profile, store, df=None, tables=None, frames=None) -> list:
     """Every candidate fix for one issue, JSON-clean; reads the data at most once (pass df to read none). M2.3b: a
     joinable_table issue also reads its right table from tables (once, cached in frames when given)."""
@@ -324,6 +351,8 @@ def enumerate_candidates(issue, dataset, profile, store, df=None, tables=None, f
         return _text_candidates(df, dataset, issue.affected_columns[0])
     if issue.issue_type == "numeric_as_text":
         return _numeric_text_candidates(df, dataset, issue.affected_columns[0])
+    if issue.issue_type == "join_missing":  # M2.4a
+        return _join_missing_candidates(df, dataset, issue)
     return [_candidate(df, dataset, LEAVE, None, {}, True, "no fix is registered for this issue type")]
 
 
