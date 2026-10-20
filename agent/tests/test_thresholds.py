@@ -31,7 +31,7 @@ CLEANING = {"IMPUTE_MAX_MISSING_PCT": 0.40, "IMPUTE_MIN_OBSERVED": 10, "DISCRETE
             "GROUP_MIN_OBSERVED": 5, "MAX_GROUP_COLUMNS": 3,
             "NUMERIC_TEXT_PARSE_RATE": 0.95,  # M2.3a step 2: the numeric-text cut-off
             "MAX_AGG_COLUMNS": 5,  # M2.3b step 2: the columns an aggregate-then-join summarizes
-            "MAX_STAGE1_ROUNDS": 3}  # M2.4a: the most cleaning rounds one question runs
+            "MAX_STAGE1_ROUNDS": 7}  # M2.4a; M2.4b: 7, a circuit breaker (an issue is proposed once per question)
 
 
 @pytest.fixture

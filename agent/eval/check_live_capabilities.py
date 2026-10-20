@@ -187,7 +187,7 @@ def print_stage1_report(state, label):
     for e in entries:
         headings = ", ".join(s["heading"] for s in e["sections"])
         print(f"   stage 1 report [{label}]: {headings} ({len(e['source_records'])} records)")
-        if label in ("messy", "bundle", "normalize", "join", "aggregate"):  # M2.1: the bundle run's report also lists its tables
+        if label in ("messy", "bundle", "normalize", "join", "join_explore", "aggregate"):  # M2.1: the bundle run's report also lists its tables
             for line in e["text"].split("\n"):
                 print(f"      | {line}")
 
@@ -201,7 +201,11 @@ def print_stage1_rounds(log, label):
     ev = (replan or {}).get("evidence") or {}
     rounds = ev.get("rounds", max(((s.get("evidence") or {}).get("round") or 1) for s in scans))
     changed = ", ".join(f"{c['step']}:{c['after_state']}" for c in ev.get("changed_steps") or []) or "none"
-    print(f"   stage1 rounds [{label}]: rounds={rounds} ended_by={ev.get('ended_by')} changed={changed}")
+    cleaned = ", ".join(dict.fromkeys(  # M2.4b: the carried tables an applied operation cleaned
+        e["evidence"]["table"] for e in log if e["decision_point"] == "stage1.clean.execution"
+        and e["chosen"] == "applied" and (e.get("evidence") or {}).get("table"))) or "none"
+    print(f"   stage1 rounds [{label}]: rounds={rounds} ended_by={ev.get('ended_by')} changed={changed} "
+          f"cleaned={cleaned}")
 
 
 def print_analysis_reports(state, label):
@@ -345,7 +349,7 @@ def report_event_log(app, cfg, label, events, all_points, failed, outcome=None):
     print_report_narrative(log, label)
     print_rounds(state, label)
     all_points.update(points)
-    if label in ("messy", "bundle", "normalize", "join", "aggregate"):  # M2.1: the bundle run is the messy run with a second table
+    if label in ("messy", "bundle", "normalize", "join", "join_explore", "aggregate"):  # M2.1: the bundle run is the messy run with a second table
         print_cleaning_lines(log)
         lineage = print_lineage(state, state_log)
         if lineage is not None:
@@ -427,6 +431,8 @@ def _resume_for(label, p, counts, question):
     if kind in ("plan_approval", "stage_plan_approval"):  # M1.3a: the stage-plan gate
         return {"action": "approve"}
     if kind == "stage_gate":  # M1.3b: run the exploratory round only in its own run
+        if label == "join_explore":  # M2.4b: the proposed predictors of the joined table (region and another column)
+            return {"action": "run"}
         if label != "exploratory":
             return {"action": "skip"}
         if p.get("refused") is None:  # step 2b: first try an identifier-like column, which is refused
@@ -518,6 +524,10 @@ def main():
         # M2.3b: region is only on the customers table, so the orders need the join; every decision is approve
         ("join", {"orders": df_orders, "customers": df_customers},
          "Did customers in the West region spend more than customers in the East region?"),
+        # M2.4b: the join run's data and question; the stage gate is answered run, so an exploratory regression runs on
+        # the joined table (G87)
+        ("join_explore", {"orders": df_orders, "customers": df_customers},
+         "Did customers in the West region spend more than customers in the East region?"),
         # M2.3b step 2: the orders repeat each customer, so they are summarized per customer, then joined; approve all
         ("aggregate", {"customers": agg_customers, "orders": agg_orders},
          "Did customers in the West region spend more than customers in the East region?"),
@@ -575,6 +585,11 @@ def main():
                 final = store.read(result["dataset"].storage_key)
                 print(f"   normalize [{label}]: region levels after cleaning={final['region'].nunique()} "
                       f"tenure dtype after cleaning={final['tenure'].dtype}")
+            if label == "join_explore":  # M2.4b: the exploratory round on the joined table
+                last = (result.get("rounds") or [{}])[-1]
+                print(f"   join_explore [{label}]: rounds={len(result.get('rounds') or [])} "
+                      f"exploratory={last.get('exploratory')} method={last.get('method')} "
+                      f"result_type={(last.get('result') or {}).get('result_type')}")
             if label == "join":  # M2.3b: the analysis table after cleaning is the joined table
                 final = store.read(result["dataset"].storage_key)
                 print(f"   join [{label}]: analysis table={result.get('analysis_table')} "

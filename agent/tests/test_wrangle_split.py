@@ -137,6 +137,7 @@ def test_pause_payload_has_the_old_shape(tmp_path, store):
             "index": 0, "op_type": "dedupe", "params": {"subset": None},
             "rationale": "remove exact duplicate rows", "alternative": "Leave the data as it is.",
             "recommendation": "apply",  # M2.3b: the model's recommendation, "apply" when it has none
+            "table": None,  # M2.4b: the analysis table
             "candidate_id": "dedupe_all", "what_was_run": "Remove 1 exact duplicate rows (all columns).",
             "impact_preview": preview, "preview_basis": "uploaded_data",
             "candidates": [

@@ -12,7 +12,9 @@ from core import thresholds
 from core.dataset import LocalDiskStore
 from core.graph import build_agent_graph
 from core.plan import QuestionType
-from tests.test_aggregate_run import _app as _aggregate_app, _customers, _orders, reject_join_missing
+from tests.test_aggregate_run import (
+    _app as _aggregate_app, _customers, _orders, reject_carried_and_join_missing, reject_join_missing,
+)
 from tests.test_decision_point_guard import _dataset, choose, confident, fake_draft
 from tests.test_join_run import _bundle, _state
 from tests.test_prompt_canaries import fake_model  # noqa: F401 (fixture)
@@ -116,8 +118,9 @@ def test_declined_round_one_keeps_cleaning_did_not_change(fake_model, tmp_path, 
     assert "Rounds" not in sections and sections["Data quality"].endswith("Cleaning did not change the data.")
 
 
-@pytest.mark.parametrize("limit", [1, 3])
+@pytest.mark.parametrize("limit", [1, "default"])  # M2.4b: the default limit is read from thresholds (7)
 def test_the_round_limit(limit, fake_model, tmp_path, store, monkeypatch):
+    limit = thresholds.MAX_STAGE1_ROUNDS if limit == "default" else limit
     if limit == 1:
         monkeypatch.setattr(thresholds, "MAX_STAGE1_ROUNDS", 1)
         _, ds = _conversion(tmp_path, store)
@@ -141,19 +144,24 @@ def test_a_join_that_changes_modeling(fake_model, tmp_path, store):
 def test_the_aggregate_shape_with_round_two_declined(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
-    values, _, _ = _run(_aggregate_app(store), _state(tables), "agg", wrangling_approval=reject_join_missing)
+    # M2.4b: the orders cleaning (round 1) and the unmatched rows (round 3) are declined; the join runs in round 2
+    values, _, _ = _run(_aggregate_app(store), _state(tables), "agg", wrangling_approval=reject_carried_and_join_missing)
     sections = _sections(values)
+    orders = store.read(tables["orders"].storage_key)
     assert list(sections) == ["Checked", "Tables", "Data quality", "Links between tables", "Rounds", "Changed",
                               "Left as is", "Described"]
-    assert sections["Checked"] == ("Checked 40 rows and 4 columns.\norders: has several rows for each customer_id; it "
-                                   "can be summarized and joined to the analysis table.")
+    assert sections["Checked"] == (f"Checked 40 rows and 4 columns.\nIn orders: Found {int(orders.duplicated().sum())} "
+                                   f"exact duplicate rows.\nIn orders: amount: {orders['amount'].isna().mean():.1%} "
+                                   "missing (threshold 5%).")  # M2.4b: the linked carried table's issues
     assert sections["Rounds"] == (
-        "Round 2 found: orders: the columns the join added are missing for the rows that have no rows in orders.\n"
-        "Stage 1 ended after 2 round(s): you declined every proposal of the last round.")
+        "Round 2 found: orders: has several rows for each customer_id; it can be summarized and joined to the analysis "
+        "table.\n"  # M2.4b: the join waited for the orders cleaning
+        "Round 3 found: orders: the columns the join added are missing for the rows that have no rows in orders.\n"
+        "Stage 1 ended after 3 round(s): you declined every proposal of the last round.")
     lines = sections["Changed"].split("\n")
-    assert [line[:15] for line in lines] == ["1. Summarize or", "2. (round 2) Re"]
-    assert sections["Left as is"].startswith("orders: the columns the join added stay missing for the rows that have no "
-                                             "rows in orders. You rejected the fix: ")
+    assert [line[:15] for line in lines] == ["1. In orders: R", "2. In orders: K", "3. (round 2) Su", "4. (round 3) Re"]
+    assert sections["Left as is"].split("\n")[-1].startswith(
+        "orders: the columns the join added stay missing for the rows that have no rows in orders. You rejected the fix: ")
     after = _records(values, "stage1.quality.snapshot")[-1]["evidence"]
     assert f"After cleaning: {after['rows']} rows, {after['duplicate_rows']} exact duplicate rows." in sections["Data quality"]
     assert after["rows"] == len(customers)

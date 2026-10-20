@@ -72,12 +72,35 @@ ADDED = ["rows_in_orders", "amount_mean", "amount_sum", "quantity_mean", "quanti
 
 JOIN_MISSING_IDS = ("delete_unmatched_rows", "fill_empty_sums_with_zero")
 JOIN_MISSING_REASON = "the unmatched customers stay as they are"
+CARRIED_REASON = "the orders stay as uploaded"
 
 
 def _is_join_missing_fix(op) -> bool:
     """M2.4a: an operation proposed for a join_missing issue (by its candidate id, or its op_type and params)."""
     return (op.get("candidate_id") in JOIN_MISSING_IDS or op["op_type"] == "fill_unmatched"
             or (op["op_type"] == "filter" and "unmatched_of" in (op.get("params") or {})))
+
+
+def reject_carried(payload):
+    """M2.4b: the wrangling answers that reject every operation on a carried table (its payload entry has a "table") and
+    approve the rest, so a carried table stays as uploaded and its join goes ahead in the next round."""
+    return {"decisions": [{"index": op["index"], "action": "reject", "reason": CARRIED_REASON}
+                          if op.get("table") is not None else {"index": op["index"], "action": "approve"}
+                          for op in payload["proposed_operations"]]}
+
+
+def reject_carried_and_join_missing(payload):
+    """M2.4b: reject_carried, and also reject every fix of an aggregate join's unmatched rows (as reject_join_missing)."""
+    return {"decisions": [{"index": op["index"], "action": "reject",
+                           "reason": CARRIED_REASON if op.get("table") is not None else JOIN_MISSING_REASON}
+                          if op.get("table") is not None or _is_join_missing_fix(op)
+                          else {"index": op["index"], "action": "approve"} for op in payload["proposed_operations"]]}
+
+
+def _join_round(pauses):
+    """M2.4b: the wrangling payload that proposes the join (round 1 may hold only the carried table's cleaning)."""
+    return next(p["payload"] for p in pauses if p["type"] == "wrangling_approval"
+                and any(o["op_type"] == "join" for o in p["payload"]["proposed_operations"]))
 
 
 def reject_join_missing(payload):
@@ -95,8 +118,9 @@ def test_an_approved_aggregate_join(fake_model, tmp_path, store):
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
     c = _counts(store, tables)
     assert (c["unmatched"], c["duplicates"]) == (8, 3)  # the 2 planted repeats and one chance repeat
-    _, pauses, _ = _drive(_app(store), _state(tables), "a-pauses")
-    (op,) = _wrangling(pauses)["proposed_operations"]
+    # M2.4b: declining the orders cleaning (round 1) keeps the uploaded orders, so the round-2 join warns as before
+    _, pauses, _ = _drive(_app(store), _state(tables), "a-pauses", wrangling_approval=reject_carried)
+    (op,) = _join_round(pauses)["proposed_operations"]
     assert (op["candidate_id"], op["op_type"], op["recommendation"]) == ("aggregate_left_summary", "join", "apply")
     assert op["what_was_run"] == ("Summarize orders per customer_id (a row count, and the mean and sum of amount and "
                                   "quantity), then join the summary to the analysis table, keeping every row. Adds 5 "
@@ -106,7 +130,8 @@ def test_an_approved_aggregate_join(fake_model, tmp_path, store):
                                                    "aggregate_left_normalized"]
 
     # M2.4a: round 2 proposes a fix of the 8 unmatched customers; rejecting it keeps the aggregate join's own result
-    values, checked = _drive_checking_mirror(_app(store), _state(tables), "a", wrangling_approval=reject_join_missing)
+    values, checked = _drive_checking_mirror(_app(store), _state(tables), "a",
+                                             wrangling_approval=reject_carried_and_join_missing)  # M2.4b: orders as uploaded
     assert {"profile", "wrangle_review", "rediagnose"} <= set(checked)
     assert values["analysis_table"] == "customers_orders" and set(values["tables"]) == {"customers", "orders",
                                                                                         "customers_orders"}
@@ -176,9 +201,10 @@ def test_the_exploratory_round_keeps_the_caveat(fake_model, tmp_path, store):
 # --- (c) a rejected aggregate, and the model's recommendation ----------------------------------------------------
 
 def _reject(reason):
-    def answer(payload):
-        decision = {"index": payload["proposed_operations"][0]["index"], "action": "reject"}
-        return {"decisions": [{**decision, **({"reason": reason} if reason is not None else {})}]}
+    def answer(payload):  # M2.4b: reject the join itself (by op_type), approve the rest (the orders cleaning)
+        return {"decisions": [{"index": o["index"], "action": "reject", **({"reason": reason} if reason is not None else {})}
+                              if o["op_type"] == "join" else {"index": o["index"], "action": "approve"}
+                              for o in payload["proposed_operations"]]}
     return answer
 
 
@@ -198,9 +224,11 @@ def test_a_rejected_aggregate(recommendation, reason, line, fake_model, tmp_path
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
     values, _, _ = _drive(_app(store, choose({}, recommendation), outcome="age"), _state(tables),
                           f"c-{recommendation}-{reason}", wrangling_approval=_reject(reason))
-    assert values["tables"] == tables and values["analysis_table"] == "customers"
+    # M2.4b: customers is untouched; orders was cleaned in round 1 (two operations: version 3), then not joined
+    assert values["tables"]["customers"] == tables["customers"] and values["analysis_table"] == "customers"
+    assert set(values["tables"]) == set(tables) and values["tables"]["orders"].version == 3
     assert list(values["plan"].unaddressed_issues) == []
-    (approval,) = _records(values, "stage1.clean.approval")
+    (approval,) = [a for a in _records(values, "stage1.clean.approval") if a["evidence"]["op_type"] == "join"]
     assert approval["evidence"]["carried_forward_as_unaddressed"] is False
     assert approval["rationale"] == (reason or "no reason given")
     assert _sections(values)["Left as is"] == line
@@ -213,7 +241,9 @@ def test_reject_joins_also_rejects_an_aggregate(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
     values, _, _ = _drive(_app(store, outcome="age"), _state(tables), "c-helper", wrangling_approval=reject_joins)
-    assert [a["chosen"] for a in _records(values, "stage1.clean.approval")] == ["reject"]
+    # M2.4b: round 1 approves the orders cleaning (two operations), round 2 rejects the aggregate join
+    assert [(a["evidence"]["op_type"], a["chosen"]) for a in _records(values, "stage1.clean.approval")] == [
+        ("dedupe", "approve"), ("filter", "approve"), ("join", "reject")]
 
 
 def test_skip_recommended_and_approved(fake_model, tmp_path, store):
@@ -231,31 +261,50 @@ def test_the_stage1_report(fake_model, tmp_path, store):
     customers = _customers()
     tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers)})
     c = _counts(store, tables)
-    values, _, _ = _drive(_app(store), _state(tables), "d", wrangling_approval=reject_join_missing)  # M2.4a: round 2
+    # M2.4b: round 1 proposes the orders cleaning (declined, so the summary uses the orders as uploaded), round 2 the
+    # aggregate join, round 3 the unmatched rows (declined)
+    values, _, _ = _drive(_app(store), _state(tables), "d", wrangling_approval=reject_carried_and_join_missing)
     sections = _sections(values)
+    orders = _store_frame(store, tables["orders"])
+    after_dedupe_missing = int(orders.drop_duplicates()["amount"].isna().sum())  # what the round-1 filter would remove
     assert sections["Checked"].split("\n") == [
         "Checked 40 rows and 4 columns.",
-        "orders: has several rows for each customer_id; it can be summarized and joined to the analysis table."]
+        f"In orders: Found {c['duplicates']} exact duplicate rows.",  # M2.4b: the linked carried table's issues
+        f"In orders: amount: {c['share']:.1%} missing (threshold 5%)."]
     assert sections["Tables"].split("\n") == [
         "customers: 40 rows, 4 columns (main table; joined with orders into customers_orders)",
         "orders: 122 rows, 4 columns (summarized and joined into customers_orders)",
         "customers_orders: 40 rows, 9 columns (main table after the join)"]
     notes = "; ".join(_warnings(c)[1:])  # the unmatched-rows warning is not repeated in Notes
     assert sections["Changed"] == (
-        "1. Summarize orders per customer_id (a row count, and the mean and sum of amount and quantity), then join the "
-        f"summary to the analysis table, keeping every row. Adds 5 column(s): {', '.join(ADDED)}. Why (the model's "
-        f"reason): fix aggregatable_table. {ALTERNATIVE} Your decision: approved. Effect: 40 rows stay 40; 5 column(s) "
-        f"added; {4 * c['unmatched']} new missing value(s) from {c['unmatched']} row(s) with no match. Notes: {notes}."
-        # M2.4a: the rejected round-2 fix of the unmatched rows, numbered across rounds and tagged
-        f"\n2. (round 2) Remove the rows that have no rows in orders ({c['unmatched']} removed). Why (the model's "
+        # M2.4b: the declined round-1 cleaning of orders, named by its table
+        f"1. In orders: Remove {c['duplicates']} exact duplicate rows (all columns). Why (the model's reason): fix "
+        f"duplicate_rows. {ALTERNATIVE} Your decision: rejected: {CARRIED_REASON}.\n"
+        f"2. In orders: Keep only rows where amount has a value (removes {after_dedupe_missing} rows). Why (the model's "
+        f"reason): fix high_missingness. {ALTERNATIVE} Your decision: rejected: {CARRIED_REASON}.\n"
+        "3. (round 2) Summarize orders per customer_id (a row count, and the mean and sum of amount and quantity), then "
+        f"join the summary to the analysis table, keeping every row. Adds 5 column(s): {', '.join(ADDED)}. Why (the "
+        f"model's reason): fix aggregatable_table. {ALTERNATIVE} Your decision: approved. Effect: 40 rows stay 40; 5 "
+        f"column(s) added; {4 * c['unmatched']} new missing value(s) from {c['unmatched']} row(s) with no match. Notes: "
+        f"{notes}."
+        # M2.4a: the rejected fix of the unmatched rows, numbered across rounds and tagged (M2.4b: round 3)
+        f"\n4. (round 3) Remove the rows that have no rows in orders ({c['unmatched']} removed). Why (the model's "
         f"reason): fix join_missing. {ALTERNATIVE} Your decision: rejected: {JOIN_MISSING_REASON}.")
-    assert sections["Rounds"].split("\n") == [  # M2.4a: the second round, and how Stage 1 ended
-        "Round 2 found: orders: the columns the join added are missing for the rows that have no rows in orders.",
-        "Stage 1 ended after 2 round(s): you declined every proposal of the last round."]
-    assert sections["Left as is"] == ("orders: the columns the join added stay missing for the rows that have no rows "
-                                      f"in orders. You rejected the fix: {JOIN_MISSING_REASON}.")  # M2.4a
+    assert sections["Rounds"].split("\n") == [  # M2.4a: the later rounds, and how Stage 1 ended (M2.4b: three rounds)
+        "Round 2 found: orders: has several rows for each customer_id; it can be summarized and joined to the analysis "
+        "table.",
+        "Round 3 found: orders: the columns the join added are missing for the rows that have no rows in orders.",
+        "Stage 1 ended after 3 round(s): you declined every proposal of the last round."]
+    assert sections["Left as is"].split("\n") == [  # M2.4b: the generic wording, naming the carried table's issue
+        f"duplicate_rows (In the table 'orders': {c['duplicates']} exact duplicate row(s) detected across all columns.) "
+        f"was left unaddressed because: {CARRIED_REASON}",
+        f"high_missingness (In the table 'orders': Column 'amount' is {c['share']:.1%} missing.) was left unaddressed "
+        f"because: {CARRIED_REASON}",
+        "orders: the columns the join added stay missing for the rows that have no rows "
+        f"in orders. You rejected the fix: {JOIN_MISSING_REASON}."]  # M2.4a
     assert list(sections) == ["Checked", "Tables", "Data quality", "Links between tables", "Rounds", "Changed",
                               "Left as is", "Described"]  # M2.4a: Rounds before Changed
+    assert "rows before cleaning" not in sections["Data quality"]  # M2.4b: the declined cleaning changed nothing
     assert notes == ("3 exact duplicate row(s) in orders are counted again in the summary; amount is "
                      f"{c['share']:.1%} missing in orders: its mean and sum use only the rows that have a value")
 
@@ -276,7 +325,8 @@ def test_the_execution_order_and_every_preview(fake_model, tmp_path, store):
     customers["tier"] = np.where(customers.index % 4 == 0, "Basic ", customers["tier"])  # mergeable text
     customers.loc[customers.index % 8 == 0, "age"] = np.nan  # 12.5% missing
     messy = pd.concat([customers, customers.iloc[[3, 5]]], ignore_index=True)  # 2 exact duplicates
-    tables = _bundle(tmp_path, store, {"customers": messy, "orders": _orders(customers)})
+    # M2.4b: clean orders, so the join is not withheld and runs in round 1 among the analysis table's operations
+    tables = _bundle(tmp_path, store, {"customers": messy, "orders": _orders(customers, clean=True)})
     pick = {"inconsistent_text": "trim_and_lowercase", "duplicate_rows": "dedupe_all", "high_missingness": "impute_median"}
     values, pauses, _ = _drive(_app(store, choose(pick)), _state(tables), "e",
                                wrangling_approval=reject_join_missing)  # M2.4a: round 2 is rejected
@@ -307,15 +357,44 @@ def test_stakeholder_mode_always_interrupts(fake_model, tmp_path, store):
     messy = pd.concat([customers, customers.iloc[[0]]], ignore_index=True)
     tables = _bundle(tmp_path, store, {"customers": messy, "orders": _orders(customers)})
     values, pauses, _ = _drive(_app(store), _state(tables, autonomy_mode="stakeholder"), "f",
-                               wrangling_approval=reject_join_missing)  # M2.4a: round 2 is rejected
-    assert [o["candidate_id"] for o in _wrangling(pauses)["proposed_operations"]] == ["aggregate_left_summary"]
-    # M2.4a: the third approval is the rejected round-2 fix of the unmatched rows (it interrupted too)
-    assert [a["chosen"] for a in _records(values, "stage1.clean.approval")] == ["auto_approve", "approve", "reject"]
+                               wrangling_approval=reject_carried_and_join_missing)  # M2.4b: orders as uploaded
+    assert [o["candidate_id"] for o in _join_round(pauses)["proposed_operations"]] == ["aggregate_left_summary"]
+    # M2.4a: the rejected fix of the unmatched rows interrupted too; M2.4b: round 1 auto-approves the customers dedupe
+    # and interrupts for the two orders operations (rejected)
+    assert [a["chosen"] for a in _records(values, "stage1.clean.approval")] == [
+        "auto_approve", "reject", "reject", "approve", "reject"]
 
 
 # --- (g) privacy -------------------------------------------------------------------------------------------------
 
-def test_privacy(fake_model, tmp_path, store):
+# The privacy rule (amended in M2.4b): the model never sees a cell value. A LINKED carried table's name and column names
+# may reach (1) the proposer's prompt, only on its integrity issue lines ("In the table '...': ..."), its join or
+# aggregate issue line and its options' plain words, and (2) the report prompts, ONLY inside the sentence of a rejected
+# carried-table cleaning carried forward as an unaddressed issue. An UNLINKED carried table appears in no prompt and no
+# payload. No link number, preview number or join warning reaches any prompt; the classifier and drafter prompts never
+# contain a carried table's name or columns.
+CLEANING_LINES = [
+    "[0] duplicate_rows: In the table 'zz_events': 2 exact duplicate row(s) detected across all columns. (columns: "
+    "customer_id, zz_metric, zz_note, evidence: {'duplicate_row_count': 2, 'total_rows': 91, 'table': 'zz_events'})",
+    "[1] high_missingness: In the table 'zz_events': Column 'zz_metric' is 9.9% missing. (columns: zz_metric, evidence: "
+    "{'missing_pct': 0.0989, 'missing_count': 9, 'table': 'zz_events'})",
+    "      delete_rows: Keep only rows where zz_metric has a value.",
+    "      drop_column: Drop the column zz_metric.",
+    "      impute_mean: Fill the missing values of zz_metric with the mean.",
+    "      impute_median: Fill the missing values of zz_metric with the median.",
+    "      impute_group_median_zz_note: Fill the missing values of zz_metric with the median of each zz_note.",
+    "      impute_median_indicator: Fill the missing values of zz_metric with the median and add a zz_metric_was_missing "
+    "indicator column."]
+REJECTED_SENTENCES = [
+    "duplicate_rows (In the table 'zz_events': 2 exact duplicate row(s) detected across all columns.) was identified "
+    "but left unaddressed because: no reason given",
+    "high_missingness (In the table 'zz_events': Column 'zz_metric' is 9.9% missing.) was identified but left "
+    "unaddressed because: no reason given"]
+LINKED_NAMES = ("zz_events", "zz_metric", "zz_note")
+
+
+@pytest.mark.parametrize("cleaning", ["rejected", "approved"])
+def test_privacy(cleaning, fake_model, tmp_path, store):
     prompts, config = fake_model
     config.update(question_type=QuestionType.TWO_GROUP_COMPARISON, predictors=["region"])
     rng = np.random.default_rng(61)
@@ -328,19 +407,19 @@ def test_privacy(fake_model, tmp_path, store):
     events = pd.concat([events, events.iloc[[7]]], ignore_index=True)
     unlinked = pd.DataFrame({"zz_other": ["UNLINKED-CANARY", "x"], "zz_amount": [31415.926, 1.0]})
     tables = _bundle(tmp_path, store, {"main": main, "zz_events": events, "unlinked_extra": unlinked})
-    values, pauses, _ = _drive(build_agent_graph(store), _state(tables), "g", wrangling_approval=reject_joins)
-    (op,) = _wrangling(pauses)["proposed_operations"]
+
+    def answer(payload):  # the join is always rejected; the zz_events cleaning is rejected or approved
+        return {"decisions": [{"index": o["index"], "action": "reject" if o["op_type"] == "join" or cleaning == "rejected"
+                               else "approve"} for o in payload["proposed_operations"]]}
+    values, pauses, _ = _drive(build_agent_graph(store), _state(tables), f"g-{cleaning}", wrangling_approval=answer)
+    (op,) = _join_round(pauses)["proposed_operations"]
     assert op["candidate_id"] == "aggregate_left_summary"
-    (proposer,) = [p["text"] for p in prompts if p["stage"] == "_WranglingProposalsOut"]
-    others = [p for p in prompts if p["stage"] != "_WranglingProposalsOut"]
-    forbidden = ["NOTE-CANARY", "UNLINKED-CANARY", "27182", "31415", "unlinked_extra", "zz_other", "zz_amount",
-                 *op["impact_preview"]["warnings"], "counted again", "missing in zz_events",
-                 f"{float(events['zz_metric'].mean()):.4g}", f"{float(events['zz_metric'].sum()):.4g}"]
+    by_stage = {}
     for p in prompts:
-        for word in forbidden:
-            assert word not in p["text"], (p["stage"], word)
-    for p in others:
-        assert "zz_events" not in p["text"] and "zz_metric" not in p["text"] and "zz_note" not in p["text"], p["stage"]
+        by_stage.setdefault(p["stage"], []).append(p["text"])
+    cleaning_prompt, proposer = by_stage["_WranglingProposalsOut"]  # round 1 cleans zz_events, round 2 the join
+    # (1) the proposer: the linked names only on the issue lines and the options' words
+    assert [line for line in cleaning_prompt.splitlines() if "zz_" in line] == CLEANING_LINES
     lines = proposer.splitlines()
     (issue_line,) = [line for line in lines if re.match(r"^\[\d+\] aggregatable_table: ", line)]
     assert [line for line in lines if "zz_metric" in line or "zz_note" in line] == [issue_line]
@@ -353,14 +432,40 @@ def test_privacy(fake_model, tmp_path, store):
     assert ("For a joinable_table or aggregatable_table issue, say in 'recommendation' whether the question needs the "
             "other table ('apply') or not ('skip'), and in 'rationale' why; you must still choose the best join option "
             "so the user can decide.") in proposer
+    # (2) the report prompts: only inside the rejected-cleaning caveat sentences, and nowhere when it was approved
+    reports = by_stage["report"]
+    assert reports
+    for text in reports:
+        if cleaning == "rejected":
+            assert all(sentence in text for sentence in REJECTED_SENTENCES)
+            for sentence in REJECTED_SENTENCES:
+                text = text.replace(sentence, "")
+        assert not any(name in text for name in LINKED_NAMES)
+    # the classifier and the drafter never see a carried table
+    for stage in ("_ClassificationOut", "_DraftPlanOut"):
+        for text in by_stage[stage]:
+            assert not any(name in text for name in LINKED_NAMES), stage
+    # no cell value, canary, aggregate, join warning or preview number anywhere; the unlinked table nowhere
+    forbidden = ["NOTE-CANARY", "UNLINKED-CANARY", "27182", "31415", "unlinked_extra", "zz_other", "zz_amount",
+                 *op["impact_preview"]["warnings"], "counted again", "missing in zz_events",
+                 f"{float(events['zz_metric'].mean()):.4g}", f"{float(events['zz_metric'].sum()):.4g}",
+                 f"{op['impact_preview']['cells_changed']} new missing"]
+    for p in prompts:
+        for word in forbidden:
+            assert word not in p["text"], (p["stage"], word)
+    # the review payloads (the Stage 1 report's Tables section at plan approval lists every table by name, as in M2.1)
+    payloads = json.dumps([p["payload"] for p in pauses if p["type"] == "wrangling_approval"], default=str)
+    for word in ("unlinked_extra", "zz_other", "zz_amount", "UNLINKED-CANARY", "31415"):
+        assert word not in payloads, word
 
 
 # --- (h) an edit -------------------------------------------------------------------------------------------------
 
 def _edit(change):
-    def answer(payload):
-        op = payload["proposed_operations"][0]
-        return {"decisions": [{"index": op["index"], "action": "edit", "params": change(dict(op["params"]))}]}
+    def answer(payload):  # M2.4b: edit the join; reject the orders cleaning (it stays as uploaded)
+        return {"decisions": [{"index": o["index"], "action": "edit", "params": change(dict(o["params"]))}
+                              if o["op_type"] == "join" else {"index": o["index"], "action": "reject"}
+                              for o in payload["proposed_operations"]]}
     return answer
 
 
@@ -404,7 +509,7 @@ def test_missing_keys_and_a_repeating_left_key(fake_model, tmp_path, store):
     visits = pd.DataFrame({"customer_id": keys, "minutes": rng.normal(5, 1, len(keys))})
     tables = _bundle(tmp_path, store, {"orders": orders, "visits": visits})
     values, _, _ = _drive(_app(store, outcome="amount"), _state(tables), "j",
-                          wrangling_approval=reject_join_missing)  # M2.4a: round 2 (c20 has no visits) is rejected
+                          wrangling_approval=reject_carried_and_join_missing)  # M2.4a: c20; M2.4b: visits as uploaded
     (execution,) = _records(values, "stage1.clean.execution")
     assert execution["evidence"]["details"]["aggregate"]["rows_summarized"] == len(visits)
     assert len(_store_frame(store, values["dataset"])) == len(orders) == execution["evidence"]["rows_after"]

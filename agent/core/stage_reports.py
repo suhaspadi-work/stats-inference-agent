@@ -77,7 +77,21 @@ def _checked(scan) -> str:
 
 
 def _issue_lines(ev) -> list:
-    """The issue lines of a scan record's evidence (the Checked wording, without its first line)."""
+    """The issue lines of a scan record's evidence (the Checked wording, without its first line). M2.4b: then the same
+    lines for each linked carried table checked in that scan, prefixed "In {table}: "."""
+    lines = _integrity_lines(ev)
+    for t in ev.get("joinable_tables") or []:  # M2.3b
+        lines.append(f"{t['table']}: can be joined to the analysis table on {t['left_key']}.")
+    for t in ev.get("aggregatable_tables") or []:  # M2.3b step 2
+        lines.append(f"{t['table']}: has several rows for each {t['left_key']}; it can be summarized and joined to the "
+                     "analysis table.")
+    for block in ev.get("carried") or []:
+        lines += [f"In {block['table']}: {line}" for line in _integrity_lines(block)]
+    return lines
+
+
+def _integrity_lines(ev) -> list:
+    """The lines of the four integrity detectors for one table's scan evidence."""
     lines = []
     duplicates = ev.get("duplicate_row_count") or 0
     if duplicates > 0:
@@ -90,11 +104,6 @@ def _issue_lines(ev) -> list:
                      f"{t['column']}: {t['cells_changed_trim']} value(s) have extra spaces.")
     for t in ev.get("numeric_text_columns") or []:
         lines.append(f"{t['column']}: stored as text, but {t['parse_rate']:.1%} of its values are numbers.")
-    for t in ev.get("joinable_tables") or []:  # M2.3b
-        lines.append(f"{t['table']}: can be joined to the analysis table on {t['left_key']}.")
-    for t in ev.get("aggregatable_tables") or []:  # M2.3b step 2
-        lines.append(f"{t['table']}: has several rows for each {t['left_key']}; it can be summarized and joined to the "
-                     "analysis table.")
     return lines
 
 
@@ -273,7 +282,9 @@ def _changed(records: list, used: set, columns_scanned=None) -> tuple[str, list]
         # the params that ran (after an edit) when the operation ran, otherwise the proposed ones
         params = (execution or fix)["evidence"].get("params") or {}
         ran = execution if execution is not None and execution["chosen"] == "applied" else None
-        parts = [f"{number}{_operation_words(fix, params, columns_scanned, ran)}.",
+        table = (fix.get("evidence") or {}).get("table")
+        in_table = f"In {table}: " if table else ""  # M2.4b: a carried table's operation
+        parts = [f"{number}{in_table}{_operation_words(fix, params, columns_scanned, ran)}.",
                  f"{_why_label(fix)}: {_bare(fix['rationale'])}."]
         fix_ev = fix.get("evidence") or {}
         joined = fix_ev.get("issue_type") in ("joinable_table", "aggregatable_table")  # M2.3b (step 2)
@@ -438,6 +449,18 @@ def _quality_record(records, label):
                  if r.get("decision_point") == QUALITY_SNAPSHOT_POINT and r.get("chosen") == label), None)
 
 
+def _carried_quality_lines(records) -> list:
+    """M2.4b: for each carried table with an applied operation, in the order of its first one, its rows before the
+    first and after the last of them."""
+    rows = {}
+    for r in records:
+        ev = r.get("evidence") or {}
+        if r.get("decision_point") == EXECUTION_POINT and r.get("chosen") == "applied" and ev.get("table"):
+            first = rows.setdefault(ev["table"], [ev.get("rows_before"), None])
+            first[1] = ev.get("rows_after")
+    return [f"{table}: {before} rows before cleaning, {after} after." for table, (before, after) in rows.items()]
+
+
 def _first_quality_record(records, label):
     return next((r for r in records
                  if r.get("decision_point") == QUALITY_SNAPSHOT_POINT and r.get("chosen") == label), None)
@@ -464,7 +487,10 @@ def stage1_report(records: list, stage_plan: dict) -> dict:
     if before is not None:
         # "Cleaning did not change the data." only when the scan found something to clean (chosen propose_fixes)
         issues_found = scan is not None and scan.get("chosen") == "propose_fixes"
-        sections.append({"heading": "Data quality", "text": _quality_section(before, after, issues_found)})
+        carried = _carried_quality_lines(records)  # M2.4b: one line per cleaned carried table
+        # M2.4b: "Cleaning did not change the data." is not written when a carried table was cleaned
+        text = _quality_section(before, after, issues_found and not carried)
+        sections.append({"heading": "Data quality", "text": "\n".join([text, *carried]) if carried else text})
         used.update(r["id"] for r in (before, after) if r is not None)
     links = _latest(records, LINKS_POINT)
     several = len(((plan_record or {}).get("evidence") or {}).get("tables") or []) > 1

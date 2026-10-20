@@ -61,7 +61,8 @@ def test_scan_no_issues_is_skipped():
                           "text_issues": [], "numeric_text_columns": [],  # M2.3a step 2: the two new issue lists
                           "joinable_tables": [],  # M2.3b: the join issues (names only)
                           "aggregatable_tables": [],  # M2.3b step 2: the aggregate issues (names only)
-                          "join_missing_tables": []}  # M2.4a: an aggregate join's unmatched rows (names only)
+                          "join_missing_tables": [],  # M2.4a: an aggregate join's unmatched rows (names only)
+                          "carried": []}  # M2.4b: the linked carried tables checked (none here)
     expected = "no exact duplicate rows and no column above the 5% missing threshold (21 rows, 3 columns scanned)"
     assert r.rationale == expected
     c = _by_option(r)
@@ -227,6 +228,7 @@ def test_execution_applied():
         "input_handles": ["d@v1"], "output_handle": "d@v2",
         "rows_before": 21, "rows_after": 20, "columns_before": 3, "columns_after": 3,
         "warnings": ["w"], "approval_record_id": "appr-1",
+        "session_id": "s",  # M2.4b: the session, so a later question finds this session's joins (G83)
     }
 
 
@@ -238,7 +240,7 @@ def test_execution_failed():
     assert r.candidates == ()
     assert r.evidence == {"op_type": "dedupe", "params": {"subset": None}, "operation_id": op.id,
                           "failure_reason": "Cannot dedupe — columns not found: ['nope']",
-                          "approval_record_id": "appr-1"}
+                          "approval_record_id": "appr-1", "session_id": "s"}  # M2.4b: the session
 
 
 # --- every record is plain, and inputs are not mutated ---------------------------

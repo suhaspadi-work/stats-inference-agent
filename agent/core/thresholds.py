@@ -21,4 +21,5 @@ NUMERIC_TEXT_PARSE_RATE = 0.95  # the share of non-missing values that must pars
 MAX_AGG_COLUMNS = 5            # the numeric columns of a carried table that an aggregate-then-join summarizes
 
 # --- the Stage 1 loop (M2.4a) -----------------------------------------------------------------------------------------
-MAX_STAGE1_ROUNDS = 3  # the most cleaning rounds one question runs; a round only starts when the previous one created new issues
+MAX_STAGE1_ROUNDS = 7  # a circuit breaker, not a design limit: the loop already ends because an issue is proposed at most
+                       # once per question; this contains a bug or an unattended run

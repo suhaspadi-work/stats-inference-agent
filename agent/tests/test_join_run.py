@@ -282,8 +282,12 @@ def test_a_normalized_join(fake_model, tmp_path, store):
     main = pd.DataFrame({"region": rng.choice(["East", "West"], 120), "total_spend": rng.normal(50, 5, 120)})
     zones = pd.DataFrame({"region": ["east ", "WEST"], "manager": ["Ana", "Ben"]})
     tables = _bundle(tmp_path, store, {"main": main, "zones": zones})
-    values, pauses, _ = _drive(_app(store), _state(tables), "g")
-    (op,) = _wrangling(pauses)["proposed_operations"]
+    from tests.test_aggregate_run import reject_carried  # (a lazy import: test_aggregate_run imports this module)
+    # M2.4b: round 1 cleans the zones keys (stray spaces, case); declining it keeps them as uploaded, so in round 2 only
+    # the normalized join can match, as before
+    values, pauses, _ = _drive(_app(store), _state(tables), "g", wrangling_approval=reject_carried)
+    (op,) = next(p["payload"] for p in pauses if p["type"] == "wrangling_approval"
+                 and any(o["op_type"] == "join" for o in p["payload"]["proposed_operations"]))["proposed_operations"]
     by_id = {c["id"]: c for c in op["candidates"]}
     assert (by_id["join_left"]["eligible"], by_id["join_left"]["reason"]) == (False, "no key value matches")
     assert not by_id["join_inner"]["eligible"] and by_id["join_left_normalized"]["eligible"]

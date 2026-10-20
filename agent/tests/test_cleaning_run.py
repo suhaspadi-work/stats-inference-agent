@@ -163,7 +163,9 @@ def test_the_review_payload(fake_model, tmp_path, store):
     json.dumps(payload, allow_nan=False)
     (op,) = payload["proposed_operations"]
     assert set(op) == {"index", "op_type", "params", "rationale", "alternative", "candidate_id", "what_was_run",
-                       "impact_preview", "preview_basis", "candidates", "recommendation"}  # M2.3b: recommendation
+                       "impact_preview", "preview_basis", "candidates", "recommendation",  # M2.3b: recommendation
+                       "table"}  # M2.4b: the table the operation runs on
+    assert op["table"] is None  # M2.4b: the analysis table
     assert op["recommendation"] == "apply"
     assert op["alternative"] == "Leave the data as it is."
     for c in op["candidates"]:

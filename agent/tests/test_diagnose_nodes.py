@@ -184,8 +184,9 @@ def test_a_bundle_records_the_carried_tables_and_the_link(fake_model, tmp_path):
     assert c["inner_join_rows"] == len(main.merge(carried, on="region")) == int(counts.sum())
     carried_reads = store.reads.count(tables[CARRIED_NAME].storage_key)
     # its profile and the link numbers (as before); M2.3b: the link scans of the join detection at plan_stages and
-    # wrangle_propose, and the join candidates' read; never cleaned or described
-    assert carried_reads == 2 + 3
+    # wrangle_propose, and the join candidates' read; M2.4b: the integrity detectors of the linked table (wrangle_propose)
+    # and the link scan of rediagnose's declined-cleaning rule (the rejected join applied nothing); never described
+    assert carried_reads == 2 + 3 + 2
 
 
 # --- (e) the Stage 1 report text ----------------------------------------------------------------------------------------------
@@ -240,14 +241,24 @@ def _link_line(c, extra=""):
             f"an inner join would give {c['inner_join_rows']} rows.{extra}")
 
 
+def reject_carried_and_joins(payload):
+    """M2.4b: reject every operation on a carried table and every join; approve the rest."""
+    return {"decisions": [{"index": o["index"], "action": "reject", "reason": "not needed"}
+                          if o.get("table") is not None or o["op_type"] == "join"
+                          else {"index": o["index"], "action": "approve"} for o in payload["proposed_operations"]]}
+
+
 def test_the_links_lines(fake_model, tmp_path, store):
     main = _frame()
     carried = pd.DataFrame({"region": ["east", "West "], "manager": ["Ana", "Ben"]})  # differ by case and a space
     tables = _bundle(tmp_path, store, {"main": main, CARRIED_NAME: carried})
     # M2.3b: the keys match after normalizing, so a join is proposed (join_left_normalized), rejected here
-    values, _, _ = _drive(_app(store), _bundle_state(tables), "case", wrangling_approval=reject_joins)
+    # M2.4b: "West " has a stray space, so round 1 cleans the carried table; declining it keeps the keys as uploaded,
+    # and round 2 proposes the (normalized) join, rejected as before
+    values, _, _ = _drive(_app(store), _bundle_state(tables), "case", wrangling_approval=reject_carried_and_joins)
     entry = _stage1(values)
     assert [s["heading"] for s in entry["sections"]] == ["Checked", "Tables", "Data quality", "Links between tables",
+                                                         "Rounds",  # M2.4b: round 2 proposed the join
                                                          "Changed", "Left as is", "Described"]  # M2.3b: the rejected join
     (c,) = _record(values, LINKS_POINT)["evidence"]["computed"]
     assert (c["matched_distinct"], c["matched_distinct_normalized"], c["inner_join_rows"]) == (0, 2, 0)

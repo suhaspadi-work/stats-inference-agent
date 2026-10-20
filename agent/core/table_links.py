@@ -27,8 +27,11 @@ def _ratio(distinct, non_missing):
     return distinct / non_missing if non_missing > 0 else 0.0
 
 
-def candidate_links(profiles: dict) -> list:
-    """Candidate key pairs between different tables, from the ModelSafeViews only, best first."""
+def candidate_links(profiles: dict, whole_floats=None) -> list:
+    """Candidate key pairs between different tables, from the ModelSafeViews only, best first. M2.4b (G80):
+    whole_floats is an optional set of (table, column) pairs known to hold only whole numbers (a numeric key with a
+    missing value is read as float); such a float column counts as an integer-like key. With None, floats are skipped."""
+    whole = whole_floats or set()
     order = {name: i for i, name in enumerate(profiles)}
     buckets = {}
     for table, profile in profiles.items():
@@ -49,7 +52,8 @@ def candidate_links(profiles: dict) -> list:
                     a, b = b, a
                 if is_numeric_dtype_name(a[2]) != is_numeric_dtype_name(b[2]):
                     continue
-                if a[2].startswith("float") or b[2].startswith("float"):
+                if ((a[2].startswith("float") and (a[0], a[1]) not in whole)
+                        or (b[2].startswith("float") and (b[0], b[1]) not in whole)):
                     continue
                 ratio_a, ratio_b = _ratio(a[3], a[4]), _ratio(b[3], b[4])
                 key_a, key_b = a[4] > 0 and ratio_a >= KEY_LIKE_RATIO, b[4] > 0 and ratio_b >= KEY_LIKE_RATIO
@@ -112,12 +116,31 @@ def link_numbers(dataset_a, column_a, dataset_b, column_b, store, frames=None) -
     }
 
 
+def _whole_floats(tables, profiles, store, frames) -> set:
+    """M2.4b (G80): the (table, column) pairs of float columns that hold only whole numbers (at least one value), checked
+    only for float columns whose normalized name occurs in at least two tables (found from the profiles); a table is
+    read at most once, through frames (the same cache the link numbers use)."""
+    names = {}
+    for table, profile in profiles.items():
+        for c in profile.columns:
+            names.setdefault(normalize_name(c.name), set()).add(table)
+    out = set()
+    for table, profile in profiles.items():
+        for c in profile.columns:
+            if not str(c.dtype).startswith("float") or len(names[normalize_name(c.name)]) < 2 or table not in tables:
+                continue
+            values = _frame(tables[table], store, frames)[c.name].dropna()
+            if len(values) and bool((values % 1 == 0).all()):
+                out.add((table, c.name))
+    return out
+
+
 def scan_links(tables: dict, profiles: dict, store, top_n=None) -> dict:
     """The candidates (at most 200 stored, with the true total) and the exact numbers of the first top_n (TOP_LINKS,
     read at call time, when not given). Each table of a computed pair is read once."""
     top_n = TOP_LINKS if top_n is None else top_n
-    candidates = candidate_links(profiles)
     frames = {}
+    candidates = candidate_links(profiles, whole_floats=_whole_floats(tables, profiles, store, frames))
     computed = [{**c, **link_numbers(tables[c["table_a"]], c["column_a"], tables[c["table_b"]], c["column_b"], store,
                                      frames)}
                 for c in candidates[:top_n]]

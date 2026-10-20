@@ -321,14 +321,26 @@ def _setup(tmp_path, store):
     return customers, tables, unmatched
 
 
+def _cleaned_orders(store, tables):
+    """M2.4b: the orders as round 1 leaves them (every decision approve: the exact duplicates removed, then the rows
+    with a missing amount), computed independently with pandas."""
+    orders = _store_frame(store, tables["orders"])
+    return orders.drop_duplicates().dropna(subset=["amount"])
+
+
+def _unmatched_after_cleaning(store, tables, customers):
+    return set(customers["customer_id"]) - set(_cleaned_orders(store, tables)["customer_id"])
+
+
 def _second_round(reason=None, choice=None):
+    """M2.4b: select by kind (never by round): reject every fix of the unmatched rows, approve the rest (the orders
+    cleaning in round 1 and the aggregate join in round 2)."""
+    from tests.test_aggregate_run import _is_join_missing_fix
+
     def answer(payload):
-        if payload["round"] == 1:
-            return {"decisions": [{"index": o["index"], "action": "approve"} for o in payload["proposed_operations"]]}
-        if choice == "approve":
-            return {"decisions": [{"index": o["index"], "action": "approve"} for o in payload["proposed_operations"]]}
         return {"decisions": [{"index": o["index"], "action": "reject", **({"reason": reason} if reason else {})}
-                              for o in payload["proposed_operations"]]}
+                              if _is_join_missing_fix(o) and choice != "approve"
+                              else {"index": o["index"], "action": "approve"} for o in payload["proposed_operations"]]}
     return answer
 
 
@@ -336,7 +348,8 @@ def _second_round(reason=None, choice=None):
 def test_round_two_rejected(reason, fake_model, tmp_path, store):
     customers, tables, unmatched = _setup(tmp_path, store)
     values, pauses, _ = _drive(_app(store), _state(tables), f"r-{reason}", wrangling_approval=_second_round(reason))
-    first, second = _wranglings(pauses)
+    *_, second = _wranglings(pauses)  # M2.4b: round 1 cleans orders, round 2 joins, round 3 the unmatched rows
+    unmatched = _unmatched_after_cleaning(store, tables, customers)  # M2.4b: the customers without kept orders
     (op,) = second["proposed_operations"]
     issue = next(i for i in values["decision_log"] if i["decision_point"] == "stage1.clean.fix"
                  and i["evidence"]["issue_type"] == "join_missing")
@@ -357,8 +370,8 @@ def test_the_round_two_issue(fake_model, tmp_path, store):
     values, pauses, _ = _drive(_app(store), _state(tables), "issue", wrangling_approval=_second_round("x"))
     fix = [r for r in _records(values, "stage1.clean.fix") if r["evidence"]["issue_type"] == "join_missing"]
     (fix,) = fix
-    scan = [r for r in _records(values, "stage1.clean.scan")][1]
-    assert scan["evidence"]["round"] == 2 and scan["evidence"]["join_missing_tables"] == [
+    scan = [r for r in _records(values, "stage1.clean.scan")][2]  # M2.4b: round 3 (round 1 cleans orders)
+    assert scan["evidence"]["round"] == 3 and scan["evidence"]["join_missing_tables"] == [
         {"table": "orders", "columns": ["amount_mean", "amount_sum", "quantity_mean", "quantity_sum"]}]
     assert DESCRIPTION in scan["rationale"]
 
@@ -366,11 +379,14 @@ def test_the_round_two_issue(fake_model, tmp_path, store):
 def test_delete_unmatched_rows(fake_model, tmp_path, store):
     customers, tables, unmatched = _setup(tmp_path, store)
     values, _, _ = _drive(_app(store), _state(tables), "delete")  # every decision approve
+    unmatched = _unmatched_after_cleaning(store, tables, customers)  # M2.4b: orders are cleaned first (round 1)
+    n = len(unmatched)
+    assert n > 8  # the cleaning removed every order of some customers
     joined = _store_frame(store, values["dataset"])
-    assert len(joined) == 32 and not set(joined["customer_id"]) & unmatched
-    line = _sections(values)["Changed"].split("\n")[1]
-    assert line.startswith("2. (round 2) Remove the rows that have no rows in orders (8 removed). Why (the model's "
-                           "reason): fix join_missing.") and line.endswith("Effect: 40 to 32 rows.")
+    assert len(joined) == 40 - n and not set(joined["customer_id"]) & unmatched
+    line = _sections(values)["Changed"].split("\n")[3]  # M2.4b: after the two orders lines and the join
+    assert line.startswith(f"4. (round 3) Remove the rows that have no rows in orders ({n} removed). Why (the model's "
+                           "reason): fix join_missing.") and line.endswith(f"Effect: 40 to {40 - n} rows.")
     assert [u.issue_type for u in values["plan"].unaddressed_issues] == ["outcome_aggregated"]
 
 
@@ -378,22 +394,24 @@ def test_fill_empty_sums_with_zero(fake_model, tmp_path, store):
     customers, tables, unmatched = _setup(tmp_path, store)
     pick = choose({"join_missing": "fill_empty_sums_with_zero"})
     values, pauses, _ = _drive(_app(store, pick), _state(tables), "fill")
+    unmatched = _unmatched_after_cleaning(store, tables, customers)  # M2.4b: orders are cleaned first (round 1)
+    n = len(unmatched)
     joined = _store_frame(store, values["dataset"])
     no_orders = joined["customer_id"].isin(unmatched)
     assert len(joined) == 40 and (joined.loc[no_orders, ["amount_sum", "quantity_sum", "rows_in_orders"]] == 0).all().all()
     assert joined.loc[no_orders, ["amount_mean", "quantity_mean"]].isna().all().all()
-    assert joined["amount_mean"].isna().mean() >= 0.2  # the 8 of 40 customers (20%) at least
-    # the matched customers' summaries are unchanged: recomputed from the orders with pandas
-    orders = _store_frame(store, tables["orders"])
+    assert joined["amount_mean"].isna().mean() >= n / 40  # the unmatched customers at least
+    # the matched customers' summaries are unchanged: recomputed from the (cleaned, M2.4b) orders with pandas
+    orders = _cleaned_orders(store, tables)
     expected = orders.groupby("customer_id")["quantity"].sum()
     matched = joined.loc[~no_orders].set_index("customer_id")["quantity_sum"]
     assert matched.sort_index().astype(float).equals(expected.loc[matched.index].sort_index().astype(float))
-    line = _sections(values)["Changed"].split("\n")[1]
-    assert line.startswith("2. (round 2) Fill amount_sum, quantity_sum with zero for the rows that have no rows in "
-                           "orders (16 value(s) filled).")
-    assert line.endswith("Effect: 8 row(s) had their sums filled with 0 (16 value(s)).")
-    # the structural rule: no third round proposes the mean columns
-    assert [p["round"] for p in _wranglings(pauses)] == [1, 2]
+    line = _sections(values)["Changed"].split("\n")[3]  # M2.4b: after the two orders lines and the join
+    assert line.startswith(f"4. (round 3) Fill amount_sum, quantity_sum with zero for the rows that have no rows in "
+                           f"orders ({2 * n} value(s) filled).")
+    assert line.endswith(f"Effect: {n} row(s) had their sums filled with 0 ({2 * n} value(s)).")
+    # the structural rule: no later round proposes the mean columns (M2.4b: round 3 handled the unmatched rows)
+    assert [p["round"] for p in _wranglings(pauses)] == [1, 2, 3]
     assert [u.issue_type for u in values["plan"].unaddressed_issues] == ["outcome_aggregated"]
 
 
@@ -406,23 +424,27 @@ def test_a_rejected_join_missing_is_not_proposed_again(fake_model, tmp_path, sto
     from tests.test_aggregate_run import reject_join_missing
     from tests.test_stage1_loop import _with_synthetic
     import core.nodes as nodes_module
+    from core import thresholds
     real_detect = nodes_module.detect_all_issues
-    _with_synthetic(monkeypatch)  # a new issue every round, so the loop runs to its limit of 3
+    _with_synthetic(monkeypatch)  # a new issue every round, so the loop runs to its limit (M2.4b: 7)
     _, tables, _ = _setup(tmp_path, store)
     app = _app(store)
     values, pauses, _ = _drive(app, _state(tables), "again", wrangling_approval=reject_join_missing)
     rounds = _wranglings(pauses)
-    assert [p["round"] for p in rounds] == [1, 2, 3]
-    assert [len(_join_missing_ops(p)) for p in rounds] == [0, 1, 0]  # rejected in round 2, not proposed in round 3
-    # the next question on the same thread: the join belongs to the previous question, so its missing values come
-    # back as plain high_missingness issues (join records are per question), each proposed again
+    limit = thresholds.MAX_STAGE1_ROUNDS
+    assert [p["round"] for p in rounds] == list(range(1, limit + 1))
+    # M2.4b: round 1 cleans orders, round 2 joins; the unmatched rows are rejected in round 3 and never proposed again
+    assert [len(_join_missing_ops(p)) for p in rounds] == [0, 0, 1] + [0] * (limit - 3)
+    # G83 (M2.4b): the next question on the same thread finds the join through the analysis table's lineage, so its
+    # missing values come back as join_missing (proposed once), not as plain high_missingness issues
     monkeypatch.setattr(nodes_module, "detect_all_issues", real_detect)  # the real detector (the fake chat stays)
     second, pauses, _ = _drive(app, {"request_text": "q", "session_id": "s-join", "dataset": values["dataset"]},
                                "again", wrangling_approval=reject_join_missing)
     (first,) = _wranglings(pauses)
+    assert [len(_join_missing_ops(first))] == [1]
     fixes = [r["evidence"] for r in _records(second, "stage1.clean.fix")[-len(first["proposed_operations"]):]]
-    assert sorted(f["affected_columns"][0] for f in fixes if f["issue_type"] == "high_missingness") == [
-        "amount_mean", "amount_sum", "quantity_mean", "quantity_sum"]
+    assert [f["issue_type"] for f in fixes] == ["join_missing"]
+    assert second["stage1_seen_keys"].count(["join_missing", [], "orders"]) == 1
 
 
 def test_two_aggregate_joins_raise_two_join_missing_issues(fake_model, tmp_path, store):
@@ -430,7 +452,8 @@ def test_two_aggregate_joins_raise_two_join_missing_issues(fake_model, tmp_path,
     rng = np.random.default_rng(81)
     visits = pd.DataFrame({"customer_id": rng.integers(1, 31, 90), "minutes": rng.normal(5, 1, 90)})
     no_visits = set(customers["customer_id"]) - set(visits["customer_id"])
-    tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers), "visits": visits})
+    # M2.4b: clean orders, so neither join is withheld and both run in round 1
+    tables = _bundle(tmp_path, store, {"customers": customers, "orders": _orders(customers, clean=True), "visits": visits})
     pick = choose({"join_missing": "fill_empty_sums_with_zero"})
     values, pauses, _ = _drive(_app(store, pick), _state(tables), "two")
     rounds = _wranglings(pauses)

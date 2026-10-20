@@ -17,7 +17,7 @@ from core.regression import execute_regression, select_regression_method
 from dataclasses import asdict
 from core.report import generate_report
 from core.report import generate_report, check_for_causal_language
-from core.detection import detect_all_issues, issue_key
+from core.detection import detect_all_issues, detect_carried_issues, issue_key
 from core.classifier import propose_wrangling_operations
 from core.operation import Operation, ApprovalStatus, WranglingRationale, AlternativeApproachConsidered
 from core.plan import UnaddressedIssue
@@ -261,12 +261,69 @@ def _applied_aggregate_joins(state) -> list:
             and ((e.get("evidence") or {}).get("params") or {}).get("aggregate")]
 
 
+def _lineage_names(state) -> set:
+    """M2.4b: the derived tables in the analysis table's lineage: the analysis table when it is derived, and every
+    derived table among its ancestors (a handle is "name@vK"; a visited set keeps the walk finite)."""
+    tables = state.get("tables") or {}
+    dataset = state.get("dataset")
+    analysis = state.get("analysis_table") or getattr(dataset, "name", None)
+    names, visited, stack = set(), set(), [analysis]
+    while stack:
+        name = stack.pop()
+        if name is None or name in visited:
+            continue
+        visited.add(name)
+        ds = tables.get(name) or (dataset if name == analysis else None)
+        if ds is None or not ds.parents:
+            continue
+        names.add(name)
+        stack.extend(str(h).split("@", 1)[0] for h in ds.parents)
+    return names
+
+
+def _lineage_aggregate_joins(state) -> list:
+    """M2.4b (G83): the evidence of the applied aggregate joins of the WHOLE log that made a table in the analysis table's
+    lineage, in this session, so a follow-up question still knows the structural missing values of an earlier join. An
+    execution record without a session_id (before M2.4b) never matches."""
+    names = _lineage_names(state)
+    session = getattr(state.get("dataset"), "session_id", None)
+    if not names:
+        return []
+    return [e["evidence"] for e in state.get("decision_log") or []
+            if e.get("decision_point") == CLEAN_EXECUTION_POINT and e.get("chosen") == "applied"
+            and (e.get("evidence") or {}).get("op_type") == "join"
+            and ((e.get("evidence") or {}).get("params") or {}).get("aggregate")
+            and (e["evidence"].get("params") or {}).get("result_name") in names
+            and e["evidence"].get("session_id") == session]
+
+
 def _join_inputs(state, joins: bool = True) -> dict:
     """The tables, profiles and analysis table detect_all_issues needs to find join issues (None without them). M2.4a:
-    and the applied aggregate joins of the current question (joins=False before the question's stage plan exists,
-    when the log after the last planner.stage_plan belongs to the previous question)."""
+    and the applied aggregate joins (joins=False before the question's stage plan exists); M2.4b: found from the analysis
+    table's lineage, so they survive into a follow-up question (G83)."""
     return {"tables": state.get("tables"), "profiles": state.get("profiles"), "analysis": state.get("analysis_table"),
-            "join_records": _applied_aggregate_joins(state) if joins else None}
+            "join_records": _lineage_aggregate_joins(state) if joins else None}
+
+
+_JOIN_ISSUE_TYPES = ("joinable_table", "aggregatable_table")
+
+
+def _round_issues(state, dataset, profile, store) -> list:
+    """
+    M2.4b: the issues of this round: the fresh issues of the analysis table, without the join and summary issues of a
+    carried table that still has fresh cleaning issues (a join is withheld until its table is cleaned; a declined
+    cleaning counts as proposed), then those carried-table issues. Only a carried table with a fresh join or summary
+    issue is read for cleaning; a withheld join issue is not returned, so it is not remembered as seen.
+    """
+    seen = state.get("stage1_seen_keys") or []
+    fresh = [i for i in detect_all_issues(dataset, profile, store, **_join_inputs(state)) if issue_key(i) not in seen]
+    linked = [i.evidence["right_table"] for i in fresh if i.issue_type in _JOIN_ISSUE_TYPES]
+    carried = []
+    if linked:
+        carried = [i for i in detect_carried_issues(state.get("tables") or {}, state.get("profiles") or {}, store,
+                                                    linked) if issue_key(i) not in seen]
+    blocked = {i.evidence["table"] for i in carried}
+    return [i for i in fresh if not (i.issue_type in _JOIN_ISSUE_TYPES and i.evidence["right_table"] in blocked)] + carried
 
 
 def _fresh_issues(state, issues) -> list:
@@ -461,17 +518,28 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
 
         # M2.4a: a round proposes only the issues no earlier round of this question proposed
         round_number = (state.get("stage1_round") or 0) + 1
-        issues = _fresh_issues(state, detect_all_issues(dataset, profile, store, **_join_inputs(state)))
-        scan = scan_record(profile, issues, round=round_number)
+        issues = _round_issues(state, dataset, profile, store)
+        tables = state.get("tables") or {}
+        profiles = state.get("profiles") or {}
+        # M2.4b: an issue's table (None for the analysis table); the scan lists each linked carried table's issues
+        carried_names = list(dict.fromkeys(i.evidence["table"] for i in issues if i.evidence.get("table")))
+        scan = scan_record(profile, [i for i in issues if not i.evidence.get("table")], round=round_number,
+                           carried=[(name, profiles[name], [i for i in issues if i.evidence.get("table") == name])
+                                    for name in carried_names])
         if not issues:
             return {**with_dataset(state, dataset), "pending_wrangling": None, "stage1_round": round_number,
                     **log_update(scan)}
 
         # M2.3a: the code enumerates every candidate fix (with its dry-run preview); the model only chooses
-        df = store.read(dataset.storage_key)
-        tables = state.get("tables") or {}
+        datasets = {None: dataset, **{name: tables[name] for name in carried_names}}
+        table_profiles = {None: profile, **{name: profiles[name] for name in carried_names}}
+        table_frames = {t: store.read(ds.storage_key) for t, ds in datasets.items()}  # each table read once
         frames = {}  # M2.3b: the other tables a join reads, by name, read once
-        candidates = [enumerate_candidates(issue, dataset, profile, store, df, tables=tables, frames=frames)
+
+        def table_of(issue):
+            return issue.evidence.get("table")
+        candidates = [enumerate_candidates(issue, datasets[table_of(issue)], table_profiles[table_of(issue)], store,
+                                           table_frames[table_of(issue)], tables=tables, frames=frames)
                       for issue in issues]
         proposals = propose_fn(issues, candidates, state.get("request_text"))
         _validate_choices(proposals, issues, candidates)
@@ -482,24 +550,30 @@ def make_wrangle_propose_node(store: DatasetStore, propose_fn=propose_wrangling_
         # unmatched rows of a join) is detected only by the Stage 1 loop of M2.4.
         proposals = sorted(proposals, key=lambda p: (_EXECUTION_RANK.get(issues[p.issue_index].issue_type, 4),
                                                      p.issue_index))
-        # the previews, recomputed on the data as each operation will see it (after the chosen earlier operations)
-        frame = df
-        for n, p in enumerate(proposals):
-            basis = "uploaded_data" if n == 0 else "after_earlier_operations"
-            candidates[p.issue_index] = recompute_candidates(candidates[p.issue_index], dataset, frame, basis, frames)
+        # the previews, recomputed on the data as each operation will see it (after the chosen earlier operations);
+        # M2.4b: one chain per table, so a carried table's operations see that table's earlier operations only
+        chain = {}
+        for p in proposals:
+            table = table_of(issues[p.issue_index])
+            basis = "after_earlier_operations" if table in chain else "uploaded_data"
+            frame = chain.get(table, table_frames[table])
+            candidates[p.issue_index] = recompute_candidates(candidates[p.issue_index], datasets[table], frame, basis,
+                                                             frames)
             chosen = next(c for c in candidates[p.issue_index] if c["id"] == p.candidate_id)
             try:
                 frame = run_transform(chosen["op_type"], frame, chosen["params"], frames)[0]
             except ValueError:
                 pass  # the frame stays as it was; this operation will fail or be edited at review
-        operations = [_build_operation_from_proposal(dataset, p, issues[p.issue_index], candidates[p.issue_index],
-                                                     tables)
+            chain[table] = frame
+        operations = [_build_operation_from_proposal(datasets[table_of(issues[p.issue_index])], p, issues[p.issue_index],
+                                                     candidates[p.issue_index], tables)
                       for p in proposals]
 
         auto_indices = set()
-        if autonomy_mode == "stakeholder":
+        if autonomy_mode == "stakeholder":  # M2.4b: a carried table's duplicate removal always interrupts
             for i, p in enumerate(proposals):
-                if issues[p.issue_index].issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES:
+                issue = issues[p.issue_index]
+                if issue.issue_type in _STAKEHOLDER_AUTO_APPROVE_ISSUE_TYPES and table_of(issue) is None:
                     auto_indices.add(i)
 
         fixes = [fix_record(issues[p.issue_index], op, p.issue_index, candidates[p.issue_index])
@@ -588,17 +662,28 @@ def make_rediagnose_node(store: DatasetStore) -> Callable[[AgentState], dict]:
         latest = _latest_snapshot(state)
         dataset = state["dataset"]
         finish_reason = state.get("stage1_finish_reason") if state.get("stage1_finish") else None
-        if latest is None or latest["evidence"].get("handle") == dataset.handle:
+        analysis_changed = latest is not None and latest["evidence"].get("handle") != dataset.handle
+        # M2.4b: a round that only cleaned a carried table changed nothing here, but the loop goes on
+        carried_only = latest is not None and not analysis_changed and (state.get("stage1_applied") or 0) > 0
+        if not analysis_changed and not carried_only:
+            # M2.4b: a declined cleaning of a carried table counts as proposed, so the join it withheld goes ahead
+            if finish_reason == "declined_all" and latest is not None and (
+                    state.get("stage1_round") or 1) < thresholds.MAX_STAGE1_ROUNDS and any(
+                    i.issue_type in _JOIN_ISSUE_TYPES for i in _round_issues(state, dataset, state["profile"], store)):
+                return {"stage1_continue": True, "stage1_end_reason": None}
             return {"stage1_continue": False, "stage1_end_reason": finish_reason or "no_new_issues"}
-        analysis = state.get("analysis_table") or dataset.name
-        new_profile = profile_dataset(dataset, store=store)
-        snapshot = quality_snapshot(dataset, store, analysis)
-        update = {**with_dataset(state, dataset, new_profile), **log_update(quality_snapshot_record("after", snapshot))}
+        update, new_profile = {}, state["profile"]
+        if analysis_changed:
+            analysis = state.get("analysis_table") or dataset.name
+            new_profile = profile_dataset(dataset, store=store)
+            snapshot = quality_snapshot(dataset, store, analysis)
+            update = {**with_dataset(state, dataset, new_profile),
+                      **log_update(quality_snapshot_record("after", snapshot))}
         if finish_reason is not None:
             return {**update, "stage1_continue": False, "stage1_end_reason": finish_reason}
         # the detection runs on the updated table and profile; the log already holds this round's joins
         updated = {**state, **{k: v for k, v in update.items() if k != "decision_log"}}
-        fresh = _fresh_issues(state, detect_all_issues(dataset, new_profile, store, **_join_inputs(updated)))
+        fresh = _round_issues(updated, dataset, new_profile, store)
         if not fresh:
             return {**update, "stage1_continue": False, "stage1_end_reason": "no_new_issues"}
         if (state.get("stage1_round") or 1) >= thresholds.MAX_STAGE1_ROUNDS:  # read at call time
@@ -695,7 +780,8 @@ def _executed_words(ev) -> str:
     details = dict(ev.get("details") or {})
     if ev.get("op_type") in ("dedupe", "filter") and ev.get("rows_before") is not None:
         details["rows_removed"] = ev["rows_before"] - ev["rows_after"]
-    return describe_operation(ev.get("op_type"), ev.get("params") or {}, details)
+    words = describe_operation(ev.get("op_type"), ev.get("params") or {}, details)
+    return f"In {ev['table']}: {words}" if ev.get("table") else words  # M2.4b: a carried table's operation
 
 
 def _since_last_round(state, round_number) -> dict:
@@ -761,6 +847,8 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                         "alternative": operations[i].rationale.alternatives[0].approach,
                         # M2.3b: the model's recommendation ("apply" when it has none)
                         "recommendation": (operations[i].rationale.evidence or {}).get("recommendation") or "apply",
+                        # M2.4b: the table the operation runs on (None for the analysis table)
+                        "table": issues[issue_indices[i]].evidence.get("table"),
                         # M2.3a: the chosen candidate, its impact before approval, and every candidate of the issue
                         **_candidate_payload(operations[i], (pending.get("candidates") or [None] * len(issues))[
                             issue_indices[i]]),
@@ -784,7 +872,8 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
             finish = bool(human_decisions.get("finish"))  # M2.4a: the user ends the Stage 1 loop
 
         current_dataset = dataset
-        applied = 0  # M2.4a: the operations this round applied
+        carried_current = {}  # M2.4b: each carried table's latest version in this review
+        applied = 0  # M2.4a: the operations this round applied (on any table)
         derived = {}  # M2.3b: the tables a join made in this review, by name (their latest version)
         unaddressed = ()
         records = []
@@ -824,7 +913,18 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
                                        edited_params=params if action == "edit" else None)
             records.append(approval)
             entry = operation_named(op.op_type)
-            tables_by_name = {**(state.get("tables") or {}), **derived}
+            tables_by_name = {**(state.get("tables") or {}), **carried_current, **derived}
+            table = issue.evidence.get("table")
+            if table is not None:  # M2.4b: an operation on a carried table makes a new version of that table
+                carried_current.setdefault(table, tables_by_name[table])
+                op = Operation(op_type=op.op_type, session_id=op.session_id,
+                               input_handles=(carried_current[table].handle,), params=params,
+                               approval_status=ApprovalStatus.PENDING, rationale=op.rationale)
+                carried_current[table], finished_op = entry.execute(carried_current[table], store, op.approve())
+                records.append(execution_record(finished_op, approval.id, table=table))
+                if finished_op.approval_status != ApprovalStatus.FAILED:
+                    applied += 1
+                continue
             right = tables_by_name.get(params.get("right_table")) if entry.multi_input else None
             op = Operation(
                 op_type=op.op_type, session_id=op.session_id,
@@ -846,6 +946,11 @@ def make_wrangle_review_node(store: DatasetStore) -> Callable[[AgentState], dict
 
         mirror = (with_tables(state, current_dataset, derived, store) if derived
                   else with_dataset(state, current_dataset))
+        changed = {t: ds for t, ds in carried_current.items() if ds != (state.get("tables") or {}).get(t)}
+        if changed:  # M2.4b: tables[T] and profiles[T] hold each cleaned carried table's latest version
+            mirror["tables"] = {**mirror["tables"], **changed}
+            mirror["profiles"] = {**(mirror.get("profiles") or state.get("profiles") or {}),
+                                  **{t: profile_dataset(ds, store=store) for t, ds in changed.items()}}
         # M2.4a: the loop ends when the answer says finish, or when this round applied nothing
         finish_reason = "finished" if finish else "declined_all" if applied == 0 else None
         result = {**mirror, "pending_wrangling": None, "stage1_finish": finish_reason is not None,

@@ -196,14 +196,15 @@ def _with_synthetic(monkeypatch, marker=None):
     monkeypatch.setattr(nodes_module, "detect_all_issues", wrapper)
 
 
-def test_the_default_limit_stops_after_three_rounds(fake_model, tmp_path, store, monkeypatch):
+def test_the_default_limit_stops_the_chain(fake_model, tmp_path, store, monkeypatch):
+    limit = thresholds.MAX_STAGE1_ROUNDS  # M2.4b: 7 (it was 3)
     _with_synthetic(monkeypatch)
     rng = np.random.default_rng(10)
     df = pd.DataFrame({"region": ["East", "West"] * 30, "total_spend": rng.normal(50, 5, 60), "channel": ["a", "b", "c"] * 20})
     proposer = Counting()
     values, pauses, _ = _run(_app(store, proposer), _input(_dataset(df, tmp_path, store, "chain")), "c6")
-    assert [p["round"] for p in _wranglings(pauses)] == [1, 2, 3] and proposer.calls == 3  # the 4th never proposed
-    assert (values["stage1_round"], values["stage1_end_reason"]) == (3, "round_limit")
+    assert [p["round"] for p in _wranglings(pauses)] == list(range(1, limit + 1)) and proposer.calls == limit
+    assert (values["stage1_round"], values["stage1_end_reason"]) == (limit, "round_limit")  # the next never proposed
 
 
 # --- (d) an issue is proposed at most once per question ----------------------------------------------------------

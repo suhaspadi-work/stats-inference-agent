@@ -48,11 +48,14 @@ _JOIN_TYPES = ("joinable_table", "aggregatable_table")
 NOT_CARRIED_FORWARD_TYPES = _JOIN_TYPES + ("join_missing",)
 
 
-def scan_record(profile: ModelSafeView, issues, round=None) -> DecisionRecord:
-    """round (M2.4a): the cleaning round this scan belongs to; the key is left out when None."""
+def _integrity_block(issues, table=None):
+    """The scan evidence of the four integrity detectors for one table's issues, and the rationale parts (M2.4b: the
+    same builder serves the analysis table and each carried table; a carried issue's description loses its table
+    prefix here, the caller adds "In {table}: ")."""
     duplicate_count = 0
     missing_columns = []
     parts = []
+    prefix = f"In the table '{table}': " if table is not None else None
     for issue in issues:
         if issue.issue_type == "duplicate_rows":
             duplicate_count = int(issue.evidence.get("duplicate_row_count", 0))
@@ -63,15 +66,43 @@ def scan_record(profile: ModelSafeView, issues, round=None) -> DecisionRecord:
             missing_columns.append({"column": column, "missing_pct": pct})
             parts.append(f"column '{column}' is {pct:.1%} missing (above the {_THRESHOLD_TEXT} threshold)")
         else:
-            parts.append(issue.description)
+            text = issue.description
+            parts.append(text[len(prefix):] if prefix and text.startswith(prefix) else text)
+    evidence = {
+        "duplicate_row_count": duplicate_count,
+        "columns_above_missing_threshold": missing_columns,
+        "missing_threshold": MISSINGNESS_THRESHOLD,
+        # M2.3a step 2: counts only, never a level or a cell value
+        "text_issues": [{"column": str(i.affected_columns[0]), "levels_before": i.evidence["levels_before"],
+                         "levels_after": i.evidence["levels_after"],
+                         "cells_changed_trim": i.evidence["cells_changed_trim"]}
+                        for i in issues if i.issue_type == "inconsistent_text"],
+        "numeric_text_columns": [{"column": str(i.affected_columns[0]), "parse_rate": i.evidence["parse_rate"],
+                                  "unparseable_count": i.evidence["unparseable_count"]}
+                                 for i in issues if i.issue_type == "numeric_as_text"],
+    }
+    return evidence, parts
+
+
+def scan_record(profile: ModelSafeView, issues, round=None, carried=None) -> DecisionRecord:
+    """round (M2.4a): the cleaning round this scan belongs to; the key is left out when None. carried (M2.4b): a list
+    of (table name, its profile, its issues) for the linked carried tables checked in this round; the evidence's
+    "carried" list (always present) holds the same integrity numbers per table."""
+    block, parts = _integrity_block(issues)
+    carried_blocks = []
+    for name, _profile, table_issues in carried or []:
+        evidence, table_parts = _integrity_block(table_issues, name)
+        carried_blocks.append({"table": name, **evidence})
+        parts += [f"In {name}: {part}" for part in table_parts]
+    total = len(issues) + sum(len(t) for _, _, t in carried or [])
 
     rows, columns = int(profile.row_count), int(profile.column_count)
-    if issues:
-        fact = f"{len(issues)} issue(s) found: " + "; ".join(parts)
+    if total:
+        fact = f"{total} issue(s) found: " + "; ".join(parts)
     else:
         fact = (f"no exact duplicate rows and no column above the {_THRESHOLD_TEXT} missing threshold "
                 f"({rows} rows, {columns} columns scanned)")
-    found = bool(issues)
+    found = bool(total)
     chosen = "propose_fixes" if found else "skipped"
     candidates = (
         Candidate(option="propose_fixes", eligible=found, reason=fact if found else f"not eligible: {fact}"),
@@ -82,17 +113,7 @@ def scan_record(profile: ModelSafeView, issues, round=None) -> DecisionRecord:
         candidates=candidates, rationale=fact,
         evidence={
             "rows": rows, "columns_scanned": columns,
-            "duplicate_row_count": duplicate_count,
-            "columns_above_missing_threshold": missing_columns,
-            "missing_threshold": MISSINGNESS_THRESHOLD,
-            # M2.3a step 2: counts only, never a level or a cell value
-            "text_issues": [{"column": str(i.affected_columns[0]), "levels_before": i.evidence["levels_before"],
-                             "levels_after": i.evidence["levels_after"],
-                             "cells_changed_trim": i.evidence["cells_changed_trim"]}
-                            for i in issues if i.issue_type == "inconsistent_text"],
-            "numeric_text_columns": [{"column": str(i.affected_columns[0]), "parse_rate": i.evidence["parse_rate"],
-                                      "unparseable_count": i.evidence["unparseable_count"]}
-                                     for i in issues if i.issue_type == "numeric_as_text"],
+            **block,
             # M2.3b: names only
             "joinable_tables": [{"table": i.evidence["right_table"], "left_key": i.evidence["left_key"],
                                  "right_key": i.evidence["right_key"]}
@@ -104,6 +125,8 @@ def scan_record(profile: ModelSafeView, issues, round=None) -> DecisionRecord:
             # M2.4a: names only
             "join_missing_tables": [{"table": i.evidence["right_table"], "columns": list(i.evidence["columns"])}
                                     for i in issues if i.issue_type == "join_missing"],
+            # M2.4b: the linked carried tables checked in this round (counts and names only)
+            "carried": carried_blocks,
             **({"round": int(round)} if round is not None else {}),
         },
     )
@@ -171,6 +194,9 @@ def _fix_record_from_candidates(issue, operation: Operation, issue_index: int, c
             **({k: issue.evidence[k] for k in ("right_table", "left_key", "right_key")}
                if issue.issue_type in _JOIN_TYPES else {}),
             **({"right_table": issue.evidence["right_table"]} if issue.issue_type == "join_missing" else {}),  # M2.4a
+            # M2.4b: a carried table's issue keeps its table and its description (the Left as is line names the table)
+            **({"table": issue.evidence["table"], "description": issue.description}
+               if issue.evidence.get("table") else {}),
         },
     )
 
@@ -259,15 +285,19 @@ def approval_record(operation: Operation, issue, decision: Optional[dict], auto_
 
 # -------------------------------------------------------------------- execution
 
-def execution_record(finished_operation: Operation, approval_record_id: Optional[str]) -> DecisionRecord:
+def execution_record(finished_operation: Operation, approval_record_id: Optional[str],
+                     table: Optional[str] = None) -> DecisionRecord:
+    """table (M2.4b): the carried table the operation ran on (the key only when not None); every record carries the
+    operation's session_id, so a later question can find this session's joins from the analysis table's lineage."""
     op = finished_operation
+    extra = {"session_id": op.session_id, **({"table": table} if table is not None else {})}
     if op.approval_status == ApprovalStatus.FAILED:
         return DecisionRecord(
             decision_point=EXECUTION_POINT, chosen="failed", decided_by="code_rule",
             rationale=f"the operation failed: {op.failure_reason}",
             evidence={
                 "op_type": op.op_type, "params": _plain(op.params), "operation_id": op.id,
-                "failure_reason": op.failure_reason, "approval_record_id": approval_record_id,
+                "failure_reason": op.failure_reason, "approval_record_id": approval_record_id, **extra,
             },
         )
     impact = op.impact
@@ -284,7 +314,7 @@ def execution_record(finished_operation: Operation, approval_record_id: Optional
             "rows_before": rows_before, "rows_after": rows_after,
             "columns_before": cols_before, "columns_after": cols_after,
             "warnings": list(impact.warnings) if impact else [],
-            "approval_record_id": approval_record_id,
+            "approval_record_id": approval_record_id, **extra,
             # M2.3a: the transform's numbers (impute, drop_column); the four earlier operations have none
             **({"details": _plain(impact.details)} if impact and impact.details else {}),
         },

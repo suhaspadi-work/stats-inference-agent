@@ -1,6 +1,6 @@
 from __future__ import annotations
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -233,7 +233,9 @@ def issue_key(issue: CandidateIssue) -> list:
     only, so a join's structural missing values are offered once per question whatever columns are still missing."""
     if issue.issue_type == "join_missing":
         return ["join_missing", [], issue.evidence.get("right_table")]
-    return [issue.issue_type, sorted(str(c) for c in issue.affected_columns), issue.evidence.get("right_table")]
+    # M2.4b: a carried table's issue is keyed by its table (an analysis-table issue has neither and keeps None)
+    return [issue.issue_type, sorted(str(c) for c in issue.affected_columns),
+            issue.evidence.get("table") or issue.evidence.get("right_table")]
 
 
 def _aggregate_joins(join_records) -> list:
@@ -281,6 +283,20 @@ def detect_join_missing(df: pd.DataFrame, join_records) -> list[CandidateIssue]:
                       "sum_columns": [c for c in affected if "sum" in stats and c.endswith("_sum")],
                       "result_table": params.get("result_name")},
         ))
+    return issues
+
+
+def detect_carried_issues(tables: dict, profiles: dict, store: DatasetStore, names) -> list[CandidateIssue]:
+    """
+    M2.4b: the four integrity detectors (exact duplicates, high missingness, inconsistent text, numeric as text) on
+    each named carried table, in the given order; each issue names its table in the description and in evidence
+    ["table"] (counts and names only, as for the analysis table). No join detection runs here.
+    """
+    issues = []
+    for name in names:
+        for issue in detect_all_issues(tables[name], profiles[name], store):
+            issues.append(replace(issue, description=f"In the table '{name}': {issue.description}",
+                                  evidence={**issue.evidence, "table": name}))
     return issues
 
 
